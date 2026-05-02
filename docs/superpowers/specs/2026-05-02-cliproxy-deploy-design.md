@@ -66,6 +66,13 @@ Internet
 
 CLIProxyAPI must not publish host port `8317`. It should only be reachable through the internal Docker network with `expose: 8317`.
 
+Compose service names should be stable because they are used by Traefik and by future internal collectors:
+
+```text
+traefik
+cliproxyapi
+```
+
 ## Components
 
 ### Traefik
@@ -120,6 +127,13 @@ The compose service should use the upstream image:
 eceasy/cli-proxy-api:latest
 ```
 
+It should keep the upstream deployment-mode environment variable available with the local/default empty value:
+
+```yaml
+environment:
+  DEPLOY: ${DEPLOY:-}
+```
+
 ## Routing
 
 ### API Router
@@ -141,7 +155,18 @@ The implementation should either:
 - route those paths through a higher-priority BasicAuth-protected management router, or
 - exclude them from the unauthenticated API router.
 
-The first implementation should use the higher-priority BasicAuth-protected router because it is simpler to validate with `curl`.
+The first implementation should use the higher-priority BasicAuth-protected router because it is simpler to validate with `curl`. Do not rely on Traefik's default rule-length priority for this overlap; set explicit router priorities:
+
+```text
+api-management router priority: 100
+api router priority: 10
+```
+
+The protected API-host management router should use this rule shape:
+
+```text
+Host(`${API_HOST}`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))
+```
 
 ### Admin Router
 
@@ -186,6 +211,7 @@ ACME_EMAIL=ymviv@qq.com
 API_HOST=api.cliproxy.x2r.store
 ADMIN_HOST=admin.cliproxy.x2r.store
 TRAEFIK_BASIC_AUTH_USERS=admin:replace-with-escaped-htpasswd-hash
+DEPLOY=
 ```
 
 Committed `config.yaml.template` should contain placeholders:
@@ -201,6 +227,8 @@ remote-management:
 ```
 
 The local `config.yaml` should be copied from `config.yaml.template` and edited on the server. This avoids relying on environment-variable expansion inside CLIProxyAPI config files.
+
+CLIProxyAPI hashes a plaintext `remote-management.secret-key` on startup and writes the hashed value back to `config.yaml`. The bind-mounted `config.yaml` must remain writable by the container.
 
 Password and secret generation should be documented:
 
@@ -232,6 +260,8 @@ The Redis usage queue is CLIProxyAPI's built-in Redis-compatible RESP queue on t
 ```bash
 redis-cli -h cliproxyapi -p 8317 -a "$MANAGEMENT_SECRET" --raw LPOP queue
 ```
+
+That command is intended to run from a container on the same Docker network, not from the public internet.
 
 The queue is not long-term storage. Any billing, analytics, or alerting system should consume it into a real datastore later.
 
@@ -316,10 +346,10 @@ Management paths should also be tested on the API hostname:
 ```bash
 curl -I https://api.cliproxy.x2r.store/management
 curl -I https://api.cliproxy.x2r.store/management.html
-curl -I https://api.cliproxy.x2r.store/v0/management/usage
+curl -I https://api.cliproxy.x2r.store/v0/management/api-key-usage
 ```
 
-Both requests should require BasicAuth or otherwise not pass through the unauthenticated API router.
+All requests should require BasicAuth or otherwise not pass through the unauthenticated API router.
 
 ## Deferred Work
 
