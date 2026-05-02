@@ -48,7 +48,7 @@ usage-statistics-enabled: true
 redis-usage-queue-retention-seconds: 300
 
 # Keep proxy/routing defaults explicit so operators can see this deployment does
-# not add an outbound proxy or force model prefixes.
+# not add an outbound proxy, force model prefixes, or pass client headers through.
 proxy-url: ""
 force-model-prefix: false
 passthrough-headers: false
