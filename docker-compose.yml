@@ -11,7 +11,7 @@ services:
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
       - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
-      - "--certificatesresolvers.le.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.le.acme.email=${ACME_EMAIL:?set ACME_EMAIL}"
       - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
       - "--certificatesresolvers.le.acme.httpchallenge=true"
       - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
@@ -21,6 +21,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
+      # Docker socket access lets Traefik inspect containers and should be
+      # treated as host-level Docker API access even with a read-only mount.
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./letsencrypt:/letsencrypt"
     networks:
@@ -49,7 +51,7 @@ services:
       - "traefik.http.services.cliproxyapi.loadbalancer.server.port=8317"
 
       # Public API route. Management paths are handled by the higher-priority protected route below.
-      - "traefik.http.routers.cliproxyapi-api.rule=Host(`${API_HOST}`)"
+      - "traefik.http.routers.cliproxyapi-api.rule=Host(`${API_HOST:?set API_HOST}`)"
       - "traefik.http.routers.cliproxyapi-api.priority=10"
       - "traefik.http.routers.cliproxyapi-api.entrypoints=websecure"
       - "traefik.http.routers.cliproxyapi-api.tls=true"
@@ -57,7 +59,7 @@ services:
       - "traefik.http.routers.cliproxyapi-api.service=cliproxyapi"
 
       # Protect management paths even when reached through the API hostname.
-      - "traefik.http.routers.cliproxyapi-api-management.rule=Host(`${API_HOST}`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"
+      - "traefik.http.routers.cliproxyapi-api-management.rule=Host(`${API_HOST:?set API_HOST}`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"
       - "traefik.http.routers.cliproxyapi-api-management.priority=100"
       - "traefik.http.routers.cliproxyapi-api-management.entrypoints=websecure"
       - "traefik.http.routers.cliproxyapi-api-management.tls=true"
@@ -66,7 +68,7 @@ services:
       - "traefik.http.routers.cliproxyapi-api-management.service=cliproxyapi"
 
       # Admin hostname.
-      - "traefik.http.routers.cliproxyapi-admin.rule=Host(`${ADMIN_HOST}`)"
+      - "traefik.http.routers.cliproxyapi-admin.rule=Host(`${ADMIN_HOST:?set ADMIN_HOST}`)"
       - "traefik.http.routers.cliproxyapi-admin.entrypoints=websecure"
       - "traefik.http.routers.cliproxyapi-admin.tls=true"
       - "traefik.http.routers.cliproxyapi-admin.tls.certresolver=le"
@@ -74,7 +76,7 @@ services:
       - "traefik.http.routers.cliproxyapi-admin.service=cliproxyapi"
 
       # BasicAuth for admin hostname and management paths on API hostname.
-      - "traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_BASIC_AUTH_USERS}"
+      - "traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_BASIC_AUTH_USERS:?set TRAEFIK_BASIC_AUTH_USERS}"
 
 networks:
   proxy:
