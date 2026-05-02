@@ -1,2 +1,16 @@
 # Local git worktrees
 .worktrees/
+
+# Local secrets and generated runtime config
+.env
+config.yaml
+
+# CLIProxyAPI runtime state
+auths/
+logs/
+
+# Traefik ACME certificates
+letsencrypt/
+
+# Local editor and OS files
+.DS_Store
