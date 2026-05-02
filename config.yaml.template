@@ -1,0 +1,54 @@
+# Server host/interface to bind to. Empty binds all interfaces inside the container.
+host: ""
+port: 8317
+
+# TLS is terminated by Traefik, so CLIProxyAPI listens on internal HTTP.
+tls:
+  enable: false
+  cert: ""
+  key: ""
+
+# Management API and bundled web control panel.
+# CLIProxyAPI will hash a plaintext secret-key on startup and write it back to config.yaml.
+remote-management:
+  allow-remote: true
+  secret-key: "replace-with-management-secret"
+  disable-control-panel: false
+  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+
+# Mounted to ./auths by docker-compose.yml.
+auth-dir: "~/.cli-proxy-api"
+
+# Client API keys accepted by CLIProxyAPI.
+api-keys:
+  - "replace-with-client-api-key"
+
+debug: false
+
+# Keep pprof private and disabled.
+pprof:
+  enable: false
+  addr: "127.0.0.1:8316"
+
+commercial-mode: false
+
+# Request logs are intentionally enabled for this deployment.
+# Treat ./logs as sensitive because request-log captures request/response data.
+logging-to-file: true
+logs-max-total-size-mb: 2048
+error-logs-max-files: 10
+request-log: true
+
+# Enables in-memory usage stats and the built-in Redis-compatible usage queue.
+usage-statistics-enabled: true
+redis-usage-queue-retention-seconds: 300
+
+proxy-url: ""
+force-model-prefix: false
+passthrough-headers: false
+
+request-retry: 3
+max-retry-credentials: 0
+max-retry-interval: 30
+
+ws-auth: false
