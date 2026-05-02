@@ -1,5 +1,3 @@
-x-required-env: "${ACME_EMAIL:?required variable ACME_EMAIL is missing a value}"
-
 services:
   traefik:
     image: traefik:v3.6
