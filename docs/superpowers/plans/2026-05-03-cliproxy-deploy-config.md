@@ -64,6 +64,9 @@ letsencrypt/
 Create `.gitignore` with exactly:
 
 ```gitignore
+# Local git worktrees
+.worktrees/
+
 # Local secrets and generated runtime config
 .env
 config.yaml
@@ -107,12 +110,13 @@ DEPLOY=
 Run:
 
 ```bash
-git check-ignore .env config.yaml auths/ logs/ letsencrypt/
+git check-ignore .worktrees/ .env config.yaml auths/ logs/ letsencrypt/
 ```
 
 Expected: each path is printed once:
 
 ```text
+.worktrees/
 .env
 config.yaml
 auths/
@@ -637,12 +641,13 @@ Expected: no output, exit `0`.
 Run:
 
 ```bash
-git check-ignore .env config.yaml auths/ logs/ letsencrypt/
+git check-ignore .worktrees/ .env config.yaml auths/ logs/ letsencrypt/
 ```
 
 Expected:
 
 ```text
+.worktrees/
 .env
 config.yaml
 auths/
