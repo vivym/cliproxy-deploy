@@ -13,6 +13,8 @@ admin.cliproxy.x2r.store
 
 Open ports `80` and `443` on the server firewall. Do not expose CLIProxyAPI port `8317` to the public internet.
 
+Traefik uses the Docker socket to discover labelled containers, so Traefik and anyone able to start or label containers on this Docker daemon are inside the deployment trust boundary.
+
 ## Files
 
 Committed templates:
