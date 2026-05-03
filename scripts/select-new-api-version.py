@@ -61,7 +61,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--repo",
         default="https://github.com/QuantumNous/new-api.git",
-        help="Git repository to query when stdin is empty.",
+        help="Git repository to query when stdin is a TTY.",
     )
     args = parser.parse_args([] if argv is None else argv)
 
