@@ -50,6 +50,13 @@ class ApiSiteTemplateTests(unittest.TestCase):
         self.assertIn("http://localhost:8317", text)
         self.assertIn("cliproxyapi:\n        condition: service_healthy", text)
 
+    def test_cliproxy_public_override_is_template_only(self):
+        text = self.read("docker-compose.cliproxy-public.override.yml.template")
+        self.assertIn("TEMPORARY MAINTENANCE ONLY", text)
+        self.assertIn("cliproxyapi:", text)
+        self.assertIn("traefik.enable=true", text)
+        self.assertNotIn("traefik.http.routers.cliproxyapi.rule", text)
+
 
 if __name__ == "__main__":
     unittest.main()
