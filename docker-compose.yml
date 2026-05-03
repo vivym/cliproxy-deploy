@@ -67,15 +67,26 @@ services:
       - "traefik.http.routers.cliproxyapi-api-management.middlewares=admin-auth"
       - "traefik.http.routers.cliproxyapi-api-management.service=cliproxyapi"
 
-      # Admin hostname.
-      - "traefik.http.routers.cliproxyapi-admin.rule=Host(`${ADMIN_HOST:?set ADMIN_HOST}`)"
-      - "traefik.http.routers.cliproxyapi-admin.entrypoints=websecure"
-      - "traefik.http.routers.cliproxyapi-admin.tls=true"
-      - "traefik.http.routers.cliproxyapi-admin.tls.certresolver=le"
-      - "traefik.http.routers.cliproxyapi-admin.middlewares=admin-auth"
-      - "traefik.http.routers.cliproxyapi-admin.service=cliproxyapi"
+      # Admin UI shell. Do not attach BasicAuth to /v0/management on the admin
+      # hostname because the Web UI sends the management key as Authorization:
+      # Bearer <key>, which conflicts with HTTP BasicAuth's Authorization header.
+      - "traefik.http.routers.cliproxyapi-admin-ui.rule=Host(`${ADMIN_HOST:?set ADMIN_HOST}`) && !PathPrefix(`/v0/management`)"
+      - "traefik.http.routers.cliproxyapi-admin-ui.priority=50"
+      - "traefik.http.routers.cliproxyapi-admin-ui.entrypoints=websecure"
+      - "traefik.http.routers.cliproxyapi-admin-ui.tls=true"
+      - "traefik.http.routers.cliproxyapi-admin-ui.tls.certresolver=le"
+      - "traefik.http.routers.cliproxyapi-admin-ui.middlewares=admin-auth"
+      - "traefik.http.routers.cliproxyapi-admin-ui.service=cliproxyapi"
 
-      # BasicAuth for admin hostname and management paths on API hostname.
+      # Admin Management API. Auth is enforced by CLIProxyAPI remote-management.secret-key.
+      - "traefik.http.routers.cliproxyapi-admin-api.rule=Host(`${ADMIN_HOST:?set ADMIN_HOST}`) && PathPrefix(`/v0/management`)"
+      - "traefik.http.routers.cliproxyapi-admin-api.priority=100"
+      - "traefik.http.routers.cliproxyapi-admin-api.entrypoints=websecure"
+      - "traefik.http.routers.cliproxyapi-admin-api.tls=true"
+      - "traefik.http.routers.cliproxyapi-admin-api.tls.certresolver=le"
+      - "traefik.http.routers.cliproxyapi-admin-api.service=cliproxyapi"
+
+      # BasicAuth for admin UI and management paths on API hostname.
       - "traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_BASIC_AUTH_USERS:?set TRAEFIK_BASIC_AUTH_USERS}"
 
 networks:

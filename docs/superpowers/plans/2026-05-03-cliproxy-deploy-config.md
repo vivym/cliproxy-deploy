@@ -345,15 +345,26 @@ services:
       - "traefik.http.routers.cliproxyapi-api-management.middlewares=admin-auth"
       - "traefik.http.routers.cliproxyapi-api-management.service=cliproxyapi"
 
-      # Admin hostname.
-      - "traefik.http.routers.cliproxyapi-admin.rule=Host(`${ADMIN_HOST:?set ADMIN_HOST}`)"
-      - "traefik.http.routers.cliproxyapi-admin.entrypoints=websecure"
-      - "traefik.http.routers.cliproxyapi-admin.tls=true"
-      - "traefik.http.routers.cliproxyapi-admin.tls.certresolver=le"
-      - "traefik.http.routers.cliproxyapi-admin.middlewares=admin-auth"
-      - "traefik.http.routers.cliproxyapi-admin.service=cliproxyapi"
+      # Admin UI shell. Do not attach BasicAuth to /v0/management on the admin
+      # hostname because the Web UI sends the management key as Authorization:
+      # Bearer <key>, which conflicts with HTTP BasicAuth's Authorization header.
+      - "traefik.http.routers.cliproxyapi-admin-ui.rule=Host(`${ADMIN_HOST:?set ADMIN_HOST}`) && !PathPrefix(`/v0/management`)"
+      - "traefik.http.routers.cliproxyapi-admin-ui.priority=50"
+      - "traefik.http.routers.cliproxyapi-admin-ui.entrypoints=websecure"
+      - "traefik.http.routers.cliproxyapi-admin-ui.tls=true"
+      - "traefik.http.routers.cliproxyapi-admin-ui.tls.certresolver=le"
+      - "traefik.http.routers.cliproxyapi-admin-ui.middlewares=admin-auth"
+      - "traefik.http.routers.cliproxyapi-admin-ui.service=cliproxyapi"
 
-      # BasicAuth for admin hostname and management paths on API hostname.
+      # Admin Management API. Auth is enforced by CLIProxyAPI remote-management.secret-key.
+      - "traefik.http.routers.cliproxyapi-admin-api.rule=Host(`${ADMIN_HOST:?set ADMIN_HOST}`) && PathPrefix(`/v0/management`)"
+      - "traefik.http.routers.cliproxyapi-admin-api.priority=100"
+      - "traefik.http.routers.cliproxyapi-admin-api.entrypoints=websecure"
+      - "traefik.http.routers.cliproxyapi-admin-api.tls=true"
+      - "traefik.http.routers.cliproxyapi-admin-api.tls.certresolver=le"
+      - "traefik.http.routers.cliproxyapi-admin-api.service=cliproxyapi"
+
+      # BasicAuth for admin UI and management paths on API hostname.
       - "traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_BASIC_AUTH_USERS:?set TRAEFIK_BASIC_AUTH_USERS}"
 
 networks:
@@ -530,7 +541,11 @@ With valid BasicAuth credentials, the management page should load:
 curl -I -u 'admin:your-admin-password' https://cliproxy-admin.x2r.store/management.html
 ```
 
-Management API actions still require the CLIProxyAPI management secret.
+Use `https://cliproxy-admin.x2r.store` as the Web UI API address. Management API actions on the admin hostname require the CLIProxyAPI management secret:
+
+```bash
+curl -H "Authorization: Bearer $MANAGEMENT_SECRET" https://cliproxy-admin.x2r.store/v0/management/config
+```
 
 ## Logs
 
@@ -714,6 +729,9 @@ jq -e '.services.cliproxyapi.ports == null and (.services.cliproxyapi.expose == 
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.priority"] == "100"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api.priority"] == "10"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.rule"] == "Host(`cliproxy.x2r.store`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-admin-ui.rule"] == "Host(`cliproxy-admin.x2r.store`) && !PathPrefix(`/v0/management`)"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-admin-api.rule"] == "Host(`cliproxy-admin.x2r.store`) && PathPrefix(`/v0/management`)"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-admin-api.middlewares"] == null' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.middlewares.admin-auth.basicauth.users"] | contains("$$2y$$05$$")' /tmp/cliproxy-compose.json
 ```
 
@@ -784,6 +802,7 @@ docker compose ps
 - Do not commit `.env`, `config.yaml`, `auths/`, `logs/`, or `letsencrypt/`.
 - Do not add `ports: "8317:8317"` to CLIProxyAPI.
 - Do not add a standalone Redis container.
-- Do not remove BasicAuth from `cliproxy-admin.x2r.store`.
+- Do not remove BasicAuth from the admin UI shell.
+- Do not attach BasicAuth to `cliproxy-admin.x2r.store/v0/management`; the Web UI uses `Authorization: Bearer <management-key>`.
 - Do not leave API-host management paths protected only by CLIProxyAPI's management secret; Traefik BasicAuth must also apply.
 - Do not make `config.yaml` read-only; CLIProxyAPI may rewrite the management secret as a hash.

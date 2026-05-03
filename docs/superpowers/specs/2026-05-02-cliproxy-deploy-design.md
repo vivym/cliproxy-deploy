@@ -61,6 +61,10 @@ Internet
 
     -> cliproxy-admin.x2r.store
       -> Traefik BasicAuth
+      -> management UI shell
+
+    -> cliproxy-admin.x2r.store/v0/management
+      -> CLIProxyAPI management secret
       -> CLIProxyAPI :8317 on Docker network
 ```
 
@@ -170,7 +174,7 @@ Host(`${API_HOST}`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`
 
 ### Admin Router
 
-`cliproxy-admin.x2r.store` routes to the same CLIProxyAPI service but attaches a Traefik BasicAuth middleware.
+`cliproxy-admin.x2r.store` routes to the same CLIProxyAPI service. The UI shell attaches a Traefik BasicAuth middleware, but `/v0/management` on this hostname must not use Traefik BasicAuth because the Web UI sends the CLIProxyAPI management key as `Authorization: Bearer <key>`.
 
 This hostname is intended for:
 
@@ -182,15 +186,15 @@ This hostname is intended for:
 
 No IP allowlist is included in the first version.
 
-The admin router may be a catch-all for `cliproxy-admin.x2r.store`, but all management paths must also be protected when reached through `cliproxy.x2r.store`.
+The admin UI router should protect non-`/v0/management` admin paths with BasicAuth. The admin `/v0/management` router should rely on `remote-management.secret-key`. All management paths must still be protected when reached through `cliproxy.x2r.store`.
 
 ## Security
 
-The admin surface has two protection layers:
+The admin UI and management API have separate protection layers:
 
 ```text
-Traefik BasicAuth
-+ CLIProxyAPI remote-management.secret-key
+management UI shell -> Traefik BasicAuth
+management API      -> CLIProxyAPI remote-management.secret-key
 ```
 
 CLIProxyAPI management config:
@@ -317,7 +321,7 @@ If the admin page is reachable through `cliproxy.x2r.store` without BasicAuth, t
 
 If admin returns `401`, BasicAuth is working. Retry with credentials.
 
-If admin loads but management APIs fail, verify `remote-management.secret-key` in `config.yaml`.
+If admin loads but management APIs fail, verify that the Web UI API address is `https://cliproxy-admin.x2r.store`, not `https://cliproxy.x2r.store`, then verify `remote-management.secret-key` in `config.yaml`.
 
 If API requests fail, verify `api-keys`, upstream auth files under `auths/`, and CLIProxyAPI logs.
 
@@ -341,7 +345,7 @@ curl -I https://cliproxy-admin.x2r.store/management.html
 
 Admin BasicAuth should be verified with both unauthenticated and authenticated requests.
 
-Management paths should also be tested on the API hostname:
+Management paths should be tested on both hostnames. On the API hostname they should still require Traefik BasicAuth:
 
 ```bash
 curl -I https://cliproxy.x2r.store/management
@@ -349,7 +353,11 @@ curl -I https://cliproxy.x2r.store/management.html
 curl -I https://cliproxy.x2r.store/v0/management/api-key-usage
 ```
 
-All requests should require BasicAuth or otherwise not pass through the unauthenticated API router.
+On the admin hostname, management API calls should use the CLIProxyAPI management secret:
+
+```bash
+curl -H "Authorization: Bearer $MANAGEMENT_SECRET" https://cliproxy-admin.x2r.store/v0/management/config
+```
 
 ## Deferred Work
 

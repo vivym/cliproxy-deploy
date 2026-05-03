@@ -121,7 +121,21 @@ Admin hostname without BasicAuth should return `401`:
 curl -I https://cliproxy-admin.x2r.store/management.html
 ```
 
-Management paths on the API hostname must also require BasicAuth or otherwise not pass through the unauthenticated API router:
+Open the management UI through the admin hostname:
+
+```text
+https://cliproxy-admin.x2r.store/management.html
+```
+
+When the UI asks for the API address, use:
+
+```text
+https://cliproxy-admin.x2r.store
+```
+
+Do not use `https://cliproxy.x2r.store` as the management UI API address. The API hostname keeps management paths behind Traefik BasicAuth as a guardrail, and the Web UI sends the CLIProxyAPI management key through the `Authorization: Bearer ...` header. HTTP BasicAuth also uses `Authorization`, so placing BasicAuth in front of the admin `/v0/management` API would conflict with Web UI login requests.
+
+Management paths on the API hostname must still require BasicAuth or otherwise not pass through the unauthenticated API router:
 
 ```bash
 curl -I https://cliproxy.x2r.store/management
@@ -135,7 +149,11 @@ With valid BasicAuth credentials, the management page should load:
 curl -I -u 'admin:your-admin-password' https://cliproxy-admin.x2r.store/management.html
 ```
 
-Management API actions still require the CLIProxyAPI management secret.
+Management API actions on the admin hostname require the CLIProxyAPI management secret:
+
+```bash
+curl -H "Authorization: Bearer $MANAGEMENT_SECRET" https://cliproxy-admin.x2r.store/v0/management/config
+```
 
 ## Logs
 
@@ -191,6 +209,8 @@ If HTTPS fails, check DNS, firewall ports `80`/`443`, Traefik logs, and `letsenc
 
 If admin access returns `401`, BasicAuth is active. Retry with credentials.
 
-If management API calls fail after BasicAuth succeeds, verify `remote-management.secret-key` in `config.yaml`.
+If the management UI keeps calling `https://cliproxy.x2r.store/v0/management/...`, clear browser site data or localStorage for the management UI and reconnect with API address `https://cliproxy-admin.x2r.store`.
+
+If management API calls fail after BasicAuth succeeds, verify `remote-management.secret-key` in `config.yaml`. Repeated failed management-key attempts may trigger a temporary remote IP block; wait for it to expire or restart CLIProxyAPI before retesting.
 
 If API requests fail, verify `api-keys`, auth files under `auths/`, and CLIProxyAPI logs.
