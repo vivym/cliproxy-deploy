@@ -124,6 +124,9 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
             validate_api_site_compose.image_is_pinned("calciumion/new-api:v0.13.2@sha256:abc")
         )
 
+    def test_accepts_single_character_non_latest_tag(self):
+        self.assertTrue(validate_api_site_compose.image_is_pinned("repo:1"))
+
     def test_rejects_missing_new_api_sql_dsn(self):
         compose = valid_compose()
         del compose["services"]["new-api"]["environment"]["SQL_DSN"]

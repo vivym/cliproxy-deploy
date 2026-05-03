@@ -6,7 +6,7 @@ import sys
 from typing import Any, Dict, List, Set
 
 
-PINNED_TAG_RE = re.compile(r":(?!latest$)[A-Za-z0-9][A-Za-z0-9_.-]+$")
+PINNED_TAG_RE = re.compile(r":(?!latest$)[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 REQUIRED_SERVICES = {
     "traefik",
