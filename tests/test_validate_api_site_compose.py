@@ -312,6 +312,25 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         self.assertIn("ERROR: ", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
 
+    def test_main_reports_non_object_json_without_traceback(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as compose_file:
+            json.dump([], compose_file)
+            compose_file.flush()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(
+                validate_api_site_compose.sys,
+                "argv",
+                ["validate-api-site-compose.py", compose_file.name],
+            ), mock.patch.object(validate_api_site_compose.sys, "stdout", stdout), \
+                    mock.patch.object(validate_api_site_compose.sys, "stderr", stderr):
+                result = validate_api_site_compose.main()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("ERROR: compose JSON must be an object", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

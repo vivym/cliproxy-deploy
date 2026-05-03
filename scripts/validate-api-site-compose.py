@@ -222,6 +222,10 @@ def main() -> int:
         print("ERROR: {}".format(error), file=sys.stderr)
         return 1
 
+    if not isinstance(compose, dict):
+        print("ERROR: compose JSON must be an object", file=sys.stderr)
+        return 1
+
     errors = validate(compose, args.host)
     if errors:
         for error in errors:
