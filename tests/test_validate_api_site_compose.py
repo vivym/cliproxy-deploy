@@ -223,6 +223,12 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assert_has_error(compose, "new-api image must be pinned")
 
+    def test_rejects_missing_required_service_image(self):
+        compose = valid_compose()
+        del compose["services"]["new-api"]["image"]
+
+        self.assert_has_error(compose, "new-api image must be pinned")
+
     def test_rejects_new_api_latest_image_with_digest(self):
         compose = valid_compose()
         compose["services"]["new-api"]["image"] = "calciumion/new-api:latest@sha256:abc"
@@ -296,6 +302,14 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
                     compose,
                     "new-api Traefik label {} must be {}".format(label, expected_value),
                 )
+
+    def test_rejects_extra_new_api_public_router(self):
+        compose = valid_compose()
+        compose["services"]["new-api"]["labels"][
+            "traefik.http.routers.new-api-alt.rule"
+        ] = "Host(`other.example.com`)"
+
+        self.assert_has_error(compose, "new-api must not define extra Traefik router labels")
 
     def test_rejects_new_api_host_ports(self):
         compose = valid_compose()

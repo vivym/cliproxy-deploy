@@ -16,6 +16,13 @@ REQUIRED_SERVICES = {
     "cliproxyapi",
     "cpa-usage-keeper",
 }
+REQUIRED_IMAGE_SERVICES = {
+    "new-api",
+    "postgres",
+    "redis",
+    "cliproxyapi",
+    "cpa-usage-keeper",
+}
 REQUIRED_NETWORKS = {"proxy", "backend"}
 REQUIRED_VOLUMES = {
     "postgres-data",
@@ -193,6 +200,18 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
     expected_rule = "Host(`{}`)".format(expected_host)
     if new_api_labels.get("traefik.http.routers.new-api.rule") != expected_rule:
         errors.append("new-api Traefik router must route {}".format(expected_rule))
+    if any(
+        label.startswith("traefik.http.routers.")
+        and not label.startswith("traefik.http.routers.new-api.")
+        for label in new_api_labels
+    ):
+        errors.append("new-api must not define extra Traefik router labels")
+    if any(
+        label.startswith("traefik.http.services.")
+        and not label.startswith("traefik.http.services.new-api.")
+        for label in new_api_labels
+    ):
+        errors.append("new-api must not define extra Traefik service labels")
     for label, expected_value in sorted(REQUIRED_NEW_API_TRAEFIK_LABELS.items()):
         actual_value = new_api_labels.get(label)
         if label == "traefik.http.routers.new-api.tls":
@@ -242,6 +261,11 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
     for service_name, volume_name in sorted(REQUIRED_SERVICE_VOLUMES.items()):
         if volume_name not in service_mounts_for(_service(compose, service_name)):
             errors.append("{} must mount required volume {}".format(service_name, volume_name))
+
+    for service_name in sorted(REQUIRED_IMAGE_SERVICES):
+        service = _service(compose, service_name)
+        if not service.get("image"):
+            errors.append("{} image must be pinned to a non-latest tag".format(service_name))
 
     for service_name, service in sorted(services.items()):
         if not isinstance(service, dict):
