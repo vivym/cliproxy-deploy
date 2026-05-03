@@ -69,7 +69,8 @@ def has_host_ports(service: Dict[str, Any]) -> bool:
 
 
 def image_is_pinned(image: str) -> bool:
-    return bool(PINNED_TAG_RE.search(image))
+    image_without_digest = image.split("@", 1)[0]
+    return bool(PINNED_TAG_RE.search(image_without_digest))
 
 
 def environment_for(service: Dict[str, Any]) -> Dict[str, str]:
@@ -79,9 +80,13 @@ def environment_for(service: Dict[str, Any]) -> Dict[str, str]:
     if isinstance(environment, list):
         result = {}
         for item in environment:
-            if isinstance(item, str) and "=" in item:
+            if not isinstance(item, str):
+                continue
+            if "=" in item:
                 key, value = item.split("=", 1)
-                result[key] = value
+            else:
+                key, value = item, ""
+            result[key] = value
         return result
     return {}
 
@@ -169,6 +174,10 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
         labels = labels_for(service)
         if service_name == "cliproxyapi" and labels.get("traefik.enable", "").lower() == "true":
             errors.append("cliproxyapi must not enable Traefik")
+        if service_name == "cliproxyapi" and any(
+            label.startswith("traefik.http.routers.") for label in labels
+        ):
+            errors.append("cliproxyapi must not define Traefik router labels")
         if has_host_ports(service):
             errors.append("{} must not publish host ports".format(service_name))
         if networks_for(service) != {"backend"}:
@@ -182,7 +191,7 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
         if not isinstance(service, dict):
             continue
         image = str(service.get("image", ""))
-        if image.endswith(":latest"):
+        if not image_is_pinned(image) and ":latest" in image.split("@", 1)[0]:
             errors.append("{} image must not use :latest".format(service_name))
 
     return errors

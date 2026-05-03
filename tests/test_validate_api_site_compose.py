@@ -87,6 +87,14 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assert_has_error(compose, "cliproxyapi must not enable Traefik")
 
+    def test_rejects_cliproxyapi_traefik_router_label_without_enable(self):
+        compose = valid_compose()
+        compose["services"]["cliproxyapi"]["labels"] = {
+            "traefik.http.routers.cliproxyapi.rule": "Host(`cliproxy.x2r.store`)",
+        }
+
+        self.assert_has_error(compose, "cliproxyapi must not define Traefik router labels")
+
     def test_rejects_traefik_joining_backend(self):
         compose = valid_compose()
         compose["services"]["traefik"]["networks"] = ["proxy", "backend"]
@@ -104,6 +112,17 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         compose["services"]["new-api"]["image"] = "calciumion/new-api:latest"
 
         self.assert_has_error(compose, "new-api image must be pinned")
+
+    def test_rejects_new_api_latest_image_with_digest(self):
+        compose = valid_compose()
+        compose["services"]["new-api"]["image"] = "calciumion/new-api:latest@sha256:abc"
+
+        self.assert_has_error(compose, "new-api image must be pinned")
+
+    def test_accepts_non_latest_pinned_image_with_digest(self):
+        self.assertTrue(
+            validate_api_site_compose.image_is_pinned("calciumion/new-api:v0.13.2@sha256:abc")
+        )
 
     def test_rejects_missing_new_api_sql_dsn(self):
         compose = valid_compose()
@@ -142,6 +161,12 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         ]
 
         self.assertEqual(validate_api_site_compose.validate(compose, EXPECTED_HOST), [])
+
+    def test_environment_list_entries_without_value_are_included(self):
+        environment = validate_api_site_compose.environment_for({"environment": ["SQL_DSN"]})
+
+        self.assertIn("SQL_DSN", environment)
+        self.assertEqual(environment["SQL_DSN"], "")
 
 
 if __name__ == "__main__":
