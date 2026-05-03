@@ -52,6 +52,12 @@ New API
 
 The existing public `cliproxy.x2r.store` route should be removed from the production API-site path or retained only as a temporary migration/testing endpoint. It must not become a user-facing commercial API endpoint.
 
+Implementation must remove CLIProxyAPI from Traefik public routing before launch. The current repository routes `cliproxyapi` publicly through Traefik labels; the API-site migration must remove those labels or set `traefik.enable=false` on the `cliproxyapi` service. Only the `new-api` service may have a public Traefik router for `ai.x2r.store`.
+
+There is no v1 user migration from the existing CLIProxyAPI public API key setup. Existing CLIProxyAPI client keys are treated as operator/testing keys, not API-site customer keys. If `cliproxy.x2r.store` is kept temporarily, it is a private migration/test endpoint with explicit operator-only access and a dated decommission plan.
+
+Any temporary public CLIProxyAPI route must live in a separate Compose override file, not in the production base Compose file. The production base Compose file must keep CLIProxyAPI private.
+
 Compose services:
 
 ```text
@@ -67,6 +73,23 @@ Postgres stores New API's durable business data. Redis supports New API runtime/
 
 The v1 default audit service is CPA Usage Keeper. A custom collector is only a fallback if CPA Usage Keeper cannot consume the required CLIProxyAPI usage queue fields or cannot be deployed cleanly in the Compose environment.
 
+Network layout:
+
+```text
+proxy network:
+  traefik
+  new-api
+
+backend network:
+  new-api
+  postgres
+  redis
+  cliproxyapi
+  cpa-usage-keeper
+```
+
+Traefik must not join the backend network. Postgres, Redis, CLIProxyAPI, and CPA Usage Keeper must not publish host ports.
+
 ## Version Strategy
 
 New API should use the latest stable release available at implementation time.
@@ -74,16 +97,19 @@ New API should use the latest stable release available at implementation time.
 Current checked baseline during design:
 
 ```text
-New API v0.12.14
+New API v0.13.2
 ```
 
 Rules:
 
 - Do not use alpha, beta, nightly, or development builds for production.
+- Define "latest stable" as the highest non-prerelease semver tag, excluding `alpha`, `beta`, `rc`, nightly, and development tags. For example, `v1.0.0-rc.2` is not stable.
+- Do not trust GitHub's "Latest" release marker or `/releases/latest` blindly, because it can point at a release candidate. Inspect tags and choose the highest non-prerelease semver tag.
 - Do not leave the production Compose file on an unconstrained `latest` tag.
 - Re-check the current stable release tag immediately before implementation.
 - Pin the image to a specific version tag after validation.
 - Validate `/v1/responses`, redeem codes, quota deduction, channel routing, and fallback behavior before production upgrade.
+- Audit New API top-up/payment settings after every version change and keep online payment providers disabled for v1.
 
 ## User And Credit Model
 
@@ -137,6 +163,29 @@ Initial group policy:
 
 Initial model rates must be conservative. Any model backed by official API fallback must be priced at or above the official provider cost plus an operational margin. CLIProxyAPI-backed models may be priced lower, but each model must have a documented rate before it is visible to `standard` users.
 
+Initial model/rate matrix:
+
+| Model alias shown in New API | Primary channel | Upstream model ID | Enabled groups | Endpoint requirement | Initial billing rule |
+| --- | --- | --- | --- | --- | --- |
+| `codex-cli` | CLIProxyAPI | `gpt-5.2-codex` or the CLIProxyAPI Codex model name validated at implementation | `standard`, `trusted`, `admin-test` | `/v1/responses`, streaming, tools | CLIProxyAPI-backed rate, no official fallback for `standard` |
+| `gpt-general-cli` | CLIProxyAPI | `gpt-5.2` or the CLIProxyAPI GPT-compatible model name validated at implementation | `trusted`, `admin-test` at launch; promote to `standard` only after cost review | `/v1/responses` and `/v1/chat/completions` | CLIProxyAPI-backed rate, no official fallback for `standard` |
+| `openai-codex-official-test` | OpenAI official API | `gpt-5.2-codex` | `admin-test` only | `/v1/responses`, streaming, tools | Official provider cost plus margin; validation only |
+| `openai-general-official-test` | OpenAI official API | `gpt-5.2` | `admin-test` only | `/v1/responses`, streaming, tools | Official provider cost plus margin; validation only |
+
+Before any model is visible to `standard` users, implementation must record the exact New API model ratio, completion/output ratio if supported, group ratio, cache-token handling if supported, and whether failed upstream attempts are charged. If New API cannot express input/output/cache/reasoning rates separately for a model, the launch plan must document the effective total-token billing rule and the margin used to cover that limitation.
+
+Billing acceptance tests must capture user balance before and after each representative request and compare the observed quota delta to the expected New API formula. The launch plan must include at least these cases:
+
+| Case | Endpoint | Required usage shape | Expected result |
+| --- | --- | --- | --- |
+| Responses non-stream | `/v1/responses` | input tokens, output tokens, request id | Successful deduction equals configured model/group formula within documented rounding tolerance |
+| Responses stream | `/v1/responses` streaming | final usage event present | Same deduction as equivalent non-stream usage within tolerance |
+| Tool/function call | `/v1/responses` | tool call plus final text | Tool-call tokens included in deduction or explicitly documented if provider usage excludes them |
+| Long context | `/v1/responses` | large input near configured limit | Success with correct deduction or rejection before upstream call |
+| Upstream retry | CLIProxyAPI-backed model | retry or credential switch | User is charged only for final billable provider usage, or retry charging is documented and priced |
+| Upstream failure | CLIProxyAPI-backed model | no successful completion | No balance deduction unless New API/provider explicitly reports billable usage |
+| Official fallback test | admin-test only | official provider request id | Deduction and provider bill reconcile before any trusted-user exposure |
+
 ## Upstream Strategy
 
 Use a hybrid upstream strategy.
@@ -166,6 +215,13 @@ Initial official fallback allowlist:
 | `openai-general-responses-test` | OpenAI official API | `gpt-5.2` | `/v1/responses`, streaming, tools | `admin-test` only | Validation only |
 
 No official fallback channel is enabled for `standard` users at v1 launch. Enabling official fallback for `trusted` users requires a configuration change after validation and must name the specific model, group, rate, and maximum exposure.
+
+Official fallback cost controls:
+
+- Use a dedicated official provider project/key for the API-site fallback path.
+- Configure provider-side budget alerts and hard limits where available.
+- Keep `admin-test` group balance and API-key rate limits low enough that a leaked key or loop cannot create material spend.
+- Keep official fallback disabled for all non-test groups until a manual change names the model, group, rate, per-key limit, and maximum expected exposure.
 
 New API owns:
 
@@ -201,14 +257,17 @@ Only models and channels that pass real `/v1/responses` validation may be enable
 
 Required validation:
 
-- Codex CLI API-key mode works against `https://ai.x2r.store`.
+- Record the exact Codex CLI version used for validation.
+- Codex CLI API-key mode works against `https://ai.x2r.store` with the configured base URL pointing at the New API site.
+- A real Codex CLI agent run succeeds in a disposable test repository, not just a hand-written `curl`.
 - `/v1/responses` non-streaming request succeeds.
-- `/v1/responses` streaming request succeeds.
+- `/v1/responses` streaming request succeeds and Codex CLI can parse the SSE/event stream without protocol errors.
 - Tool/function call behavior works for supported models.
 - Long-context requests fail predictably or succeed within configured limits.
 - `store: false` or equivalent response-storage disabling behavior is accepted where relevant.
 - New API deducts quota correctly for Responses API traffic.
 - CLIProxyAPI usage queue emits corresponding events for CLIProxyAPI-backed requests.
+- Request ids or another correlation key allow the New API deduction, CLIProxyAPI usage event, and official provider bill to be reconciled for representative requests.
 - Official fallback channels used for Codex also support Responses API, not only `/v1/chat/completions`.
 
 If `/v1/responses` fails validation, Codex traffic must not be opened to users.
@@ -257,13 +316,26 @@ Not publicly exposed:
 Security requirements:
 
 - New API administrator password must be strong and unique.
+- New API default administrator credentials must be rotated before public launch.
+- New API administrator login must be hardened with login rate limiting and captcha or 2FA where supported.
+- If New API supports admin-path restriction, apply it. Otherwise add Cloudflare WAF/rate-limit rules for admin login paths and consider Cloudflare Access before opening real users.
+- Disable unused New API authentication methods.
+- Disable all online payment providers, payment routes/menus where configurable, registration bonus/free-credit settings, invoice features, refund features, and support affordances for v1.
 - Public registration must require invitation codes.
 - New users receive no free balance.
 - Low-balance or untrusted users cannot access high-cost models.
 - User and API-key rate limits must be configured.
 - Official fallback must be limited by model/group policy.
 - Secrets must stay in `.env` or local runtime config files and must not be committed.
-- CLIProxyAPI full request body logging should be disabled in production except during short troubleshooting windows.
+- CLIProxyAPI `request-log` must be `false` for production launch except during short troubleshooting windows.
+- CLIProxyAPI management may remain enabled for internal container access, but it must not be publicly routed. The management key is a local secret and is required by the usage collector.
+
+Cloudflare requirements for `ai.x2r.store`:
+
+- SSL/TLS mode must be Full strict.
+- Cache must be bypassed for API and application paths.
+- WebSocket/SSE streaming must remain compatible with Codex and other streaming clients.
+- WAF/rate-limit rules must protect login, registration, redeem-code, and API paths without breaking streaming.
 
 ## Persistence And Backup
 
@@ -275,6 +347,16 @@ Back up:
 - CPA Usage Keeper or collector database: audit history and operational reporting.
 
 Redis should be treated according to the selected New API deployment mode. If it only contains cache/runtime data, backup is less critical. If deployment settings make Redis durable for required behavior, persistence and backup must be configured explicitly.
+
+Minimum backup and recovery requirements:
+
+- Run scheduled Postgres backups, such as daily `pg_dump`, with at least 7 daily and 4 weekly retained copies.
+- Store backups off-host and encrypted.
+- Back up CLIProxyAPI `auths/` and `config.yaml` after any credential or configuration change.
+- Back up CPA Usage Keeper data if used for operational reporting.
+- Take a database backup or volume snapshot before New API upgrades or migrations.
+- Keep the previous pinned Compose image tags available for rollback.
+- Perform at least one restore drill before selling meaningful volume.
 
 ## Monitoring And Audit
 
@@ -306,6 +388,24 @@ Important anomaly classes:
 - Sudden cost spike by user, key, model, or channel.
 - Usage queue retention too short for the collector polling interval.
 
+CPA Usage Keeper deployment requirements:
+
+- Run only on the backend Docker network by default.
+- Do not attach a Traefik public router by default.
+- Use a pinned image/tag, not an unconstrained `latest`, once validated.
+- Persist its data directory or database volume.
+- Pass the CLIProxyAPI management key through local secrets or `.env`, never through git.
+- If the dashboard is ever exposed, enable its authentication and add Cloudflare Access or equivalent protection.
+
+CLIProxyAPI usage queue settings:
+
+```yaml
+usage-statistics-enabled: true
+redis-usage-queue-retention-seconds: 3600
+```
+
+The collector should poll frequently enough to drain the queue well inside retention; the launch target is every 1 to 5 seconds and drain-until-empty behavior per poll cycle. Usage queue audit is best-effort until events are persisted by CPA Usage Keeper or the collector. CLIProxyAPI restarts or collector downtime longer than retention can lose audit events, so New API remains the billing source of truth.
+
 ## Test And Launch Gates
 
 Functional gates:
@@ -320,6 +420,9 @@ Functional gates:
 - Users can create and revoke API keys.
 - New API deducts quota after successful calls.
 - Balance exhaustion blocks further calls.
+- Online payment providers and registration bonuses are disabled.
+- No public top-up route succeeds except redeem-code redemption.
+- No registration bonus or free-credit path grants balance to a newly created user.
 
 Codex and API gates:
 
@@ -351,11 +454,16 @@ Audit gates:
 Security gates:
 
 - CLIProxyAPI is not reachable from the public internet.
+- CLIProxyAPI has no public Traefik router.
 - Postgres is not reachable from the public internet.
 - Redis is not reachable from the public internet.
 - CLIProxyAPI management UI and API are not permanently public.
+- CLIProxyAPI production `request-log` is disabled.
+- New API default admin credentials are changed.
+- Admin login is rate-limited and hardened with captcha/2FA where supported.
 - Secrets are absent from git.
 - Backups exist for Postgres, `auths/`, and `config.yaml`.
+- A restore drill has been completed before meaningful paid usage.
 
 ## Open Risks
 
