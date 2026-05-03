@@ -1,16 +1,26 @@
 # CLIProxyAPI Deploy
 
-Docker Compose deployment for CLIProxyAPI with Traefik-managed HTTPS.
+Docker Compose deployment for a New API-fronted public API site with CLIProxyAPI as an internal upstream.
+
+## API Site Mode
+
+This repository now targets `ai.x2r.store` as a New API-fronted public API site. New API is the only public user and SDK entry point. CLIProxyAPI is internal-only and is used as a New API upstream channel.
+
+For implementation and operations, see:
+
+- `docs/superpowers/specs/2026-05-03-new-api-cliproxy-api-site-design.md`
+- `docs/superpowers/plans/2026-05-03-new-api-cliproxy-api-site.md`
+- `docs/api-site-runbook.md`
 
 ## Hostnames
 
 Configure DNS A/AAAA records to point at the server:
 
 ```text
-cliproxy.x2r.store
+ai.x2r.store
 ```
 
-Open ports `80` and `443` on the server firewall. Do not expose CLIProxyAPI port `8317` to the public internet.
+Open ports `80` and `443` on the server firewall. Do not expose CLIProxyAPI port `8317`, Postgres, Redis, or CPA Usage Keeper to the public internet.
 
 Traefik uses the Docker socket to discover labelled containers, so Traefik and anyone able to start or label containers on this Docker daemon are inside the deployment trust boundary.
 
@@ -19,7 +29,7 @@ Traefik uses the Docker socket to discover labelled containers, so Traefik and a
 This hostname is a first-level subdomain of `x2r.store`, so it can use Cloudflare's standard proxied Universal SSL coverage:
 
 ```text
-A  cliproxy        <server-ip>  Proxied
+A  ai        <server-ip>  Proxied
 ```
 
 Set Cloudflare SSL/TLS mode to `Full (strict)`. Do not use `Flexible`.
@@ -27,7 +37,7 @@ Set Cloudflare SSL/TLS mode to `Full (strict)`. Do not use `Flexible`.
 Add a cache rule to bypass cache for the hostname:
 
 ```text
-Hostname equals cliproxy.x2r.store       -> Bypass cache
+Hostname equals ai.x2r.store       -> Bypass cache
 ```
 
 If initial Let's Encrypt issuance fails while Cloudflare proxying is enabled, temporarily switch the record to DNS only, restart Traefik, wait for certificate issuance, then switch it back to proxied.
@@ -62,30 +72,28 @@ touch letsencrypt/acme.json
 chmod 600 letsencrypt/acme.json
 ```
 
-`docker compose config` will fail until `.env` contains required values for `ACME_EMAIL` and `API_HOST`.
+`docker compose config` will fail until `.env` contains all required values, including `ACME_EMAIL`, `AI_HOST`, image tags, generated secrets, and database passwords.
 
-Generate separate values for the management secret and client API key:
+Generate separate values for New API secrets, database passwords, Redis password, the CLIProxyAPI management secret, and the internal New API-to-CLIProxyAPI channel key:
 
 ```bash
+openssl rand -hex 32
+openssl rand -hex 24
 MANAGEMENT_SECRET="$(openssl rand -hex 32)"
-CLIENT_API_KEY="$(scripts/generate-api-key.py)"
-printf 'management secret: %s\nclient api key: %s\n' "$MANAGEMENT_SECRET" "$CLIENT_API_KEY"
-```
-
-To generate multiple client keys as a `config.yaml` snippet:
-
-```bash
-scripts/generate-api-key.py -n 3 --yaml
+CLIPROXY_INTERNAL_API_KEY="$(scripts/generate-api-key.py)"
+printf 'management secret: %s\ninternal api key: %s\n' "$MANAGEMENT_SECRET" "$CLIPROXY_INTERNAL_API_KEY"
 ```
 
 Edit `config.yaml` and replace:
 
 ```text
 replace-with-management-secret
-replace-with-client-api-key
+replace-with-internal-new-api-channel-key
 ```
 
-CLIProxyAPI hashes a plaintext `remote-management.secret-key` on startup and writes it back to `config.yaml`, so keep `config.yaml` writable by the container.
+The `remote-management.secret-key` value must exactly match `MANAGEMENT_SECRET` in `.env`. The `api-keys` entry must exactly match `CLIPROXY_INTERNAL_API_KEY` in `.env`.
+
+CLIProxyAPI hashes a plaintext `remote-management.secret-key` on startup and writes it back to `config.yaml`, so keep `config.yaml` writable by the container. CLIProxyAPI remains internal-only in API Site Mode.
 
 ## Start
 
@@ -97,37 +105,19 @@ docker compose ps
 
 ## Verify
 
-API hostname:
+API site hostname:
 
 ```bash
-curl -I https://cliproxy.x2r.store
+curl -I https://ai.x2r.store
 ```
 
-Open the management UI through the same hostname:
-
-```text
-https://cliproxy.x2r.store/management.html
-```
-
-When the UI asks for the API address, use:
-
-```text
-https://cliproxy.x2r.store
-```
-
-Management API actions require the CLIProxyAPI management secret:
+Run the API-site verification helper:
 
 ```bash
-curl -H "Authorization: Bearer $MANAGEMENT_SECRET" https://cliproxy.x2r.store/v0/management/config
+scripts/verify-api-site.sh
 ```
 
-Public API requests still require a client API key:
-
-```bash
-curl -H "Authorization: Bearer $CLIENT_API_KEY" https://cliproxy.x2r.store/v1/models
-```
-
-The management page itself is public static UI. Sensitive management actions are protected by `remote-management.secret-key`; public API calls are protected by `api-keys`.
+New API is the public management, user, and SDK entry point. CLIProxyAPI management and API routes are internal operations surfaces only.
 
 ## Latency Profiling
 
@@ -143,13 +133,13 @@ If your terminal does not use proxy environment variables, pass the local proxy 
 scripts/profile-latency.py --origin-ip <vps-ip> --proxy http://127.0.0.1:7890
 ```
 
-For protected API paths, pass the key through an environment variable so it is not printed:
+For protected New API paths, pass the key through an environment variable so it is not printed:
 
 ```bash
-CLIENT_API_KEY=sk-... scripts/profile-latency.py \
+NEW_API_KEY=sk-... scripts/profile-latency.py \
   --origin-ip <vps-ip> \
   --path /v1/models \
-  --api-key-env CLIENT_API_KEY
+  --api-key-env NEW_API_KEY
 ```
 
 On the VPS, compare Traefik loopback against direct CLIProxyAPI container access:
@@ -168,7 +158,7 @@ traefik_overhead_ms ~= traefik-loopback - cliproxy-direct
 
 ## Logs
 
-`request-log: true` is enabled. This can record request bodies, response bodies, headers, streaming chunks, and upstream API data. Treat `logs/` as sensitive.
+CLIProxyAPI request logging is disabled by default. If enabled for a short troubleshooting window, it can record request bodies, response bodies, headers, streaming chunks, and upstream API data. Treat `logs/` as sensitive.
 
 The template sets:
 
@@ -185,7 +175,7 @@ CLIProxyAPI's Redis-compatible usage queue is enabled through:
 
 ```yaml
 usage-statistics-enabled: true
-redis-usage-queue-retention-seconds: 300
+redis-usage-queue-retention-seconds: 3600
 ```
 
 This is not an external Redis service. It is a small RESP interface on CLIProxyAPI's internal `8317` port. A future collector on the same Docker network can read it with:
@@ -217,7 +207,7 @@ The template enables API-key authentication for CLIProxyAPI WebSocket clients:
 ws-auth: true
 ```
 
-This protects `/v1/ws` on the public hostname. HTTP API requests and management API requests continue to use their existing `api-keys` and `remote-management.secret-key` authentication.
+This protects internal CLIProxyAPI `/v1/ws` clients that connect on the backend network. HTTP API requests and management API requests continue to use their existing `api-keys` and `remote-management.secret-key` authentication.
 
 ## Convert Codex Switcher Accounts
 
