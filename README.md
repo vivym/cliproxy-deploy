@@ -135,12 +135,19 @@ https://cliproxy-admin.x2r.store
 
 Do not use `https://cliproxy.x2r.store` as the management UI API address. The API hostname keeps management paths behind Traefik BasicAuth as a guardrail, and the Web UI sends the CLIProxyAPI management key through the `Authorization: Bearer ...` header. HTTP BasicAuth also uses `Authorization`, so placing BasicAuth in front of the admin `/v0/management` API would conflict with Web UI login requests.
 
-Management paths on the API hostname must still require BasicAuth or otherwise not pass through the unauthenticated API router:
+Management UI paths on the API hostname should redirect to the admin hostname, while management API paths on the API hostname should still require BasicAuth:
 
 ```bash
 curl -I https://cliproxy.x2r.store/management
 curl -I https://cliproxy.x2r.store/management.html
 curl -I https://cliproxy.x2r.store/v0/management/api-key-usage
+```
+
+Expected behavior:
+
+```text
+cliproxy.x2r.store/management*       -> redirect to cliproxy-admin.x2r.store/management.html
+cliproxy.x2r.store/v0/management/*   -> Traefik BasicAuth
 ```
 
 With valid BasicAuth credentials, the management page should load:

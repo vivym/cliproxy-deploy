@@ -146,7 +146,7 @@ environment:
 
 This hostname is intended for normal API client traffic. API access is controlled by CLIProxyAPI `api-keys`.
 
-The API hostname must not expose management paths without Traefik BasicAuth. Because CLIProxyAPI management is enabled globally with `allow-remote: true`, the Traefik configuration must explicitly handle these paths on the API hostname:
+The API hostname must not serve the management UI as a usable entry point. Because CLIProxyAPI management is enabled globally with `allow-remote: true`, the Traefik configuration must explicitly handle these paths on the API hostname:
 
 ```text
 /management
@@ -154,22 +154,24 @@ The API hostname must not expose management paths without Traefik BasicAuth. Bec
 /v0/management
 ```
 
-The implementation should either:
+The implementation should:
 
-- route those paths through a higher-priority BasicAuth-protected management router, or
-- exclude them from the unauthenticated API router.
+- redirect `/management*` UI paths to `https://${ADMIN_HOST}/management.html`, and
+- route `/v0/management*` API paths through a higher-priority BasicAuth-protected router.
 
-The first implementation should use the higher-priority BasicAuth-protected router because it is simpler to validate with `curl`. Do not rely on Traefik's default rule-length priority for this overlap; set explicit router priorities:
+Do not rely on Traefik's default rule-length priority for this overlap; set explicit router priorities:
 
 ```text
-api-management router priority: 100
+api-management-ui redirect router priority: 110
+api-management-api BasicAuth router priority: 100
 api router priority: 10
 ```
 
-The protected API-host management router should use this rule shape:
+The API-host management routers should use these rule shapes:
 
 ```text
-Host(`${API_HOST}`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))
+Host(`${API_HOST}`) && PathPrefix(`/management`)
+Host(`${API_HOST}`) && PathPrefix(`/v0/management`)
 ```
 
 ### Admin Router
@@ -345,7 +347,7 @@ curl -I https://cliproxy-admin.x2r.store/management.html
 
 Admin BasicAuth should be verified with both unauthenticated and authenticated requests.
 
-Management paths should be tested on both hostnames. On the API hostname they should still require Traefik BasicAuth:
+Management paths should be tested on both hostnames. On the API hostname, UI paths should redirect to the admin hostname and API paths should still require Traefik BasicAuth:
 
 ```bash
 curl -I https://cliproxy.x2r.store/management

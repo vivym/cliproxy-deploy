@@ -328,7 +328,7 @@ services:
       # Shared service definition.
       - "traefik.http.services.cliproxyapi.loadbalancer.server.port=8317"
 
-      # Public API route. Management paths are handled by the higher-priority protected route below.
+      # Public API route. Management paths are handled by higher-priority routes below.
       - "traefik.http.routers.cliproxyapi-api.rule=Host(`${API_HOST:?set API_HOST}`)"
       - "traefik.http.routers.cliproxyapi-api.priority=10"
       - "traefik.http.routers.cliproxyapi-api.entrypoints=websecure"
@@ -336,14 +336,27 @@ services:
       - "traefik.http.routers.cliproxyapi-api.tls.certresolver=le"
       - "traefik.http.routers.cliproxyapi-api.service=cliproxyapi"
 
-      # Protect management paths even when reached through the API hostname.
-      - "traefik.http.routers.cliproxyapi-api-management.rule=Host(`${API_HOST:?set API_HOST}`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"
-      - "traefik.http.routers.cliproxyapi-api-management.priority=100"
-      - "traefik.http.routers.cliproxyapi-api-management.entrypoints=websecure"
-      - "traefik.http.routers.cliproxyapi-api-management.tls=true"
-      - "traefik.http.routers.cliproxyapi-api-management.tls.certresolver=le"
-      - "traefik.http.routers.cliproxyapi-api-management.middlewares=admin-auth"
-      - "traefik.http.routers.cliproxyapi-api-management.service=cliproxyapi"
+      # Redirect API-host management UI paths to the admin hostname so the Web UI
+      # detects the correct API base and does not reuse the public API hostname.
+      - "traefik.http.routers.cliproxyapi-api-management-ui.rule=Host(`${API_HOST:?set API_HOST}`) && PathPrefix(`/management`)"
+      - "traefik.http.routers.cliproxyapi-api-management-ui.priority=110"
+      - "traefik.http.routers.cliproxyapi-api-management-ui.entrypoints=websecure"
+      - "traefik.http.routers.cliproxyapi-api-management-ui.tls=true"
+      - "traefik.http.routers.cliproxyapi-api-management-ui.tls.certresolver=le"
+      - "traefik.http.routers.cliproxyapi-api-management-ui.middlewares=api-management-redirect"
+      - "traefik.http.routers.cliproxyapi-api-management-ui.service=noop@internal"
+      - "traefik.http.middlewares.api-management-redirect.redirectregex.regex=^https?://${API_HOST:?set API_HOST}/management.*"
+      - "traefik.http.middlewares.api-management-redirect.redirectregex.replacement=https://${ADMIN_HOST:?set ADMIN_HOST}/management.html"
+      - "traefik.http.middlewares.api-management-redirect.redirectregex.permanent=false"
+
+      # Protect management API paths even when reached through the API hostname.
+      - "traefik.http.routers.cliproxyapi-api-management-api.rule=Host(`${API_HOST:?set API_HOST}`) && PathPrefix(`/v0/management`)"
+      - "traefik.http.routers.cliproxyapi-api-management-api.priority=100"
+      - "traefik.http.routers.cliproxyapi-api-management-api.entrypoints=websecure"
+      - "traefik.http.routers.cliproxyapi-api-management-api.tls=true"
+      - "traefik.http.routers.cliproxyapi-api-management-api.tls.certresolver=le"
+      - "traefik.http.routers.cliproxyapi-api-management-api.middlewares=admin-auth"
+      - "traefik.http.routers.cliproxyapi-api-management-api.service=cliproxyapi"
 
       # Admin UI shell. Do not attach BasicAuth to /v0/management on the admin
       # hostname because the Web UI sends the management key as Authorization:
@@ -364,7 +377,7 @@ services:
       - "traefik.http.routers.cliproxyapi-admin-api.tls.certresolver=le"
       - "traefik.http.routers.cliproxyapi-admin-api.service=cliproxyapi"
 
-      # BasicAuth for admin UI and management paths on API hostname.
+      # BasicAuth for admin UI and API-host management API paths.
       - "traefik.http.middlewares.admin-auth.basicauth.users=${TRAEFIK_BASIC_AUTH_USERS:?set TRAEFIK_BASIC_AUTH_USERS}"
 
 networks:
@@ -388,9 +401,12 @@ TRAEFIK_BASIC_AUTH_USERS=admin:$$2y$$05$$abcdefghijklmnopqrstuuuuuuuuuuuuuuuuuuu
 DEPLOY=
 EOF
 (cd "$tmpdir" && docker compose config --format json) > /tmp/cliproxy-compose.json
-jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.priority"] == "100"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api.priority"] == "10"' /tmp/cliproxy-compose.json
-jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.rule"] == "Host(`cliproxy.x2r.store`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management-ui.rule"] == "Host(`cliproxy.x2r.store`) && PathPrefix(`/management`)"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management-ui.middlewares"] == "api-management-redirect"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.middlewares.api-management-redirect.redirectregex.replacement"] == "https://cliproxy-admin.x2r.store/management.html"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management-api.rule"] == "Host(`cliproxy.x2r.store`) && PathPrefix(`/v0/management`)"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management-api.middlewares"] == "admin-auth"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.middlewares.admin-auth.basicauth.users"] | contains("$$2y$$05$$")' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.ports == null and (.services.cliproxyapi.expose == ["8317"])' /tmp/cliproxy-compose.json
 ```
@@ -527,12 +543,19 @@ Admin hostname without BasicAuth should return `401`:
 curl -I https://cliproxy-admin.x2r.store/management.html
 ```
 
-Management paths on the API hostname must also require BasicAuth or otherwise not pass through the unauthenticated API router:
+Management UI paths on the API hostname should redirect to the admin hostname, while management API paths on the API hostname should still require BasicAuth:
 
 ```bash
 curl -I https://cliproxy.x2r.store/management
 curl -I https://cliproxy.x2r.store/management.html
 curl -I https://cliproxy.x2r.store/v0/management/api-key-usage
+```
+
+Expected behavior:
+
+```text
+cliproxy.x2r.store/management*       -> redirect to cliproxy-admin.x2r.store/management.html
+cliproxy.x2r.store/v0/management/*   -> Traefik BasicAuth
 ```
 
 With valid BasicAuth credentials, the management page should load:
@@ -726,9 +749,12 @@ EOF
 (cd "$tmpdir" && docker compose config --format json) > /tmp/cliproxy-compose.json
 jq -e '([.services.traefik.ports[].target] == [80, 443]) and ([.services.traefik.ports[].published] == ["80", "443"])' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.ports == null and (.services.cliproxyapi.expose == ["8317"])' /tmp/cliproxy-compose.json
-jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.priority"] == "100"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api.priority"] == "10"' /tmp/cliproxy-compose.json
-jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.rule"] == "Host(`cliproxy.x2r.store`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management-ui.rule"] == "Host(`cliproxy.x2r.store`) && PathPrefix(`/management`)"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management-ui.middlewares"] == "api-management-redirect"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.middlewares.api-management-redirect.redirectregex.replacement"] == "https://cliproxy-admin.x2r.store/management.html"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management-api.rule"] == "Host(`cliproxy.x2r.store`) && PathPrefix(`/v0/management`)"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management-api.middlewares"] == "admin-auth"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-admin-ui.rule"] == "Host(`cliproxy-admin.x2r.store`) && !PathPrefix(`/v0/management`)"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-admin-api.rule"] == "Host(`cliproxy-admin.x2r.store`) && PathPrefix(`/v0/management`)"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-admin-api.middlewares"] == null' /tmp/cliproxy-compose.json
