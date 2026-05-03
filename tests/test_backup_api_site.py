@@ -128,6 +128,69 @@ done
             self.assertIn("compose ps failed", result.stderr)
             self.assertNotIn("Backup written to", result.stdout)
 
+    def test_script_writes_relative_checksum_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            (root / ".env").write_text("POSTGRES_USER=user\nPOSTGRES_DB=db\n", encoding="utf-8")
+            (root / "config.yaml").write_text("config: true\n", encoding="utf-8")
+            (root / "auths").mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker = bin_dir / "docker"
+            docker.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1 $2 $3" == "compose exec -T" ]]; then
+  echo "postgres dump"
+  exit 0
+fi
+if [[ "$1 $2" == "compose ps" ]]; then
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            sha256sum = bin_dir / "sha256sum"
+            sha256sum.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  printf 'fakehash  %s\\n' "$1"
+  shift
+done
+""",
+                encoding="utf-8",
+            )
+            sha256sum.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "external-backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            prefix = "Backup written to "
+            self.assertIn(prefix, result.stdout)
+            backup_dir = pathlib.Path(result.stdout.strip().removeprefix(prefix))
+            sums = (backup_dir / "SHA256SUMS").read_text(encoding="utf-8")
+            self.assertIn("./newapi-postgres.dump", sums)
+            self.assertIn("./cliproxy-runtime.tgz", sums)
+            self.assertNotIn(".partial", sums)
+            self.assertNotIn(str(backup_dir), sums)
+
 
 if __name__ == "__main__":
     unittest.main()

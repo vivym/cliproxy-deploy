@@ -82,12 +82,15 @@ if printf '%s\n' "$running_services" | grep -qx "cpa-usage-keeper"; then
   docker compose cp cpa-usage-keeper:/data "${partial_dest}/cpa-usage-keeper-data"
 fi
 
-find "$partial_dest" -type f ! -name SHA256SUMS -print0 \
-  | sort -z \
-  | while IFS= read -r -d '' backup_file; do
-      checksum_file "$backup_file"
-    done \
-  > "${partial_dest}/SHA256SUMS"
+(
+  cd "$partial_dest"
+  find . -type f ! -name SHA256SUMS -print0 \
+    | sort -z \
+    | while IFS= read -r -d '' backup_file; do
+        checksum_file "$backup_file"
+      done \
+    > SHA256SUMS
+)
 
 mv "$partial_dest" "$dest"
 
