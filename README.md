@@ -8,7 +8,6 @@ Configure DNS A/AAAA records to point at the server:
 
 ```text
 cliproxy.x2r.store
-cliproxy-admin.x2r.store
 ```
 
 Open ports `80` and `443` on the server firewall. Do not expose CLIProxyAPI port `8317` to the public internet.
@@ -17,23 +16,21 @@ Traefik uses the Docker socket to discover labelled containers, so Traefik and a
 
 ## Cloudflare
 
-These hostnames are first-level subdomains of `x2r.store`, so they can use Cloudflare's standard proxied Universal SSL coverage:
+This hostname is a first-level subdomain of `x2r.store`, so it can use Cloudflare's standard proxied Universal SSL coverage:
 
 ```text
 A  cliproxy        <server-ip>  Proxied
-A  cliproxy-admin  <server-ip>  Proxied
 ```
 
 Set Cloudflare SSL/TLS mode to `Full (strict)`. Do not use `Flexible`.
 
-Add cache rules to bypass cache for both hostnames:
+Add a cache rule to bypass cache for the hostname:
 
 ```text
 Hostname equals cliproxy.x2r.store       -> Bypass cache
-Hostname equals cliproxy-admin.x2r.store -> Bypass cache
 ```
 
-If initial Let's Encrypt issuance fails while Cloudflare proxying is enabled, temporarily switch both records to DNS only, restart Traefik, wait for certificate issuance, then switch them back to proxied.
+If initial Let's Encrypt issuance fails while Cloudflare proxying is enabled, temporarily switch the record to DNS only, restart Traefik, wait for certificate issuance, then switch it back to proxied.
 
 ## Files
 
@@ -65,7 +62,7 @@ touch letsencrypt/acme.json
 chmod 600 letsencrypt/acme.json
 ```
 
-`docker compose config` will fail until `.env` contains required values for `ACME_EMAIL`, `API_HOST`, `ADMIN_HOST`, and `TRAEFIK_BASIC_AUTH_USERS`.
+`docker compose config` will fail until `.env` contains required values for `ACME_EMAIL` and `API_HOST`.
 
 Generate separate values for the management secret and client API key:
 
@@ -73,21 +70,6 @@ Generate separate values for the management secret and client API key:
 MANAGEMENT_SECRET="$(openssl rand -hex 32)"
 CLIENT_API_KEY="$(openssl rand -hex 32)"
 printf 'management secret: %s\nclient api key: %s\n' "$MANAGEMENT_SECRET" "$CLIENT_API_KEY"
-```
-
-Generate Traefik BasicAuth:
-
-```bash
-htpasswd -nbB admin 'your-admin-password'
-```
-
-Paste the `htpasswd` output into `.env` as `TRAEFIK_BASIC_AUTH_USERS`.
-Every `$` in the hash must be escaped as `$$` for Docker Compose interpolation.
-
-Example:
-
-```env
-TRAEFIK_BASIC_AUTH_USERS=admin:$$2y$$05$$...
 ```
 
 Edit `config.yaml` and replace:
@@ -115,52 +97,31 @@ API hostname:
 curl -I https://cliproxy.x2r.store
 ```
 
-Admin hostname without BasicAuth should return `401`:
-
-```bash
-curl -I https://cliproxy-admin.x2r.store/management.html
-```
-
-Open the management UI through the admin hostname:
+Open the management UI through the same hostname:
 
 ```text
-https://cliproxy-admin.x2r.store/management.html
+https://cliproxy.x2r.store/management.html
 ```
 
 When the UI asks for the API address, use:
 
 ```text
-https://cliproxy-admin.x2r.store
+https://cliproxy.x2r.store
 ```
 
-Do not use `https://cliproxy.x2r.store` as the management UI API address. The API hostname keeps management paths behind Traefik BasicAuth as a guardrail, and the Web UI sends the CLIProxyAPI management key through the `Authorization: Bearer ...` header. HTTP BasicAuth also uses `Authorization`, so placing BasicAuth in front of the admin `/v0/management` API would conflict with Web UI login requests.
-
-Management UI paths on the API hostname should redirect to the admin hostname, while management API paths on the API hostname should still require BasicAuth:
+Management API actions require the CLIProxyAPI management secret:
 
 ```bash
-curl -I https://cliproxy.x2r.store/management
-curl -I https://cliproxy.x2r.store/management.html
-curl -I https://cliproxy.x2r.store/v0/management/api-key-usage
+curl -H "Authorization: Bearer $MANAGEMENT_SECRET" https://cliproxy.x2r.store/v0/management/config
 ```
 
-Expected behavior:
-
-```text
-cliproxy.x2r.store/management*       -> redirect to cliproxy-admin.x2r.store/management.html
-cliproxy.x2r.store/v0/management/*   -> Traefik BasicAuth
-```
-
-With valid BasicAuth credentials, the management page should load:
+Public API requests still require a client API key:
 
 ```bash
-curl -I -u 'admin:your-admin-password' https://cliproxy-admin.x2r.store/management.html
+curl -H "Authorization: Bearer $CLIENT_API_KEY" https://cliproxy.x2r.store/v1/models
 ```
 
-Management API actions on the admin hostname require the CLIProxyAPI management secret:
-
-```bash
-curl -H "Authorization: Bearer $MANAGEMENT_SECRET" https://cliproxy-admin.x2r.store/v0/management/config
-```
+The management page itself is public static UI. Sensitive management actions are protected by `remote-management.secret-key`; public API calls are protected by `api-keys`.
 
 ## Logs
 
@@ -214,10 +175,6 @@ docker compose logs --tail=100 cliproxyapi
 
 If HTTPS fails, check DNS, firewall ports `80`/`443`, Traefik logs, and `letsencrypt/acme.json` permissions.
 
-If admin access returns `401`, BasicAuth is active. Retry with credentials.
-
-If the management UI keeps calling `https://cliproxy.x2r.store/v0/management/...`, clear browser site data or localStorage for the management UI and reconnect with API address `https://cliproxy-admin.x2r.store`.
-
-If management API calls fail after BasicAuth succeeds, verify `remote-management.secret-key` in `config.yaml`. Repeated failed management-key attempts may trigger a temporary remote IP block; wait for it to expire or restart CLIProxyAPI before retesting.
+If management API calls fail, verify `remote-management.secret-key` in `config.yaml`. Repeated failed management-key attempts may trigger a temporary remote IP block; wait for it to expire or restart CLIProxyAPI before retesting.
 
 If API requests fail, verify `api-keys`, auth files under `auths/`, and CLIProxyAPI logs.
