@@ -5,7 +5,7 @@ Updated: 2026-05-03
 
 ## Goal
 
-Generate a production-oriented Docker Compose deployment for CLIProxyAPI in this repository. The deployment uses Traefik for automatic HTTPS, exposes a single Cloudflare-proxied hostname, enables detailed request logging, and enables CLIProxyAPI's built-in Redis-compatible usage queue without deploying a separate Redis container.
+Generate a production-oriented Docker Compose deployment for CLIProxyAPI in this repository. The deployment uses Traefik for automatic HTTPS, exposes a single Cloudflare-proxied hostname, enables detailed request logging, enables session affinity for upstream account selection, and enables CLIProxyAPI's built-in Redis-compatible usage queue without deploying a separate Redis container.
 
 Public hostname:
 
@@ -157,11 +157,17 @@ request-log: true
 usage-statistics-enabled: true
 redis-usage-queue-retention-seconds: 300
 logs-max-total-size-mb: 2048
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-ttl: "2h"
 ```
 
 `request-log: true` can record prompts, responses, headers, streaming chunks, and upstream API data. Treat `logs/` as sensitive.
 
 The Redis usage queue is CLIProxyAPI's built-in Redis-compatible RESP queue on the same internal port. It does not require an external Redis container and should not be exposed publicly.
+
+Session affinity makes a client session prefer the same upstream account for two hours when possible. It is still allowed to move when retry or credential availability requires it.
 
 ## Operations
 

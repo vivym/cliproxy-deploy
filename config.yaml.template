@@ -10,8 +10,8 @@ tls:
 
 # Management API and bundled web control panel.
 # CLIProxyAPI will hash a plaintext secret-key on startup and write it back to config.yaml.
-# Replace the placeholder secret before public startup. Remote management is intended
-# to sit behind Traefik BasicAuth on admin/management routes.
+# Replace the placeholder secret before public startup. In this single-hostname
+# deployment, this secret is the primary protection for /v0/management/*.
 remote-management:
   allow-remote: true
   secret-key: "replace-with-management-secret"
@@ -57,6 +57,13 @@ passthrough-headers: false
 request-retry: 3
 max-retry-credentials: 0
 max-retry-interval: 30
+
+# Prefer keeping a client session on the same upstream account when possible.
+# CLIProxyAPI can still fail over if the bound credential becomes unavailable.
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-ttl: "2h"
 
 # Leave websocket auth disabled unless clients require authenticated websocket use.
 ws-auth: false

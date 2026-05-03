@@ -153,6 +153,19 @@ redis-cli -h cliproxyapi -p 8317 -a "$MANAGEMENT_SECRET" --raw LPOP queue
 
 Do not expose this port publicly. The queue is short-term memory storage, not a billing or analytics database.
 
+## Session Affinity
+
+The template enables CLIProxyAPI session affinity so one client session prefers the same upstream account when possible:
+
+```yaml
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-ttl: "2h"
+```
+
+This is not a hard pin. CLIProxyAPI may still switch credentials when retrying or when the previously selected credential is unavailable.
+
 ## OAuth Login
 
 Do not permanently expose OAuth callback ports. Run login commands inside the container and use SSH tunneling or temporary port exposure only when needed.

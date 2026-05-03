@@ -87,6 +87,15 @@ Auth responsibility:
 
 The management UI shell being publicly loadable is acceptable because sensitive actions require `remote-management.secret-key`.
 
+CLIProxyAPI should also keep client sessions on the same upstream account when possible:
+
+```yaml
+routing:
+  strategy: "round-robin"
+  session-affinity: true
+  session-affinity-ttl: "2h"
+```
+
 ## Environment Template
 
 `.env.example` should contain:
@@ -105,6 +114,7 @@ Static checks:
 git diff --check
 git check-ignore .env config.yaml auths/ logs/ letsencrypt/
 ruby -e 'require "yaml"; YAML.load_file("config.yaml.template"); puts "config.yaml.template: valid YAML"'
+ruby -e 'require "yaml"; cfg = YAML.load_file("config.yaml.template"); abort "missing routing.session-affinity=true" unless cfg.dig("routing", "session-affinity") == true; abort "missing routing.session-affinity-ttl" unless cfg.dig("routing", "session-affinity-ttl").to_s != ""; puts "session affinity configured"'
 ```
 
 Compose validation:
