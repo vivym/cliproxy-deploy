@@ -53,6 +53,7 @@ class ApiSiteTemplateTests(unittest.TestCase):
     def test_cliproxy_public_override_is_template_only(self):
         text = self.read("docker-compose.cliproxy-public.override.yml.template")
         self.assertIn("TEMPORARY MAINTENANCE ONLY", text)
+        self.assertIn("Decommission by: YYYY-MM-DD HH:MM TZ", text)
         self.assertIn("cliproxyapi:", text)
         self.assertIn("traefik.enable=true", text)
         self.assertNotIn("traefik.http.routers.cliproxyapi.rule", text)

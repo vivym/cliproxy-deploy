@@ -1,6 +1,7 @@
 # TEMPORARY MAINTENANCE ONLY.
 # Do not copy this file to docker-compose.override.yml.
 # Use only with an explicit command and a dated decommission window:
+# Decommission by: YYYY-MM-DD HH:MM TZ
 # docker compose -f docker-compose.yml -f docker-compose.cliproxy-public.override.yml up -d cliproxyapi
 
 services:
