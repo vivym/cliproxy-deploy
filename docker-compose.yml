@@ -28,11 +28,76 @@ services:
     networks:
       - proxy
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: newapi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - "postgres-data:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?set POSTGRES_USER} -d ${POSTGRES_DB:?set POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  redis:
+    image: redis:7-alpine
+    container_name: newapi-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    volumes:
+      - "redis-data:/data"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?set REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  new-api:
+    image: calciumion/new-api:${NEW_API_IMAGE_TAG:?set NEW_API_IMAGE_TAG}
+    container_name: new-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      TZ: Asia/Shanghai
+      SQL_DSN: postgresql://${POSTGRES_USER:?set POSTGRES_USER}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?set POSTGRES_DB}
+      REDIS_CONN_STRING: redis://default:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+      SESSION_SECRET: ${NEW_API_SESSION_SECRET:?set NEW_API_SESSION_SECRET}
+      CRYPTO_SECRET: ${NEW_API_CRYPTO_SECRET:?set NEW_API_CRYPTO_SECRET}
+      MEMORY_CACHE_ENABLED: "true"
+      STREAMING_TIMEOUT: "300"
+      CHANNEL_UPDATE_FREQUENCY: "1440"
+    expose:
+      - "3000"
+    networks:
+      - proxy
+      - backend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.services.new-api.loadbalancer.server.port=3000"
+      - "traefik.http.routers.new-api.rule=Host(`${AI_HOST:?set AI_HOST}`)"
+      - "traefik.http.routers.new-api.entrypoints=websecure"
+      - "traefik.http.routers.new-api.tls=true"
+      - "traefik.http.routers.new-api.tls.certresolver=le"
+      - "traefik.http.routers.new-api.service=new-api"
+
   cliproxyapi:
-    image: eceasy/cli-proxy-api:latest
+    image: eceasy/cli-proxy-api:${CLIPROXYAPI_IMAGE_TAG:?set CLIPROXYAPI_IMAGE_TAG}
     container_name: cliproxyapi
     restart: unless-stopped
-    pull_policy: always
     environment:
       DEPLOY: ${DEPLOY:-}
     volumes:
@@ -42,22 +107,39 @@ services:
     expose:
       - "8317"
     networks:
-      - proxy
+      - backend
     labels:
-      - "traefik.enable=true"
-      - "traefik.docker.network=proxy"
+      - "traefik.enable=false"
 
-      # Shared service definition.
-      - "traefik.http.services.cliproxyapi.loadbalancer.server.port=8317"
-
-      # Single public hostname. CLIProxyAPI handles API key auth for /v1/*
-      # and management-secret auth for /v0/management/*.
-      - "traefik.http.routers.cliproxyapi.rule=Host(`${API_HOST:?set API_HOST}`)"
-      - "traefik.http.routers.cliproxyapi.entrypoints=websecure"
-      - "traefik.http.routers.cliproxyapi.tls=true"
-      - "traefik.http.routers.cliproxyapi.tls.certresolver=le"
-      - "traefik.http.routers.cliproxyapi.service=cliproxyapi"
+  cpa-usage-keeper:
+    image: ${CPA_USAGE_KEEPER_IMAGE:?set CPA_USAGE_KEEPER_IMAGE}:${CPA_USAGE_KEEPER_IMAGE_TAG:?set CPA_USAGE_KEEPER_IMAGE_TAG}
+    container_name: cpa-usage-keeper
+    restart: unless-stopped
+    depends_on:
+      - cliproxyapi
+    environment:
+      TZ: Asia/Shanghai
+      CPA_BASE_URL: http://cliproxyapi:8317
+      CPA_MANAGEMENT_KEY: ${MANAGEMENT_SECRET:?set MANAGEMENT_SECRET}
+      REDIS_QUEUE_ADDR: cliproxyapi:8317
+      AUTH_ENABLED: ${CPA_USAGE_KEEPER_AUTH_ENABLED:-true}
+      LOGIN_PASSWORD: ${CPA_USAGE_KEEPER_AUTH_PASSWORD:?set CPA_USAGE_KEEPER_AUTH_PASSWORD}
+      USAGE_SYNC_MODE: redis
+      REDIS_QUEUE_BATCH_SIZE: "1000"
+      REDIS_QUEUE_IDLE_INTERVAL: 1s
+      WORK_DIR: /data
+    volumes:
+      - "cpa-usage-keeper-data:/data"
+    networks:
+      - backend
 
 networks:
   proxy:
     name: proxy
+  backend:
+    name: cliproxy_backend
+
+volumes:
+  postgres-data:
+  redis-data:
+  cpa-usage-keeper-data:
