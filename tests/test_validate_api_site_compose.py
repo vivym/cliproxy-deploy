@@ -1,6 +1,10 @@
+import io
 import importlib.util
+import json
 from pathlib import Path
 import sys
+import tempfile
+from unittest import mock
 import unittest
 
 
@@ -95,6 +99,20 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assert_has_error(compose, "cliproxyapi must not define Traefik router labels")
 
+    def test_rejects_untagged_backend_service_image(self):
+        compose = valid_compose()
+        compose["services"]["cliproxyapi"]["image"] = "eceasy/cli-proxy-api"
+
+        self.assert_has_error(compose, "cliproxyapi image must be pinned")
+
+    def test_rejects_backend_service_traefik_router_label(self):
+        compose = valid_compose()
+        compose["services"]["redis"]["labels"] = {
+            "traefik.http.routers.redis.rule": "Host(`redis.x2r.store`)",
+        }
+
+        self.assert_has_error(compose, "redis must not define Traefik router labels")
+
     def test_rejects_traefik_joining_backend(self):
         compose = valid_compose()
         compose["services"]["traefik"]["networks"] = ["proxy", "backend"]
@@ -170,6 +188,45 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assertIn("SQL_DSN", environment)
         self.assertEqual(environment["SQL_DSN"], "")
+
+    def test_main_prints_success_for_valid_compose(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as compose_file:
+            json.dump(valid_compose(), compose_file)
+            compose_file.flush()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(
+                validate_api_site_compose.sys,
+                "argv",
+                ["validate-api-site-compose.py", compose_file.name, EXPECTED_HOST],
+            ), mock.patch.object(validate_api_site_compose.sys, "stdout", stdout), \
+                    mock.patch.object(validate_api_site_compose.sys, "stderr", stderr):
+                result = validate_api_site_compose.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stdout.getvalue(), "api-site compose validation passed\n")
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_main_prints_errors_to_stderr_for_invalid_compose(self):
+        compose = valid_compose()
+        compose["networks"]["backend"] = {"internal": True}
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as compose_file:
+            json.dump(compose, compose_file)
+            compose_file.flush()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(
+                validate_api_site_compose.sys,
+                "argv",
+                ["validate-api-site-compose.py", compose_file.name, EXPECTED_HOST],
+            ), mock.patch.object(validate_api_site_compose.sys, "stdout", stdout), \
+                    mock.patch.object(validate_api_site_compose.sys, "stderr", stderr):
+                result = validate_api_site_compose.main()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("ERROR: backend network must not set internal: true", stderr.getvalue())
 
 
 if __name__ == "__main__":

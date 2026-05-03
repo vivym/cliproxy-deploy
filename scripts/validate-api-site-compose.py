@@ -172,12 +172,12 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
     for service_name in sorted(BACKEND_ONLY_SERVICES):
         service = _service(compose, service_name)
         labels = labels_for(service)
-        if service_name == "cliproxyapi" and labels.get("traefik.enable", "").lower() == "true":
-            errors.append("cliproxyapi must not enable Traefik")
-        if service_name == "cliproxyapi" and any(
+        if "traefik.enable" in labels and labels["traefik.enable"].lower() != "false":
+            errors.append("{} must not enable Traefik".format(service_name))
+        if any(
             label.startswith("traefik.http.routers.") for label in labels
         ):
-            errors.append("cliproxyapi must not define Traefik router labels")
+            errors.append("{} must not define Traefik router labels".format(service_name))
         if has_host_ports(service):
             errors.append("{} must not publish host ports".format(service_name))
         if networks_for(service) != {"backend"}:
@@ -190,9 +190,8 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
     for service_name, service in sorted(services.items()):
         if not isinstance(service, dict):
             continue
-        image = str(service.get("image", ""))
-        if not image_is_pinned(image) and ":latest" in image.split("@", 1)[0]:
-            errors.append("{} image must not use :latest".format(service_name))
+        if "image" in service and not image_is_pinned(str(service.get("image", ""))):
+            errors.append("{} image must be pinned to a non-latest tag".format(service_name))
 
     return errors
 
