@@ -7,13 +7,33 @@ Docker Compose deployment for CLIProxyAPI with Traefik-managed HTTPS.
 Configure DNS A/AAAA records to point at the server:
 
 ```text
-api.cliproxy.x2r.store
-admin.cliproxy.x2r.store
+cliproxy.x2r.store
+cliproxy-admin.x2r.store
 ```
 
 Open ports `80` and `443` on the server firewall. Do not expose CLIProxyAPI port `8317` to the public internet.
 
 Traefik uses the Docker socket to discover labelled containers, so Traefik and anyone able to start or label containers on this Docker daemon are inside the deployment trust boundary.
+
+## Cloudflare
+
+These hostnames are first-level subdomains of `x2r.store`, so they can use Cloudflare's standard proxied Universal SSL coverage:
+
+```text
+A  cliproxy        <server-ip>  Proxied
+A  cliproxy-admin  <server-ip>  Proxied
+```
+
+Set Cloudflare SSL/TLS mode to `Full (strict)`. Do not use `Flexible`.
+
+Add cache rules to bypass cache for both hostnames:
+
+```text
+Hostname equals cliproxy.x2r.store       -> Bypass cache
+Hostname equals cliproxy-admin.x2r.store -> Bypass cache
+```
+
+If initial Let's Encrypt issuance fails while Cloudflare proxying is enabled, temporarily switch both records to DNS only, restart Traefik, wait for certificate issuance, then switch them back to proxied.
 
 ## Files
 
@@ -92,27 +112,27 @@ docker compose ps
 API hostname:
 
 ```bash
-curl -I https://api.cliproxy.x2r.store
+curl -I https://cliproxy.x2r.store
 ```
 
 Admin hostname without BasicAuth should return `401`:
 
 ```bash
-curl -I https://admin.cliproxy.x2r.store/management.html
+curl -I https://cliproxy-admin.x2r.store/management.html
 ```
 
 Management paths on the API hostname must also require BasicAuth or otherwise not pass through the unauthenticated API router:
 
 ```bash
-curl -I https://api.cliproxy.x2r.store/management
-curl -I https://api.cliproxy.x2r.store/management.html
-curl -I https://api.cliproxy.x2r.store/v0/management/api-key-usage
+curl -I https://cliproxy.x2r.store/management
+curl -I https://cliproxy.x2r.store/management.html
+curl -I https://cliproxy.x2r.store/v0/management/api-key-usage
 ```
 
 With valid BasicAuth credentials, the management page should load:
 
 ```bash
-curl -I -u 'admin:your-admin-password' https://admin.cliproxy.x2r.store/management.html
+curl -I -u 'admin:your-admin-password' https://cliproxy-admin.x2r.store/management.html
 ```
 
 Management API actions still require the CLIProxyAPI management secret.

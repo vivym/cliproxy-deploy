@@ -9,14 +9,14 @@ Generate a production-oriented Docker Compose deployment for CLIProxyAPI in this
 Base domain:
 
 ```text
-cliproxy.x2r.store
+x2r.store
 ```
 
 Public hostnames:
 
 ```text
-api.cliproxy.x2r.store
-admin.cliproxy.x2r.store
+cliproxy.x2r.store
+cliproxy-admin.x2r.store
 ```
 
 ACME email:
@@ -56,10 +56,10 @@ Traffic flow:
 ```text
 Internet
   -> Traefik :80/:443
-    -> api.cliproxy.x2r.store
+    -> cliproxy.x2r.store
       -> CLIProxyAPI :8317 on Docker network
 
-    -> admin.cliproxy.x2r.store
+    -> cliproxy-admin.x2r.store
       -> Traefik BasicAuth
       -> CLIProxyAPI :8317 on Docker network
 ```
@@ -138,7 +138,7 @@ environment:
 
 ### API Router
 
-`api.cliproxy.x2r.store` routes to CLIProxyAPI without Traefik BasicAuth.
+`cliproxy.x2r.store` routes to CLIProxyAPI without Traefik BasicAuth.
 
 This hostname is intended for normal API client traffic. API access is controlled by CLIProxyAPI `api-keys`.
 
@@ -170,7 +170,7 @@ Host(`${API_HOST}`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`
 
 ### Admin Router
 
-`admin.cliproxy.x2r.store` routes to the same CLIProxyAPI service but attaches a Traefik BasicAuth middleware.
+`cliproxy-admin.x2r.store` routes to the same CLIProxyAPI service but attaches a Traefik BasicAuth middleware.
 
 This hostname is intended for:
 
@@ -182,7 +182,7 @@ This hostname is intended for:
 
 No IP allowlist is included in the first version.
 
-The admin router may be a catch-all for `admin.cliproxy.x2r.store`, but all management paths must also be protected when reached through `api.cliproxy.x2r.store`.
+The admin router may be a catch-all for `cliproxy-admin.x2r.store`, but all management paths must also be protected when reached through `cliproxy.x2r.store`.
 
 ## Security
 
@@ -208,8 +208,8 @@ Committed `.env.example` should contain placeholders:
 
 ```env
 ACME_EMAIL=ymviv@qq.com
-API_HOST=api.cliproxy.x2r.store
-ADMIN_HOST=admin.cliproxy.x2r.store
+API_HOST=cliproxy.x2r.store
+ADMIN_HOST=cliproxy-admin.x2r.store
 TRAEFIK_BASIC_AUTH_USERS=admin:replace-with-escaped-htpasswd-hash
 DEPLOY=
 ```
@@ -290,8 +290,8 @@ docker compose ps
 Verification:
 
 ```bash
-curl -I https://api.cliproxy.x2r.store
-curl -I https://admin.cliproxy.x2r.store/management.html
+curl -I https://cliproxy.x2r.store
+curl -I https://cliproxy-admin.x2r.store/management.html
 ```
 
 Expected admin behavior:
@@ -308,12 +308,12 @@ OAuth login callback ports should not be permanently exposed. Account login shou
 
 If HTTPS fails:
 
-- Check DNS records for `api.cliproxy.x2r.store` and `admin.cliproxy.x2r.store`.
+- Check DNS records for `cliproxy.x2r.store` and `cliproxy-admin.x2r.store`.
 - Check that ports `80` and `443` are open.
 - Check Traefik logs.
 - Check `letsencrypt/acme.json` permissions.
 
-If the admin page is reachable through `api.cliproxy.x2r.store` without BasicAuth, the Traefik router priorities or API router path exclusions are wrong and must be fixed before use.
+If the admin page is reachable through `cliproxy.x2r.store` without BasicAuth, the Traefik router priorities or API router path exclusions are wrong and must be fixed before use.
 
 If admin returns `401`, BasicAuth is working. Retry with credentials.
 
@@ -335,8 +335,8 @@ After starting services:
 docker compose ps
 docker compose logs --tail=100 traefik
 docker compose logs --tail=100 cliproxyapi
-curl -I https://api.cliproxy.x2r.store
-curl -I https://admin.cliproxy.x2r.store/management.html
+curl -I https://cliproxy.x2r.store
+curl -I https://cliproxy-admin.x2r.store/management.html
 ```
 
 Admin BasicAuth should be verified with both unauthenticated and authenticated requests.
@@ -344,9 +344,9 @@ Admin BasicAuth should be verified with both unauthenticated and authenticated r
 Management paths should also be tested on the API hostname:
 
 ```bash
-curl -I https://api.cliproxy.x2r.store/management
-curl -I https://api.cliproxy.x2r.store/management.html
-curl -I https://api.cliproxy.x2r.store/v0/management/api-key-usage
+curl -I https://cliproxy.x2r.store/management
+curl -I https://cliproxy.x2r.store/management.html
+curl -I https://cliproxy.x2r.store/v0/management/api-key-usage
 ```
 
 All requests should require BasicAuth or otherwise not pass through the unauthenticated API router.

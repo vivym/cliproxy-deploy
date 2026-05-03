@@ -91,8 +91,8 @@ Create `.env.example` with exactly:
 ACME_EMAIL=ymviv@qq.com
 
 # Public hostnames.
-API_HOST=api.cliproxy.x2r.store
-ADMIN_HOST=admin.cliproxy.x2r.store
+API_HOST=cliproxy.x2r.store
+ADMIN_HOST=cliproxy-admin.x2r.store
 
 # Traefik BasicAuth users.
 # Generate with:
@@ -371,15 +371,15 @@ trap 'rm -rf "$tmpdir" /tmp/cliproxy-compose.json' EXIT
 cp docker-compose.yml "$tmpdir/docker-compose.yml"
 cat > "$tmpdir/.env" <<'EOF'
 ACME_EMAIL=ymviv@qq.com
-API_HOST=api.cliproxy.x2r.store
-ADMIN_HOST=admin.cliproxy.x2r.store
+API_HOST=cliproxy.x2r.store
+ADMIN_HOST=cliproxy-admin.x2r.store
 TRAEFIK_BASIC_AUTH_USERS=admin:$$2y$$05$$abcdefghijklmnopqrstuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu
 DEPLOY=
 EOF
 (cd "$tmpdir" && docker compose config --format json) > /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.priority"] == "100"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api.priority"] == "10"' /tmp/cliproxy-compose.json
-jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.rule"] == "Host(`api.cliproxy.x2r.store`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.rule"] == "Host(`cliproxy.x2r.store`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.middlewares.admin-auth.basicauth.users"] | contains("$$2y$$05$$")' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.ports == null and (.services.cliproxyapi.expose == ["8317"])' /tmp/cliproxy-compose.json
 ```
@@ -426,8 +426,8 @@ Docker Compose deployment for CLIProxyAPI with Traefik-managed HTTPS.
 Configure DNS A/AAAA records to point at the server:
 
 ```text
-api.cliproxy.x2r.store
-admin.cliproxy.x2r.store
+cliproxy.x2r.store
+cliproxy-admin.x2r.store
 ```
 
 Open ports `80` and `443` on the server firewall. Do not expose CLIProxyAPI port `8317` to the public internet.
@@ -507,27 +507,27 @@ docker compose ps
 API hostname:
 
 ```bash
-curl -I https://api.cliproxy.x2r.store
+curl -I https://cliproxy.x2r.store
 ```
 
 Admin hostname without BasicAuth should return `401`:
 
 ```bash
-curl -I https://admin.cliproxy.x2r.store/management.html
+curl -I https://cliproxy-admin.x2r.store/management.html
 ```
 
 Management paths on the API hostname must also require BasicAuth or otherwise not pass through the unauthenticated API router:
 
 ```bash
-curl -I https://api.cliproxy.x2r.store/management
-curl -I https://api.cliproxy.x2r.store/management.html
-curl -I https://api.cliproxy.x2r.store/v0/management/api-key-usage
+curl -I https://cliproxy.x2r.store/management
+curl -I https://cliproxy.x2r.store/management.html
+curl -I https://cliproxy.x2r.store/v0/management/api-key-usage
 ```
 
 With valid BasicAuth credentials, the management page should load:
 
 ```bash
-curl -I -u 'admin:your-admin-password' https://admin.cliproxy.x2r.store/management.html
+curl -I -u 'admin:your-admin-password' https://cliproxy-admin.x2r.store/management.html
 ```
 
 Management API actions still require the CLIProxyAPI management secret.
@@ -600,7 +600,7 @@ for pattern in \
   'Do not expose CLIProxyAPI port `8317`' \
   'Every `\$` in the hash must be escaped' \
   'request-log: true' \
-  'api.cliproxy.x2r.store/v0/management/api-key-usage' \
+  'cliproxy.x2r.store/v0/management/api-key-usage' \
   'not an external Redis service'; do
   rg -q "$pattern" README.md
 done
@@ -703,8 +703,8 @@ trap 'rm -rf "$tmpdir" /tmp/cliproxy-compose.json' EXIT
 cp docker-compose.yml "$tmpdir/docker-compose.yml"
 cat > "$tmpdir/.env" <<'EOF'
 ACME_EMAIL=ymviv@qq.com
-API_HOST=api.cliproxy.x2r.store
-ADMIN_HOST=admin.cliproxy.x2r.store
+API_HOST=cliproxy.x2r.store
+ADMIN_HOST=cliproxy-admin.x2r.store
 TRAEFIK_BASIC_AUTH_USERS=admin:$$2y$$05$$abcdefghijklmnopqrstuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu
 DEPLOY=
 EOF
@@ -713,7 +713,7 @@ jq -e '([.services.traefik.ports[].target] == [80, 443]) and ([.services.traefik
 jq -e '.services.cliproxyapi.ports == null and (.services.cliproxyapi.expose == ["8317"])' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.priority"] == "100"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api.priority"] == "10"' /tmp/cliproxy-compose.json
-jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.rule"] == "Host(`api.cliproxy.x2r.store`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"' /tmp/cliproxy-compose.json
+jq -e '.services.cliproxyapi.labels["traefik.http.routers.cliproxyapi-api-management.rule"] == "Host(`cliproxy.x2r.store`) && (PathPrefix(`/management`) || PathPrefix(`/v0/management`))"' /tmp/cliproxy-compose.json
 jq -e '.services.cliproxyapi.labels["traefik.http.middlewares.admin-auth.basicauth.users"] | contains("$$2y$$05$$")' /tmp/cliproxy-compose.json
 ```
 
@@ -784,6 +784,6 @@ docker compose ps
 - Do not commit `.env`, `config.yaml`, `auths/`, `logs/`, or `letsencrypt/`.
 - Do not add `ports: "8317:8317"` to CLIProxyAPI.
 - Do not add a standalone Redis container.
-- Do not remove BasicAuth from `admin.cliproxy.x2r.store`.
+- Do not remove BasicAuth from `cliproxy-admin.x2r.store`.
 - Do not leave API-host management paths protected only by CLIProxyAPI's management secret; Traefik BasicAuth must also apply.
 - Do not make `config.yaml` read-only; CLIProxyAPI may rewrite the management secret as a hash.
