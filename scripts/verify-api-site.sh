@@ -41,10 +41,27 @@ docker compose exec -T new-api sh -lc \
   "wget -qO- --header='Authorization: Bearer ${CLIPROXY_INTERNAL_API_KEY:?set CLIPROXY_INTERNAL_API_KEY}' http://cliproxyapi:8317/v1/models >/dev/null"
 
 echo "Checking CLIProxyAPI public host is blocked: ${CLIPROXY_PUBLIC_HOST:?set CLIPROXY_PUBLIC_HOST}"
-http_code="$(curl -k -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 "https://${CLIPROXY_PUBLIC_HOST}/v1/models" || true)"
+set +e
+http_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 "https://${CLIPROXY_PUBLIC_HOST}/v1/models")"
+curl_exit=$?
+set -e
+
 if [[ "$http_code" != "000" ]]; then
-  echo "CLIProxyAPI must not be publicly reachable: ${CLIPROXY_PUBLIC_HOST} returned HTTP ${http_code}" >&2
+  echo "CLIProxyAPI must not be publicly reachable: ${CLIPROXY_PUBLIC_HOST} returned HTTP ${http_code} (curl exit code ${curl_exit})" >&2
   exit 1
 fi
+
+case "$curl_exit" in
+  7)
+    # Expected: host resolves, but no service accepts the public connection.
+    ;;
+  28)
+    # Expected: host resolves, but the public path times out without an HTTP response.
+    ;;
+  *)
+    echo "CLIProxyAPI public exposure check did not reliably verify ${CLIPROXY_PUBLIC_HOST}: curl exit code ${curl_exit}, HTTP ${http_code}" >&2
+    exit 1
+    ;;
+esac
 
 echo "API-site verification checks completed"
