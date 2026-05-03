@@ -65,5 +65,5 @@ routing:
   session-affinity: true
   session-affinity-ttl: "2h"
 
-# Leave websocket auth disabled unless clients require authenticated websocket use.
-ws-auth: false
+# Require API-key authentication for /v1/ws WebSocket clients too.
+ws-auth: true

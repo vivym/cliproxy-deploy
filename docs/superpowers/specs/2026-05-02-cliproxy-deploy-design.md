@@ -157,6 +157,7 @@ request-log: true
 usage-statistics-enabled: true
 redis-usage-queue-retention-seconds: 300
 logs-max-total-size-mb: 2048
+ws-auth: true
 routing:
   strategy: "round-robin"
   session-affinity: true
@@ -168,6 +169,8 @@ routing:
 The Redis usage queue is CLIProxyAPI's built-in Redis-compatible RESP queue on the same internal port. It does not require an external Redis container and should not be exposed publicly.
 
 Session affinity makes a client session prefer the same upstream account for two hours when possible. It is still allowed to move when retry or credential availability requires it.
+
+`ws-auth: true` requires API-key authentication for `/v1/ws` WebSocket clients on the public hostname.
 
 ## Operations
 

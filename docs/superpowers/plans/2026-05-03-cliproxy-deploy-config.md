@@ -96,6 +96,12 @@ routing:
   session-affinity-ttl: "2h"
 ```
 
+CLIProxyAPI should require API-key authentication for public WebSocket clients:
+
+```yaml
+ws-auth: true
+```
+
 ## Environment Template
 
 `.env.example` should contain:
@@ -115,6 +121,7 @@ git diff --check
 git check-ignore .env config.yaml auths/ logs/ letsencrypt/
 ruby -e 'require "yaml"; YAML.load_file("config.yaml.template"); puts "config.yaml.template: valid YAML"'
 ruby -e 'require "yaml"; cfg = YAML.load_file("config.yaml.template"); abort "missing routing.session-affinity=true" unless cfg.dig("routing", "session-affinity") == true; abort "missing routing.session-affinity-ttl" unless cfg.dig("routing", "session-affinity-ttl").to_s != ""; puts "session affinity configured"'
+ruby -e 'require "yaml"; cfg = YAML.load_file("config.yaml.template"); abort "missing ws-auth=true" unless cfg["ws-auth"] == true; puts "ws-auth configured"'
 ```
 
 Compose validation:

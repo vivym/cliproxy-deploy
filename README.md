@@ -166,6 +166,16 @@ routing:
 
 This is not a hard pin. CLIProxyAPI may still switch credentials when retrying or when the previously selected credential is unavailable.
 
+## WebSocket Auth
+
+The template enables API-key authentication for CLIProxyAPI WebSocket clients:
+
+```yaml
+ws-auth: true
+```
+
+This protects `/v1/ws` on the public hostname. HTTP API requests and management API requests continue to use their existing `api-keys` and `remote-management.secret-key` authentication.
+
 ## OAuth Login
 
 Do not permanently expose OAuth callback ports. Run login commands inside the container and use SSH tunneling or temporary port exposure only when needed.
