@@ -28,6 +28,13 @@ REQUIRED_NEW_API_ENV = {
     "SESSION_SECRET",
     "CRYPTO_SECRET",
 }
+REQUIRED_NEW_API_TRAEFIK_LABELS = {
+    "traefik.http.routers.new-api.entrypoints": "websecure",
+    "traefik.http.routers.new-api.tls": "true",
+    "traefik.http.routers.new-api.tls.certresolver": "le",
+    "traefik.http.routers.new-api.service": "new-api",
+    "traefik.http.services.new-api.loadbalancer.server.port": "3000",
+}
 BACKEND_ONLY_SERVICES = {
     "cliproxyapi",
     "postgres",
@@ -168,6 +175,16 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
     expected_rule = "Host(`{}`)".format(expected_host)
     if new_api_labels.get("traefik.http.routers.new-api.rule") != expected_rule:
         errors.append("new-api Traefik router must route {}".format(expected_rule))
+    for label, expected_value in sorted(REQUIRED_NEW_API_TRAEFIK_LABELS.items()):
+        actual_value = new_api_labels.get(label)
+        if label == "traefik.http.routers.new-api.tls":
+            matches = actual_value is not None and actual_value.lower() == expected_value
+        else:
+            matches = actual_value == expected_value
+        if not matches:
+            errors.append(
+                "new-api Traefik label {} must be {}".format(label, expected_value)
+            )
     new_api_networks = networks_for(new_api)
     for network_name in ("proxy", "backend"):
         if network_name not in new_api_networks:
@@ -177,8 +194,9 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
         if env_name not in new_api_environment:
             errors.append("new-api missing required environment {}".format(env_name))
 
-    for service_name in sorted(BACKEND_ONLY_SERVICES):
-        service = _service(compose, service_name)
+    for service_name, service in sorted(services.items()):
+        if service_name in {"traefik", "new-api"} or not isinstance(service, dict):
+            continue
         labels = labels_for(service)
         if "traefik.enable" in labels and labels["traefik.enable"].lower() != "false":
             errors.append("{} must not enable Traefik".format(service_name))
@@ -193,6 +211,11 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
             errors.append("{} must not define Traefik labels".format(service_name))
         if has_host_ports(service):
             errors.append("{} must not publish host ports".format(service_name))
+        if "proxy" in networks_for(service):
+            errors.append("{} must not join proxy".format(service_name))
+
+    for service_name in sorted(BACKEND_ONLY_SERVICES):
+        service = _service(compose, service_name)
         if networks_for(service) != {"backend"}:
             errors.append("{} must only join backend".format(service_name))
 

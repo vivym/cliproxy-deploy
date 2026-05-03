@@ -30,6 +30,11 @@ def valid_compose():
                 "labels": {
                     "traefik.enable": "true",
                     "traefik.http.routers.new-api.rule": "Host(`ai.x2r.store`)",
+                    "traefik.http.routers.new-api.entrypoints": "websecure",
+                    "traefik.http.routers.new-api.tls": "true",
+                    "traefik.http.routers.new-api.tls.certresolver": "le",
+                    "traefik.http.routers.new-api.service": "new-api",
+                    "traefik.http.services.new-api.loadbalancer.server.port": "3000",
                 },
                 "environment": {
                     "SQL_DSN": "postgresql://newapi:pw@postgres:5432/newapi",
@@ -149,6 +154,36 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assertEqual(validate_api_site_compose.validate(compose, EXPECTED_HOST), [])
 
+    def test_rejects_unexpected_service_host_ports(self):
+        compose = valid_compose()
+        compose["services"]["debug"] = {
+            "image": "busybox:1",
+            "networks": ["backend"],
+            "ports": ["9000:9000"],
+        }
+
+        self.assert_has_error(compose, "debug must not publish host ports")
+
+    def test_rejects_unexpected_service_traefik_labels(self):
+        compose = valid_compose()
+        compose["services"]["debug"] = {
+            "image": "busybox:1",
+            "networks": ["backend"],
+            "labels": {"traefik.http.routers.debug.rule": "Host(`debug.x2r.store`)"},
+        }
+
+        self.assert_has_error(compose, "debug must not define Traefik labels")
+
+    def test_rejects_unexpected_service_joining_proxy(self):
+        compose = valid_compose()
+        compose["services"]["debug"] = {
+            "image": "busybox:1",
+            "networks": ["proxy", "backend"],
+            "labels": {"traefik.enable": "false"},
+        }
+
+        self.assert_has_error(compose, "debug must not join proxy")
+
     def test_rejects_traefik_joining_backend(self):
         compose = valid_compose()
         compose["services"]["traefik"]["networks"] = ["proxy", "backend"]
@@ -213,6 +248,34 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assert_has_error(compose, "new-api missing required environment SQL_DSN")
 
+    def test_rejects_missing_or_wrong_new_api_traefik_labels(self):
+        required_labels = {
+            "traefik.http.routers.new-api.entrypoints": ("api", "websecure"),
+            "traefik.http.routers.new-api.tls": ("false", "true"),
+            "traefik.http.routers.new-api.tls.certresolver": ("default", "le"),
+            "traefik.http.routers.new-api.service": ("wrong-service", "new-api"),
+            "traefik.http.services.new-api.loadbalancer.server.port": ("8080", "3000"),
+        }
+
+        for label, (wrong_value, expected_value) in required_labels.items():
+            with self.subTest(label=label, mode="missing"):
+                compose = valid_compose()
+                del compose["services"]["new-api"]["labels"][label]
+
+                self.assert_has_error(
+                    compose,
+                    "new-api Traefik label {} must be {}".format(label, expected_value),
+                )
+
+            with self.subTest(label=label, mode="wrong"):
+                compose = valid_compose()
+                compose["services"]["new-api"]["labels"][label] = wrong_value
+
+                self.assert_has_error(
+                    compose,
+                    "new-api Traefik label {} must be {}".format(label, expected_value),
+                )
+
     def test_rejects_missing_postgres_data_volume(self):
         compose = valid_compose()
         del compose["volumes"]["postgres-data"]
@@ -224,6 +287,11 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         compose["services"]["new-api"]["labels"] = [
             "traefik.enable=true",
             "traefik.http.routers.new-api.rule=Host(`ai.x2r.store`)",
+            "traefik.http.routers.new-api.entrypoints=websecure",
+            "traefik.http.routers.new-api.tls=true",
+            "traefik.http.routers.new-api.tls.certresolver=le",
+            "traefik.http.routers.new-api.service=new-api",
+            "traefik.http.services.new-api.loadbalancer.server.port=3000",
         ]
         compose["services"]["new-api"]["environment"] = [
             "SQL_DSN=postgresql://newapi:pw@postgres:5432/newapi",
