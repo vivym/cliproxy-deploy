@@ -129,6 +129,43 @@ curl -H "Authorization: Bearer $CLIENT_API_KEY" https://cliproxy.x2r.store/v1/mo
 
 The management page itself is public static UI. Sensitive management actions are protected by `remote-management.secret-key`; public API calls are protected by `api-keys`.
 
+## Latency Profiling
+
+From your local machine, compare the normal route, direct Cloudflare route, and direct VPS origin route:
+
+```bash
+scripts/profile-latency.py --origin-ip <vps-ip> --runs 10 --csv tmp/local-latency.csv
+```
+
+If your terminal does not use proxy environment variables, pass the local proxy explicitly:
+
+```bash
+scripts/profile-latency.py --origin-ip <vps-ip> --proxy http://127.0.0.1:7890
+```
+
+For protected API paths, pass the key through an environment variable so it is not printed:
+
+```bash
+CLIENT_API_KEY=sk-... scripts/profile-latency.py \
+  --origin-ip <vps-ip> \
+  --path /v1/models \
+  --api-key-env CLIENT_API_KEY
+```
+
+On the VPS, compare Traefik loopback against direct CLIProxyAPI container access:
+
+```bash
+scripts/profile-origin.py --runs 10 --csv tmp/origin-latency.csv
+```
+
+The derived values are approximate:
+
+```text
+proxy_delta_ms      ~= cf-default - cf-direct
+cloudflare_delta_ms ~= cf-direct - origin-direct
+traefik_overhead_ms ~= traefik-loopback - cliproxy-direct
+```
+
 ## Logs
 
 `request-log: true` is enabled. This can record request bodies, response bodies, headers, streaming chunks, and upstream API data. Treat `logs/` as sensitive.
