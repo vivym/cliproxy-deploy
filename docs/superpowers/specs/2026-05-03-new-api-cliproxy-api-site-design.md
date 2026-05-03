@@ -88,7 +88,7 @@ backend network:
   cpa-usage-keeper
 ```
 
-Traefik must not join the backend network. Postgres, Redis, CLIProxyAPI, and CPA Usage Keeper must not publish host ports.
+Traefik must not join the backend network. Postgres, Redis, CLIProxyAPI, and CPA Usage Keeper must not publish host ports. Do not set Docker `internal: true` on the backend network, because CLIProxyAPI and New API need outbound internet access to upstream providers and package/image services. Privacy comes from no host-published ports and no Traefik attachment, not from disabling egress.
 
 ## Version Strategy
 
