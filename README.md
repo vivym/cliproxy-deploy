@@ -176,6 +176,16 @@ ws-auth: true
 
 This protects `/v1/ws` on the public hostname. HTTP API requests and management API requests continue to use their existing `api-keys` and `remote-management.secret-key` authentication.
 
+## Convert Codex Switcher Accounts
+
+Use the helper script to convert codex-switcher's multi-account `accounts.json` into CLIProxyAPI Codex auth files:
+
+```bash
+scripts/convert-codex-switcher-accounts.py tmp/accounts.json auths
+```
+
+The script writes one `codex-<email>-<plan>.json` file per account, sets generated file permissions to `0600`, and prints only generated file paths.
+
 ## OAuth Login
 
 Do not permanently expose OAuth callback ports. Run login commands inside the container and use SSH tunneling or temporary port exposure only when needed.
