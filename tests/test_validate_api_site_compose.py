@@ -297,6 +297,12 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
                     "new-api Traefik label {} must be {}".format(label, expected_value),
                 )
 
+    def test_rejects_new_api_host_ports(self):
+        compose = valid_compose()
+        compose["services"]["new-api"]["ports"] = ["3000:3000"]
+
+        self.assert_has_error(compose, "new-api must not publish host ports")
+
     def test_rejects_missing_postgres_data_volume(self):
         compose = valid_compose()
         del compose["volumes"]["postgres-data"]

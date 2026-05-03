@@ -213,7 +213,11 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
             errors.append("new-api missing required environment {}".format(env_name))
 
     for service_name, service in sorted(services.items()):
-        if service_name in {"traefik", "new-api"} or not isinstance(service, dict):
+        if not isinstance(service, dict):
+            continue
+        if service_name != "traefik" and has_host_ports(service):
+            errors.append("{} must not publish host ports".format(service_name))
+        if service_name in {"traefik", "new-api"}:
             continue
         labels = label_pairs_for(service)
         if any(label == "traefik.enable" and value != "false" for label, value in labels):
@@ -227,8 +231,6 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
             for label, value in labels
         ):
             errors.append("{} must not define Traefik labels".format(service_name))
-        if has_host_ports(service):
-            errors.append("{} must not publish host ports".format(service_name))
         if "proxy" in networks_for(service):
             errors.append("{} must not join proxy".format(service_name))
 
