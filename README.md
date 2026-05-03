@@ -121,31 +121,47 @@ New API is the public management, user, and SDK entry point. CLIProxyAPI managem
 
 ## Latency Profiling
 
-From your local machine, compare the normal route, direct Cloudflare route, and direct VPS origin route:
+Public profiling targets New API through Traefik at `ai.x2r.store`, not CLIProxyAPI internal management routes. From your local machine, compare the normal route, direct Cloudflare route, and direct VPS origin route for an API-site path:
 
 ```bash
-scripts/profile-latency.py --origin-ip <vps-ip> --runs 10 --csv tmp/local-latency.csv
+scripts/profile-latency.py \
+  --host ai.x2r.store \
+  --path /api/status \
+  --origin-ip <vps-ip> \
+  --runs 10 \
+  --csv tmp/local-latency.csv
 ```
 
 If your terminal does not use proxy environment variables, pass the local proxy explicitly:
 
 ```bash
-scripts/profile-latency.py --origin-ip <vps-ip> --proxy http://127.0.0.1:7890
+scripts/profile-latency.py \
+  --host ai.x2r.store \
+  --path /api/status \
+  --origin-ip <vps-ip> \
+  --proxy http://127.0.0.1:7890
 ```
 
 For protected New API paths, pass the key through an environment variable so it is not printed:
 
 ```bash
 NEW_API_KEY=sk-... scripts/profile-latency.py \
+  --host ai.x2r.store \
   --origin-ip <vps-ip> \
   --path /v1/models \
   --api-key-env NEW_API_KEY
 ```
 
-On the VPS, compare Traefik loopback against direct CLIProxyAPI container access:
+On the VPS in API Site Mode, use origin profiling as an internal diagnostic by comparing Traefik loopback to direct New API container access. Override the direct target explicitly; the script's `cliproxy-direct` label is historical in this mode.
 
 ```bash
-scripts/profile-origin.py --runs 10 --csv tmp/origin-latency.csv
+new_api_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}}' new-api | awk 'NF{print; exit}')"
+scripts/profile-origin.py \
+  --host ai.x2r.store \
+  --path /api/status \
+  --cliproxy-url "http://${new_api_ip}:3000/api/status" \
+  --runs 10 \
+  --csv tmp/origin-latency.csv
 ```
 
 The derived values are approximate:
@@ -153,7 +169,7 @@ The derived values are approximate:
 ```text
 proxy_delta_ms      ~= cf-default - cf-direct
 cloudflare_delta_ms ~= cf-direct - origin-direct
-traefik_overhead_ms ~= traefik-loopback - cliproxy-direct
+traefik_overhead_ms ~= traefik-loopback - direct New API container
 ```
 
 ## Logs

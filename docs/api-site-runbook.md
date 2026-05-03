@@ -96,7 +96,12 @@ For each case, record user balance before, user balance after, observed quota de
 
 - Run `scripts/backup-api-site.sh`.
 - Store encrypted backups off-host.
-- Restore Postgres into a disposable environment before meaningful paid usage.
+- Before meaningful paid usage, run a disposable restore drill:
+  - Restore `config.yaml`.
+  - Restore `auths`.
+  - Restore `newapi-postgres.dump` with `pg_restore` into disposable New API Postgres.
+  - Restore CPA Usage Keeper data if `cpa-usage-keeper-data` is present.
+  - Run compose validation and `scripts/verify-api-site.sh`.
 
 ## Rollback
 
@@ -106,6 +111,8 @@ For each case, record user balance before, user balance after, observed quota de
 
 ## Launch Gates
 
+Set `NEW_API_TEST_API_KEY` and `CODEX_TEST_API_KEY` before launch validation. Launch is blocked if `/v1/responses` is skipped.
+
 Run:
 
 ```bash
@@ -114,5 +121,9 @@ test -f config.yaml
 ! rg -n 'replace-with-|CHANGEME|change-me' .env config.yaml
 docker compose config --format json > /tmp/api-site-compose.json
 scripts/validate-api-site-compose.py /tmp/api-site-compose.json --host ai.x2r.store
-scripts/verify-api-site.sh
+: "${NEW_API_TEST_API_KEY:?set NEW_API_TEST_API_KEY for launch validation}"
+: "${CODEX_TEST_API_KEY:?set CODEX_TEST_API_KEY for /v1/responses launch validation}"
+scripts/verify-api-site.sh > /tmp/api-site-verify.log
+cat /tmp/api-site-verify.log
+! rg -n 'Skipping /v1/responses' /tmp/api-site-verify.log
 ```
