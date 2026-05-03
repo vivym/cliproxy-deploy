@@ -3,7 +3,7 @@ import argparse
 import json
 import re
 import sys
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Set, Tuple
 
 
 PINNED_TAG_RE = re.compile(r":(?!latest$)[A-Za-z0-9][A-Za-z0-9_.-]*$")
@@ -64,6 +64,24 @@ def labels_for(service: Dict[str, Any]) -> Dict[str, str]:
             result[key] = value
         return result
     return {}
+
+
+def label_pairs_for(service: Dict[str, Any]) -> List[Tuple[str, str]]:
+    labels = service.get("labels", {})
+    if isinstance(labels, dict):
+        return [(str(key), str(value)) for key, value in labels.items()]
+    if isinstance(labels, list):
+        result = []
+        for label in labels:
+            if not isinstance(label, str):
+                continue
+            if "=" in label:
+                key, value = label.split("=", 1)
+            else:
+                key, value = label, ""
+            result.append((key, value))
+        return result
+    return []
 
 
 def networks_for(service: Dict[str, Any]) -> Set[str]:
@@ -197,16 +215,16 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
     for service_name, service in sorted(services.items()):
         if service_name in {"traefik", "new-api"} or not isinstance(service, dict):
             continue
-        labels = labels_for(service)
-        if "traefik.enable" in labels and labels["traefik.enable"] != "false":
+        labels = label_pairs_for(service)
+        if any(label == "traefik.enable" and value != "false" for label, value in labels):
             errors.append("{} must not enable Traefik".format(service_name))
         if any(
             label.startswith("traefik.")
             and not (
                 label == "traefik.enable"
-                and labels[label] == "false"
+                and value == "false"
             )
-            for label in labels
+            for label, value in labels
         ):
             errors.append("{} must not define Traefik labels".format(service_name))
         if has_host_ports(service):

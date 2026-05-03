@@ -160,6 +160,15 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assert_has_error(compose, "redis must not enable Traefik")
 
+    def test_rejects_backend_service_duplicate_list_traefik_enable(self):
+        compose = valid_compose()
+        compose["services"]["redis"]["labels"] = [
+            "traefik.enable=true",
+            "traefik.enable=false",
+        ]
+
+        self.assert_has_error(compose, "redis must not enable Traefik")
+
     def test_rejects_backend_service_boolean_traefik_enable_false(self):
         compose = valid_compose()
         compose["services"]["redis"]["labels"] = {"traefik.enable": False}
