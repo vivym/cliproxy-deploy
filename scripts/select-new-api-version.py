@@ -65,10 +65,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = parser.parse_args([] if argv is None else argv)
 
-    stdin = "" if sys.stdin.isatty() else sys.stdin.read().strip()
-    tags = stdin.splitlines() if stdin else fetch_tags(args.repo)
-    print(select_latest_stable(tags))
-    return 0
+    try:
+        if sys.stdin.isatty():
+            tags = fetch_tags(args.repo)
+        else:
+            tags = sys.stdin.read().splitlines()
+        print(select_latest_stable(tags))
+        return 0
+    except ValueError as exc:
+        sys.stderr.write(f"Error: {exc}\n")
+        return 1
+    except subprocess.CalledProcessError as exc:
+        message = (exc.stderr or str(exc)).strip()
+        sys.stderr.write(f"Error: {message}\n")
+        return 1
 
 
 if __name__ == "__main__":
