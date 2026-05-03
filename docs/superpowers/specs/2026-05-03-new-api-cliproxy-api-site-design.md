@@ -1,0 +1,378 @@
+# New API + CLIProxyAPI API Site Design
+
+## Goal
+
+Build a public API site on top of the existing CLIProxyAPI deployment while keeping the first commercial version deliberately small.
+
+The v1 site should provide:
+
+- A single public API and user portal domain.
+- Invite-code registration.
+- Redeem-code balance top-up.
+- USD-denominated user balances.
+- New API-managed API keys, model permissions, quota, routing, and real-time deduction.
+- CLIProxyAPI as an internal upstream adapter for Codex, Claude Code, Gemini CLI, and related OAuth/CLI account pools.
+- Usage audit through CPA Usage Keeper or a small collector reading CLIProxyAPI's Redis-compatible usage queue.
+
+The v1 site should not provide:
+
+- Online payment integration.
+- Invoices.
+- Customer support ticketing.
+- Automatic refunds.
+- Balance transfer, withdrawal, or resale between users.
+- Enterprise billing.
+- Unlimited plans.
+- A custom billing system.
+- A permanent public CLIProxyAPI management UI.
+
+## Architecture
+
+Use one VPS and one Docker Compose project.
+
+Public traffic enters through one domain:
+
+```text
+ai.x2r.store
+  -> Cloudflare
+  -> Traefik
+  -> New API
+```
+
+New API is the only public user and SDK entry point. It serves the user portal, administrator login, OpenAI-compatible API endpoints, token management, invitation flow, redeem-code flow, model permissions, channel routing, and real-time balance deduction.
+
+CLIProxyAPI stays internal:
+
+```text
+New API
+  -> http://cliproxyapi:8317
+  -> CLIProxyAPI
+  -> Codex / Claude Code / Gemini CLI / other upstream accounts
+```
+
+The existing public `cliproxy.x2r.store` route should be removed from the production API-site path or retained only as a temporary migration/testing endpoint. It must not become a user-facing commercial API endpoint.
+
+Compose services:
+
+```text
+traefik
+new-api
+postgres
+redis
+cliproxyapi
+cpa-usage-keeper or usage-collector
+```
+
+Postgres stores New API's durable business data. Redis supports New API runtime/cache behavior. CLIProxyAPI keeps its existing `config.yaml`, `auths/`, and `logs/` mounts. CPA Usage Keeper or the collector stores audit data separately from the New API billing ledger.
+
+The v1 default audit service is CPA Usage Keeper. A custom collector is only a fallback if CPA Usage Keeper cannot consume the required CLIProxyAPI usage queue fields or cannot be deployed cleanly in the Compose environment.
+
+## Version Strategy
+
+New API should use the latest stable release available at implementation time.
+
+Current checked baseline during design:
+
+```text
+New API v0.12.14
+```
+
+Rules:
+
+- Do not use alpha, beta, nightly, or development builds for production.
+- Do not leave the production Compose file on an unconstrained `latest` tag.
+- Re-check the current stable release tag immediately before implementation.
+- Pin the image to a specific version tag after validation.
+- Validate `/v1/responses`, redeem codes, quota deduction, channel routing, and fallback behavior before production upgrade.
+
+## User And Credit Model
+
+Registration uses invitation codes. An invitation code only allows account creation; it does not grant balance.
+
+Initial account state:
+
+```text
+registered user
+balance: $0
+API access: disabled by insufficient balance
+```
+
+Top-up uses redeem codes only. The system does not process online payment in v1.
+
+Recommended redeem-code denominations:
+
+```text
+$10
+$50
+$100
+$500
+```
+
+New API remains the real-time billing ledger. Users see USD balances, while New API internally uses its quota and model/group rate system. Balance deduction happens before or during New API request handling. If a user has insufficient balance, New API must reject the request before sending traffic to CLIProxyAPI.
+
+CPA Usage Keeper or the collector must not directly modify user balances in v1. It exists for audit, reporting, and manual investigation.
+
+Launch conversion policy:
+
+```text
+Display unit: USD
+Internal unit: New API quota
+Baseline conversion: follow New API's default $1 = 500,000 quota units
+Redeem code $10: 5,000,000 quota units
+Redeem code $50: 25,000,000 quota units
+Redeem code $100: 50,000,000 quota units
+Redeem code $500: 250,000,000 quota units
+```
+
+If the selected New API release changes this default conversion, implementation must preserve the visible USD-to-quota mapping above through configuration or explicitly revise the spec before launch.
+
+Initial group policy:
+
+| Group | Purpose | Initial balance | Model access | Official fallback |
+| --- | --- | ---: | --- | --- |
+| `unactivated` | Registered users before redeeming a code | `$0` | None | No |
+| `standard` | Redeemed users | Redeemed USD amount | Validated CLIProxyAPI-backed models only | No by default |
+| `trusted` | Manually promoted users | Redeemed USD amount | Validated CLIProxyAPI-backed models plus selected high-cost models | Only for explicitly enabled models after validation |
+| `admin-test` | Operator validation | Manual | All channels under test | Yes, for validation only |
+
+Initial model rates must be conservative. Any model backed by official API fallback must be priced at or above the official provider cost plus an operational margin. CLIProxyAPI-backed models may be priced lower, but each model must have a documented rate before it is visible to `standard` users.
+
+## Upstream Strategy
+
+Use a hybrid upstream strategy.
+
+Primary channels:
+
+- CLIProxyAPI-backed Codex/GPT-compatible channels.
+- CLIProxyAPI-backed Claude-compatible channels.
+- CLIProxyAPI-backed Gemini-compatible channels.
+
+Fallback channels:
+
+- A small number of official API channels.
+- Enabled by default only for the `admin-test` group.
+- May be enabled for the `trusted` group only after the specific model, Responses API behavior, quota deduction, and provider cost have passed validation.
+- Disabled by default for the `standard` group.
+
+Do not configure unconditional fallback from all low-priced CLIProxyAPI channels to high-cost official API channels. That would create a loss path during upstream incidents.
+
+The v1 launch default is conservative: paid `standard` users use CLIProxyAPI-backed channels only. Official fallback starts as an operator validation path, not as a general paid-user reliability guarantee.
+
+Initial official fallback allowlist:
+
+| Channel alias | Provider | Upstream model ID | Endpoint requirement | Enabled group | Launch state |
+| --- | --- | --- | --- | --- | --- |
+| `openai-codex-responses-test` | OpenAI official API | `gpt-5.2-codex` | `/v1/responses`, streaming, tools | `admin-test` only | Validation only |
+| `openai-general-responses-test` | OpenAI official API | `gpt-5.2` | `/v1/responses`, streaming, tools | `admin-test` only | Validation only |
+
+No official fallback channel is enabled for `standard` users at v1 launch. Enabling official fallback for `trusted` users requires a configuration change after validation and must name the specific model, group, rate, and maximum exposure.
+
+New API owns:
+
+- User group permissions.
+- Model visibility.
+- Model and group rates.
+- Channel priority.
+- Channel availability and fallback policy.
+- Balance, quota, and rate-limit rejection.
+
+CLIProxyAPI owns:
+
+- OAuth/CLI account pool access.
+- Internal account rotation.
+- Session affinity.
+- Retry behavior across credentials.
+- Redis-compatible usage queue events.
+
+## Codex And `/v1/responses`
+
+Codex support is a P0 requirement.
+
+The production path must support:
+
+```text
+Codex CLI
+  -> https://ai.x2r.store/v1/responses
+  -> New API
+  -> CLIProxyAPI or official fallback
+```
+
+Only models and channels that pass real `/v1/responses` validation may be enabled for Codex users.
+
+Required validation:
+
+- Codex CLI API-key mode works against `https://ai.x2r.store`.
+- `/v1/responses` non-streaming request succeeds.
+- `/v1/responses` streaming request succeeds.
+- Tool/function call behavior works for supported models.
+- Long-context requests fail predictably or succeed within configured limits.
+- `store: false` or equivalent response-storage disabling behavior is accepted where relevant.
+- New API deducts quota correctly for Responses API traffic.
+- CLIProxyAPI usage queue emits corresponding events for CLIProxyAPI-backed requests.
+- Official fallback channels used for Codex also support Responses API, not only `/v1/chat/completions`.
+
+If `/v1/responses` fails validation, Codex traffic must not be opened to users.
+
+## CLIProxyAPI Operations
+
+CLIProxyAPI should not expose a permanent public management UI or management API.
+
+Day-to-day management happens through SSH to the VPS:
+
+```bash
+cd /path/to/cliproxy-deploy
+docker compose exec cliproxyapi /CLIProxyAPI/CLIProxyAPI -no-browser --codex-login
+```
+
+This operations path is used for:
+
+- Adding Codex credentials.
+- Adding Claude Code or Gemini CLI credentials.
+- Inspecting logs.
+- Editing `config.yaml`.
+- Checking persisted credential files under `auths/`.
+- Running internal health checks against `http://cliproxyapi:8317`.
+
+If OAuth login requires a browser callback, use a temporary SSH tunnel and close it after login. Do not permanently expose OAuth callback ports.
+
+For exceptional troubleshooting, a temporary protected CLIProxyAPI management route may be created with IP allowlisting or Cloudflare Access, then removed after maintenance.
+
+## Security Boundary
+
+Publicly exposed:
+
+- Traefik ports `80` and `443`.
+- `ai.x2r.store` routed to New API.
+
+Not publicly exposed:
+
+- `cliproxyapi:8317`.
+- CLIProxyAPI management UI.
+- CLIProxyAPI management API.
+- Postgres.
+- Redis.
+- CPA Usage Keeper or collector database.
+- CLIProxyAPI OAuth callback ports.
+
+Security requirements:
+
+- New API administrator password must be strong and unique.
+- Public registration must require invitation codes.
+- New users receive no free balance.
+- Low-balance or untrusted users cannot access high-cost models.
+- User and API-key rate limits must be configured.
+- Official fallback must be limited by model/group policy.
+- Secrets must stay in `.env` or local runtime config files and must not be committed.
+- CLIProxyAPI full request body logging should be disabled in production except during short troubleshooting windows.
+
+## Persistence And Backup
+
+Back up:
+
+- Postgres: New API users, tokens, balances, redeem codes, channel configuration, rates, logs, and other durable data.
+- CLIProxyAPI `auths/`: upstream OAuth/CLI credentials.
+- CLIProxyAPI `config.yaml`: management secret, internal API keys, routing settings, and usage queue settings.
+- CPA Usage Keeper or collector database: audit history and operational reporting.
+
+Redis should be treated according to the selected New API deployment mode. If it only contains cache/runtime data, backup is less critical. If deployment settings make Redis durable for required behavior, persistence and backup must be configured explicitly.
+
+## Monitoring And Audit
+
+New API is the primary billing ledger. It decides user balance and quota.
+
+CPA Usage Keeper or the collector reads CLIProxyAPI usage queue events:
+
+```text
+CLIProxyAPI usage queue
+  -> CPA Usage Keeper / collector
+  -> audit database / dashboard
+```
+
+Audit checks should compare:
+
+- New API user/API-key consumption.
+- CLIProxyAPI usage events by API key, model, provider, latency, token count, status, and request id.
+- Official API provider bills for fallback traffic.
+
+The collector should alert or surface anomalies but should not auto-adjust balances in v1.
+
+Important anomaly classes:
+
+- Missing CLIProxyAPI usage events.
+- Unexpected zero-token usage.
+- Model mapping mismatch.
+- High fallback rate to official API.
+- High retry/failure rate for a CLI/OAuth account.
+- Sudden cost spike by user, key, model, or channel.
+- Usage queue retention too short for the collector polling interval.
+
+## Test And Launch Gates
+
+Functional gates:
+
+- `ai.x2r.store` routes to New API over HTTPS.
+- Invitation-code registration works.
+- Registration without invitation fails.
+- New registered users have `$0` balance.
+- Users with `$0` balance cannot call models.
+- Redeem code increases visible USD balance.
+- Redeemed codes cannot be reused.
+- Users can create and revoke API keys.
+- New API deducts quota after successful calls.
+- Balance exhaustion blocks further calls.
+
+Codex and API gates:
+
+- Codex CLI works through `https://ai.x2r.store/v1/responses`.
+- `/v1/responses` non-streaming works.
+- `/v1/responses` streaming works.
+- `/v1/chat/completions` non-streaming works for intended clients.
+- `/v1/chat/completions` streaming works for intended clients.
+- Tool/function call behavior is validated for supported models.
+- Long-context behavior is documented and enforced.
+- Unsupported model access returns a clear API error.
+
+Routing and cost gates:
+
+- CLIProxyAPI primary channel works.
+- Official fallback works only for intended groups/models.
+- Official fallback does not catch all low-price traffic unconditionally.
+- High-cost models require appropriate group/rate configuration.
+- Channel failures produce expected user-facing errors.
+
+Audit gates:
+
+- CLIProxyAPI usage queue is enabled.
+- CPA Usage Keeper or collector can read usage events.
+- Usage events are persisted.
+- New API consumption and CLIProxyAPI events can be manually compared for representative requests.
+- Collector downtime shorter than usage queue retention does not lose events during normal operation.
+
+Security gates:
+
+- CLIProxyAPI is not reachable from the public internet.
+- Postgres is not reachable from the public internet.
+- Redis is not reachable from the public internet.
+- CLIProxyAPI management UI and API are not permanently public.
+- Secrets are absent from git.
+- Backups exist for Postgres, `auths/`, and `config.yaml`.
+
+## Open Risks
+
+Upstream terms risk remains material. Wrapping OAuth/CLI or subscription account capabilities into a paid public API service may conflict with upstream provider terms. The design reduces operational blast radius but does not remove this risk.
+
+Regulatory risk remains material for a public paid AI API service. The v1 design avoids online payments and in-site money handling beyond redeem codes, but the service can still be interpreted as a commercial AI API offering depending on jurisdiction, users, marketing, and payment workflow.
+
+Billing accuracy must be proven empirically. Responses API, streaming, tool calls, retries, cache tokens, and provider-specific usage fields can create accounting mismatches. The system must pass the launch gates before selling meaningful volume.
+
+Official fallback can create unexpected cost exposure. It must remain controlled by group, model, and rate policy.
+
+## References
+
+- New API repository: <https://github.com/QuantumNous/new-api>
+- New API releases: <https://github.com/QuantumNous/new-api/releases>
+- OpenAI Responses API reference: <https://developers.openai.com/api/reference/resources/responses/methods/create>
+- OpenAI Codex agent loop article: <https://openai.com/index/unrolling-the-codex-agent-loop/>
+- CLIProxyAPI repository: <https://github.com/router-for-me/CLIProxyAPI>
+- CLIProxyAPI Redis Usage Queue: <https://help.router-for.me/management/redis-usage-queue.html>
+- CPA Usage Keeper repository: <https://github.com/Willxup/cpa-usage-keeper>

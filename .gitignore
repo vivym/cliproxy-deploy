@@ -1,6 +1,9 @@
 # Local git worktrees
 .worktrees/
 
+# Superpowers visual brainstorming cache
+.superpowers/
+
 # Local secrets and generated runtime config
 .env
 config.yaml
