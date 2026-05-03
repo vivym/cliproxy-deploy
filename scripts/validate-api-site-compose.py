@@ -199,13 +199,13 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate rendered api-site Compose JSON.")
     parser.add_argument("compose_json", help="Path to rendered Compose JSON")
-    parser.add_argument("expected_host", help="Expected public hostname for New API")
+    parser.add_argument("--host", default="ai.x2r.store", help="Expected public hostname for New API")
     args = parser.parse_args()
 
     with open(args.compose_json, "r", encoding="utf-8") as compose_file:
         compose = json.load(compose_file)
 
-    errors = validate(compose, args.expected_host)
+    errors = validate(compose, args.host)
     if errors:
         for error in errors:
             print("ERROR: {}".format(error), file=sys.stderr)

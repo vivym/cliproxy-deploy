@@ -198,7 +198,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
             with mock.patch.object(
                 validate_api_site_compose.sys,
                 "argv",
-                ["validate-api-site-compose.py", compose_file.name, EXPECTED_HOST],
+                ["validate-api-site-compose.py", compose_file.name],
             ), mock.patch.object(validate_api_site_compose.sys, "stdout", stdout), \
                     mock.patch.object(validate_api_site_compose.sys, "stderr", stderr):
                 result = validate_api_site_compose.main()
@@ -219,7 +219,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
             with mock.patch.object(
                 validate_api_site_compose.sys,
                 "argv",
-                ["validate-api-site-compose.py", compose_file.name, EXPECTED_HOST],
+                ["validate-api-site-compose.py", compose_file.name],
             ), mock.patch.object(validate_api_site_compose.sys, "stdout", stdout), \
                     mock.patch.object(validate_api_site_compose.sys, "stderr", stderr):
                 result = validate_api_site_compose.main()
@@ -227,6 +227,29 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertEqual(stdout.getvalue(), "")
         self.assertIn("ERROR: backend network must not set internal: true", stderr.getvalue())
+
+    def test_main_accepts_host_override_option(self):
+        compose = valid_compose()
+        compose["services"]["new-api"]["labels"]["traefik.http.routers.new-api.rule"] = (
+            "Host(`api.example.com`)"
+        )
+
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as compose_file:
+            json.dump(compose, compose_file)
+            compose_file.flush()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(
+                validate_api_site_compose.sys,
+                "argv",
+                ["validate-api-site-compose.py", compose_file.name, "--host", "api.example.com"],
+            ), mock.patch.object(validate_api_site_compose.sys, "stdout", stdout), \
+                    mock.patch.object(validate_api_site_compose.sys, "stderr", stderr):
+                result = validate_api_site_compose.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(stdout.getvalue(), "api-site compose validation passed\n")
+        self.assertEqual(stderr.getvalue(), "")
 
 
 if __name__ == "__main__":
