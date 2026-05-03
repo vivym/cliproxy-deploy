@@ -127,3 +127,16 @@ scripts/verify-api-site.sh > /tmp/api-site-verify.log
 cat /tmp/api-site-verify.log
 ! rg -n 'Skipping /v1/responses' /tmp/api-site-verify.log
 ```
+
+## Production Launch
+
+After the launch gates pass, start production with:
+
+```bash
+docker compose config
+scripts/backup-api-site.sh
+docker compose pull
+docker compose up -d
+docker compose ps
+scripts/verify-api-site.sh
+```

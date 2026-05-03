@@ -95,6 +95,25 @@ The `remote-management.secret-key` value must exactly match `MANAGEMENT_SECRET` 
 
 CLIProxyAPI hashes a plaintext `remote-management.secret-key` on startup and writes it back to `config.yaml`, so keep `config.yaml` writable by the container. CLIProxyAPI remains internal-only in API Site Mode.
 
+## Local Compose Validation
+
+Validate the rendered Compose configuration from template files before touching production:
+
+```bash
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+cp docker-compose.yml "$tmpdir"/
+cp .env.example "$tmpdir/.env"
+cp config.yaml.template "$tmpdir/config.yaml"
+mkdir -p "$tmpdir/auths" "$tmpdir/logs" "$tmpdir/letsencrypt"
+touch "$tmpdir/letsencrypt/acme.json"
+chmod 600 "$tmpdir/letsencrypt/acme.json"
+(cd "$tmpdir" && docker compose config --format json) > /tmp/api-site-compose.json
+scripts/validate-api-site-compose.py /tmp/api-site-compose.json --host ai.x2r.store
+```
+
+The backend Docker network must not be configured as `internal: true`. New API and CLIProxyAPI both need outbound internet access for upstream API calls, provider connectivity, and operational validation.
+
 ## Start
 
 ```bash
