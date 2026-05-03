@@ -154,6 +154,18 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assertEqual(validate_api_site_compose.validate(compose, EXPECTED_HOST), [])
 
+    def test_rejects_backend_service_non_exact_traefik_enable_false(self):
+        compose = valid_compose()
+        compose["services"]["redis"]["labels"] = ["traefik.enable=False"]
+
+        self.assert_has_error(compose, "redis must not enable Traefik")
+
+    def test_rejects_backend_service_boolean_traefik_enable_false(self):
+        compose = valid_compose()
+        compose["services"]["redis"]["labels"] = {"traefik.enable": False}
+
+        self.assert_has_error(compose, "redis must not enable Traefik")
+
     def test_rejects_unexpected_service_host_ports(self):
         compose = valid_compose()
         compose["services"]["debug"] = {

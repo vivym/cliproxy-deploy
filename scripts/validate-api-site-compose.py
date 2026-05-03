@@ -198,13 +198,13 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
         if service_name in {"traefik", "new-api"} or not isinstance(service, dict):
             continue
         labels = labels_for(service)
-        if "traefik.enable" in labels and labels["traefik.enable"].lower() != "false":
+        if "traefik.enable" in labels and labels["traefik.enable"] != "false":
             errors.append("{} must not enable Traefik".format(service_name))
         if any(
             label.startswith("traefik.")
             and not (
                 label == "traefik.enable"
-                and labels[label].lower() == "false"
+                and labels[label] == "false"
             )
             for label in labels
         ):
