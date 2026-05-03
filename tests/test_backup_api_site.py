@@ -70,6 +70,46 @@ class BackupApiSiteTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("BACKUP_DIR must be an absolute path", result.stderr)
 
+    def test_script_rejects_symlink_backup_dir_inside_repo_before_docker_calls(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            in_repo_backup_target = root / "backups-target"
+            in_repo_backup_target.mkdir()
+            backup_link = tmp_root / "backup-link"
+            backup_link.symlink_to(in_repo_backup_target, target_is_directory=True)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker_marker = root / "docker-called"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+touch {docker_marker}
+echo "docker should not be called" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(backup_link),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Refusing to write backups inside repository", result.stderr)
+            self.assertFalse(docker_marker.exists())
+
     def test_script_fails_when_docker_compose_ps_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = pathlib.Path(tmp)

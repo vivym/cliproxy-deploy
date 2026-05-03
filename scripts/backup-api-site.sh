@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$repo_root"
 
 if [[ -f .env ]]; then
@@ -20,19 +20,16 @@ if [[ -z "$backup_root" ]]; then
   backup_root="/"
 fi
 
-case "$backup_root" in
-  "$repo_root"|"$repo_root"/*)
-    echo "Refusing to write backups inside repository: $backup_root" >&2
-    exit 1
-    ;;
-esac
-
 # Portable realpath behavior for a backup root that may not exist yet.
-backup_parent="$(dirname "$backup_root")"
-backup_name="$(basename "$backup_root")"
-mkdir -p "$backup_parent"
-backup_parent="$(cd "$backup_parent" && pwd -P)"
-backup_root="${backup_parent}/${backup_name}"
+if [[ -e "$backup_root" ]]; then
+  backup_root="$(cd "$backup_root" && pwd -P)"
+else
+  backup_parent="$(dirname "$backup_root")"
+  backup_name="$(basename "$backup_root")"
+  mkdir -p "$backup_parent"
+  backup_parent="$(cd "$backup_parent" && pwd -P)"
+  backup_root="${backup_parent}/${backup_name}"
+fi
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 dest="${backup_root}/${timestamp}"
 partial_dest="${dest}.partial"
