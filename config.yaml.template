@@ -15,6 +15,7 @@ tls:
 # Do not expose /management.html or /v0/management/* publicly in production.
 remote-management:
   allow-remote: true
+  # Must match MANAGEMENT_SECRET in .env exactly after rendering/copying.
   secret-key: "replace-with-management-secret"
   disable-control-panel: true
   panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
@@ -23,6 +24,7 @@ remote-management:
 auth-dir: "~/.cli-proxy-api"
 
 # Client API keys accepted by CLIProxyAPI.
+# Must match CLIPROXY_INTERNAL_API_KEY in .env exactly after rendering/copying.
 api-keys:
   - "replace-with-internal-new-api-channel-key"
 

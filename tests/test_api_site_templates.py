@@ -13,6 +13,10 @@ class ApiSiteTemplateTests(unittest.TestCase):
         text = self.read(".env.example")
         self.assertIn("AI_HOST=ai.x2r.store", text)
         self.assertNotIn("API_HOST=cliproxy.x2r.store", text)
+        self.assertIn("Use URL-safe generated values because these passwords are embedded in DSN URLs.", text)
+        self.assertIn("openssl rand -hex 24", text)
+        self.assertIn("must match config.yaml remote-management.secret-key exactly", text)
+        self.assertIn("must match config.yaml api-keys entry exactly", text)
         for name in [
             "NEW_API_IMAGE_TAG=",
             "POSTGRES_PASSWORD=",
@@ -32,6 +36,8 @@ class ApiSiteTemplateTests(unittest.TestCase):
         self.assertIn("request-log: false", text)
         self.assertIn("redis-usage-queue-retention-seconds: 3600", text)
         self.assertIn("replace-with-internal-new-api-channel-key", text)
+        self.assertIn("Must match MANAGEMENT_SECRET in .env exactly", text)
+        self.assertIn("Must match CLIPROXY_INTERNAL_API_KEY in .env exactly", text)
 
     def test_compose_declares_api_site_services(self):
         text = self.read("docker-compose.yml")
@@ -40,6 +46,9 @@ class ApiSiteTemplateTests(unittest.TestCase):
         self.assertIn("traefik.http.routers.new-api.rule=Host(`${AI_HOST:?set AI_HOST}`)", text)
         self.assertIn("traefik.enable=false", text)
         self.assertIn("backend:", text)
+        self.assertIn("http://localhost:3000/api/status", text)
+        self.assertIn("http://localhost:8317", text)
+        self.assertIn("cliproxyapi:\n        condition: service_healthy", text)
 
 
 if __name__ == "__main__":

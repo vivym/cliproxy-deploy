@@ -79,6 +79,11 @@ services:
       MEMORY_CACHE_ENABLED: "true"
       STREAMING_TIMEOUT: "300"
       CHANNEL_UPDATE_FREQUENCY: "1440"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     expose:
       - "3000"
     networks:
@@ -106,6 +111,11 @@ services:
       - "./logs:/CLIProxyAPI/logs"
     expose:
       - "8317"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8317 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - backend
     labels:
@@ -116,7 +126,8 @@ services:
     container_name: cpa-usage-keeper
     restart: unless-stopped
     depends_on:
-      - cliproxyapi
+      cliproxyapi:
+        condition: service_healthy
     environment:
       TZ: Asia/Shanghai
       CPA_BASE_URL: http://cliproxyapi:8317
