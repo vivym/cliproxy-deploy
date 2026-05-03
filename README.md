@@ -68,8 +68,14 @@ Generate separate values for the management secret and client API key:
 
 ```bash
 MANAGEMENT_SECRET="$(openssl rand -hex 32)"
-CLIENT_API_KEY="$(openssl rand -hex 32)"
+CLIENT_API_KEY="$(scripts/generate-api-key.py)"
 printf 'management secret: %s\nclient api key: %s\n' "$MANAGEMENT_SECRET" "$CLIENT_API_KEY"
+```
+
+To generate multiple client keys as a `config.yaml` snippet:
+
+```bash
+scripts/generate-api-key.py -n 3 --yaml
 ```
 
 Edit `config.yaml` and replace:

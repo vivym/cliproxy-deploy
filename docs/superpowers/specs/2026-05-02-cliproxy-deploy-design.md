@@ -188,7 +188,7 @@ Generate separate values for the management secret and client API key:
 
 ```bash
 openssl rand -hex 32
-openssl rand -hex 32
+scripts/generate-api-key.py
 ```
 
 Start:
