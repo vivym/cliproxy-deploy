@@ -179,14 +179,10 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
         if "traefik.enable" in labels and labels["traefik.enable"].lower() != "false":
             errors.append("{} must not enable Traefik".format(service_name))
         if any(
-            label.startswith("traefik.http.routers.") for label in labels
-        ):
-            errors.append("{} must not define Traefik router labels".format(service_name))
-        if any(
-            label != "traefik.enable"
-            and (
-                label.startswith("traefik.http.")
-                or label == "traefik.docker.network"
+            label.startswith("traefik.")
+            and not (
+                label == "traefik.enable"
+                and labels[label].lower() == "false"
             )
             for label in labels
         ):

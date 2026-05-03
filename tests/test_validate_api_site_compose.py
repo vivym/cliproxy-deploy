@@ -97,7 +97,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
             "traefik.http.routers.cliproxyapi.rule": "Host(`cliproxy.x2r.store`)",
         }
 
-        self.assert_has_error(compose, "cliproxyapi must not define Traefik router labels")
+        self.assert_has_error(compose, "cliproxyapi must not define Traefik labels")
 
     def test_rejects_untagged_backend_service_image(self):
         compose = valid_compose()
@@ -111,7 +111,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
             "traefik.http.routers.redis.rule": "Host(`redis.x2r.store`)",
         }
 
-        self.assert_has_error(compose, "redis must not define Traefik router labels")
+        self.assert_has_error(compose, "redis must not define Traefik labels")
 
     def test_rejects_backend_service_traefik_service_label(self):
         compose = valid_compose()
@@ -125,6 +125,14 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         compose = valid_compose()
         compose["services"]["redis"]["labels"] = {
             "traefik.docker.network": "proxy",
+        }
+
+        self.assert_has_error(compose, "redis must not define Traefik labels")
+
+    def test_rejects_backend_service_traefik_tcp_label(self):
+        compose = valid_compose()
+        compose["services"]["redis"]["labels"] = {
+            "traefik.tcp.routers.redis.rule": "HostSNI(`redis.x2r.store`)",
         }
 
         self.assert_has_error(compose, "redis must not define Traefik labels")
