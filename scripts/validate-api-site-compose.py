@@ -69,7 +69,14 @@ def has_host_ports(service: Dict[str, Any]) -> bool:
 
 
 def image_is_pinned(image: str) -> bool:
-    image_without_digest = image.split("@", 1)[0]
+    image_without_digest, separator, digest = image.partition("@")
+    if separator:
+        return (
+            bool(image_without_digest)
+            and digest.startswith("sha256:")
+            and len(digest) > len("sha256:")
+            and not image_without_digest.endswith(":latest")
+        )
     return bool(PINNED_TAG_RE.search(image_without_digest))
 
 
@@ -161,9 +168,6 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
     for network_name in ("proxy", "backend"):
         if network_name not in new_api_networks:
             errors.append("new-api must join {}".format(network_name))
-    new_api_image = str(new_api.get("image", ""))
-    if not image_is_pinned(new_api_image):
-        errors.append("new-api image must be pinned to a non-latest tag")
     new_api_environment = environment_for(new_api)
     for env_name in sorted(REQUIRED_NEW_API_ENV):
         if env_name not in new_api_environment:
@@ -178,6 +182,15 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
             label.startswith("traefik.http.routers.") for label in labels
         ):
             errors.append("{} must not define Traefik router labels".format(service_name))
+        if any(
+            label != "traefik.enable"
+            and (
+                label.startswith("traefik.http.")
+                or label == "traefik.docker.network"
+            )
+            for label in labels
+        ):
+            errors.append("{} must not define Traefik labels".format(service_name))
         if has_host_ports(service):
             errors.append("{} must not publish host ports".format(service_name))
         if networks_for(service) != {"backend"}:
@@ -202,8 +215,12 @@ def main() -> int:
     parser.add_argument("--host", default="ai.x2r.store", help="Expected public hostname for New API")
     args = parser.parse_args()
 
-    with open(args.compose_json, "r", encoding="utf-8") as compose_file:
-        compose = json.load(compose_file)
+    try:
+        with open(args.compose_json, "r", encoding="utf-8") as compose_file:
+            compose = json.load(compose_file)
+    except (OSError, json.JSONDecodeError) as error:
+        print("ERROR: {}".format(error), file=sys.stderr)
+        return 1
 
     errors = validate(compose, args.host)
     if errors:

@@ -113,6 +113,22 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assert_has_error(compose, "redis must not define Traefik router labels")
 
+    def test_rejects_backend_service_traefik_service_label(self):
+        compose = valid_compose()
+        compose["services"]["redis"]["labels"] = {
+            "traefik.http.services.redis.loadbalancer.server.port": "6379",
+        }
+
+        self.assert_has_error(compose, "redis must not define Traefik labels")
+
+    def test_rejects_backend_service_traefik_docker_network_label(self):
+        compose = valid_compose()
+        compose["services"]["redis"]["labels"] = {
+            "traefik.docker.network": "proxy",
+        }
+
+        self.assert_has_error(compose, "redis must not define Traefik labels")
+
     def test_rejects_traefik_joining_backend(self):
         compose = valid_compose()
         compose["services"]["traefik"]["networks"] = ["proxy", "backend"]
@@ -142,8 +158,34 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
             validate_api_site_compose.image_is_pinned("calciumion/new-api:v0.13.2@sha256:abc")
         )
 
+    def test_accepts_digest_only_pinned_image(self):
+        self.assertTrue(
+            validate_api_site_compose.image_is_pinned(
+                "postgres@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+        )
+
     def test_accepts_single_character_non_latest_tag(self):
         self.assertTrue(validate_api_site_compose.image_is_pinned("repo:1"))
+
+    def test_rejects_untagged_image_without_digest(self):
+        self.assertFalse(validate_api_site_compose.image_is_pinned("postgres"))
+
+    def test_rejects_latest_tag_images(self):
+        self.assertFalse(validate_api_site_compose.image_is_pinned("postgres:latest"))
+        self.assertFalse(validate_api_site_compose.image_is_pinned("postgres:latest@sha256:abc"))
+
+    def test_reports_new_api_invalid_image_once(self):
+        compose = valid_compose()
+        compose["services"]["new-api"]["image"] = "calciumion/new-api:latest"
+
+        errors = validate_api_site_compose.validate(compose, EXPECTED_HOST)
+
+        image_errors = [
+            error for error in errors
+            if error.startswith("new-api image must be pinned")
+        ]
+        self.assertEqual(image_errors, ["new-api image must be pinned to a non-latest tag"])
 
     def test_rejects_missing_new_api_sql_dsn(self):
         compose = valid_compose()
@@ -250,6 +292,25 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue(), "api-site compose validation passed\n")
         self.assertEqual(stderr.getvalue(), "")
+
+    def test_main_reports_malformed_json_without_traceback(self):
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json") as compose_file:
+            compose_file.write("{not-json")
+            compose_file.flush()
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(
+                validate_api_site_compose.sys,
+                "argv",
+                ["validate-api-site-compose.py", compose_file.name],
+            ), mock.patch.object(validate_api_site_compose.sys, "stdout", stdout), \
+                    mock.patch.object(validate_api_site_compose.sys, "stderr", stderr):
+                result = validate_api_site_compose.main()
+
+        self.assertEqual(result, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("ERROR: ", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
 
 
 if __name__ == "__main__":
