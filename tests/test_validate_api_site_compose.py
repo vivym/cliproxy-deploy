@@ -137,6 +137,18 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
 
         self.assert_has_error(compose, "redis must not define Traefik labels")
 
+    def test_rejects_backend_service_key_only_traefik_label(self):
+        compose = valid_compose()
+        compose["services"]["redis"]["labels"] = ["traefik.http.routers.redis.rule"]
+
+        self.assert_has_error(compose, "redis must not define Traefik labels")
+
+    def test_allows_backend_service_list_form_traefik_enable_false(self):
+        compose = valid_compose()
+        compose["services"]["redis"]["labels"] = ["traefik.enable=false"]
+
+        self.assertEqual(validate_api_site_compose.validate(compose, EXPECTED_HOST), [])
+
     def test_rejects_traefik_joining_backend(self):
         compose = valid_compose()
         compose["services"]["traefik"]["networks"] = ["proxy", "backend"]

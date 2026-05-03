@@ -48,9 +48,13 @@ def labels_for(service: Dict[str, Any]) -> Dict[str, str]:
     if isinstance(labels, list):
         result = {}
         for label in labels:
-            if isinstance(label, str) and "=" in label:
+            if not isinstance(label, str):
+                continue
+            if "=" in label:
                 key, value = label.split("=", 1)
-                result[key] = value
+            else:
+                key, value = label, ""
+            result[key] = value
         return result
     return {}
 
