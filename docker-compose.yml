@@ -109,6 +109,8 @@ services:
       - "./config.yaml:/CLIProxyAPI/config.yaml"
       - "./auths:/root/.cli-proxy-api"
       - "./logs:/CLIProxyAPI/logs"
+    ports:
+      - "127.0.0.1:8317:8317"
     expose:
       - "8317"
     healthcheck:

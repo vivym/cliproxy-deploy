@@ -47,6 +47,14 @@ Do not use GitHub's Latest marker blindly. Select the highest non-prerelease sem
 - Configure `codex-cli` only after `/v1/responses` validation.
 - Configure official OpenAI fallback only for `admin-test`.
 
+## CLIProxyAPI Management Access
+
+- Keep CLIProxyAPI off Traefik and off public hostnames.
+- Use the host loopback binding `127.0.0.1:8317:8317` only for SSH tunnel management.
+- From your workstation, run `ssh -L 8317:127.0.0.1:8317 <user>@<server>` and manage CLIProxyAPI through `http://127.0.0.1:8317`.
+- Do not replace this with `8317:8317` or `0.0.0.0:8317:8317`.
+- Keep CLIProxyAPI API key authentication and `remote-management.secret-key` enabled.
+
 ## Codex Validation
 
 Record:

@@ -47,6 +47,7 @@ def valid_compose():
             "cliproxyapi": {
                 "image": "eceasy/cli-proxy-api:v1.2.3",
                 "networks": ["backend"],
+                "ports": ["127.0.0.1:8317:8317"],
                 "expose": ["8317"],
                 "labels": {"traefik.enable": "false"},
             },
@@ -184,6 +185,50 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         }
 
         self.assert_has_error(compose, "debug must not publish host ports")
+
+    def test_rejects_missing_cliproxyapi_loopback_port(self):
+        compose = valid_compose()
+        del compose["services"]["cliproxyapi"]["ports"]
+
+        self.assert_has_error(
+            compose,
+            "cliproxyapi must publish 127.0.0.1:8317:8317",
+        )
+
+    def test_rejects_public_cliproxyapi_host_port(self):
+        compose = valid_compose()
+        compose["services"]["cliproxyapi"]["ports"] = ["8317:8317"]
+
+        self.assert_has_error(
+            compose,
+            "cliproxyapi must publish 127.0.0.1:8317:8317",
+        )
+
+    def test_rejects_extra_cliproxyapi_host_port(self):
+        compose = valid_compose()
+        compose["services"]["cliproxyapi"]["ports"] = [
+            "127.0.0.1:8317:8317",
+            "8318:8317",
+        ]
+
+        self.assert_has_error(
+            compose,
+            "cliproxyapi must publish 127.0.0.1:8317:8317",
+        )
+
+    def test_accepts_rendered_cliproxyapi_loopback_port_object(self):
+        compose = valid_compose()
+        compose["services"]["cliproxyapi"]["ports"] = [
+            {
+                "mode": "ingress",
+                "target": 8317,
+                "published": "8317",
+                "protocol": "tcp",
+                "host_ip": "127.0.0.1",
+            }
+        ]
+
+        self.assertEqual(validate_api_site_compose.validate(compose, EXPECTED_HOST), [])
 
     def test_rejects_unexpected_service_traefik_labels(self):
         compose = valid_compose()

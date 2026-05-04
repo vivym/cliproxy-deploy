@@ -48,6 +48,7 @@ class ApiSiteTemplateTests(unittest.TestCase):
         self.assertIn("backend:", text)
         self.assertIn("http://localhost:3000/api/status", text)
         self.assertIn("http://localhost:8317", text)
+        self.assertIn("127.0.0.1:8317:8317", text)
         self.assertIn("cliproxyapi:\n        condition: service_healthy", text)
 
     def test_cliproxy_public_override_is_template_only(self):

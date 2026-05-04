@@ -53,6 +53,9 @@ REQUIRED_SERVICE_VOLUMES = {
     "redis": "redis-data",
     "cpa-usage-keeper": "cpa-usage-keeper-data",
 }
+CLIPROXY_LOOPBACK_PORT_ERROR = (
+    "cliproxyapi must publish 127.0.0.1:8317:8317 for SSH tunnel access only"
+)
 
 
 def labels_for(service: Dict[str, Any]) -> Dict[str, str]:
@@ -102,6 +105,33 @@ def networks_for(service: Dict[str, Any]) -> Set[str]:
 
 def has_host_ports(service: Dict[str, Any]) -> bool:
     return bool(service.get("ports"))
+
+
+def cliproxyapi_has_loopback_port(service: Dict[str, Any]) -> bool:
+    ports = service.get("ports", [])
+    if not isinstance(ports, list) or len(ports) != 1:
+        return False
+
+    port = ports[0]
+    if isinstance(port, str):
+        return port == "127.0.0.1:8317:8317"
+
+    if not isinstance(port, dict):
+        return False
+
+    host_ip = str(port.get("host_ip", ""))
+    published = str(port.get("published", ""))
+    target = str(port.get("target", ""))
+    protocol = str(port.get("protocol", "tcp"))
+    if (
+        host_ip == "127.0.0.1"
+        and published == "8317"
+        and target == "8317"
+        and protocol == "tcp"
+    ):
+        return True
+
+    return False
 
 
 def image_is_pinned(image: str) -> bool:
@@ -234,8 +264,13 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
     for service_name, service in sorted(services.items()):
         if not isinstance(service, dict):
             continue
-        if service_name != "traefik" and has_host_ports(service):
+        if (
+            service_name not in {"traefik", "cliproxyapi"}
+            and has_host_ports(service)
+        ):
             errors.append("{} must not publish host ports".format(service_name))
+        if service_name == "cliproxyapi" and not cliproxyapi_has_loopback_port(service):
+            errors.append(CLIPROXY_LOOPBACK_PORT_ERROR)
         if service_name in {"traefik", "new-api"}:
             continue
         labels = label_pairs_for(service)

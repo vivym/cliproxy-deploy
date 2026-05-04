@@ -138,6 +138,28 @@ scripts/verify-api-site.sh
 
 New API is the public management, user, and SDK entry point. CLIProxyAPI management and API routes are internal operations surfaces only.
 
+## CLIProxyAPI SSH Tunnel
+
+CLIProxyAPI binds `8317` to the server loopback address only:
+
+```yaml
+127.0.0.1:8317:8317
+```
+
+It is reachable from the VPS itself and from containers on the backend Docker network, but not from the public internet. For local management, create an SSH tunnel from your workstation:
+
+```bash
+ssh -L 8317:127.0.0.1:8317 <user>@<server>
+```
+
+Then use:
+
+```text
+http://127.0.0.1:8317
+```
+
+Keep CLIProxyAPI API keys and the management secret enabled. The loopback binding only controls network reachability; it does not replace application authentication.
+
 ## Latency Profiling
 
 Public profiling targets New API through Traefik at `ai.x2r.store`, not CLIProxyAPI internal management routes. From your local machine, compare the normal route, direct Cloudflare route, and direct VPS origin route for an API-site path:
