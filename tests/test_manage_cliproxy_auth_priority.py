@@ -108,6 +108,12 @@ class ManageCliproxyAuthPriorityTest(unittest.TestCase):
             env=env,
         )
 
+    def write_plan(self, payload):
+        tmp = tempfile.TemporaryDirectory()
+        path = Path(tmp.name) / "plan.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return tmp, path
+
     def test_list_prints_auth_priority_summary(self):
         result = self.run_script("list")
 
@@ -201,6 +207,103 @@ class ManageCliproxyAuthPriorityTest(unittest.TestCase):
                 },
             ],
         )
+
+    def test_apply_expiry_computes_priority_and_note_from_expiration(self):
+        tmp, plan = self.write_plan(
+            [
+                {
+                    "name": "codex-a@example.com-plus.json",
+                    "expires_at": "2026-05-05T20:00:00+08:00",
+                    "batch": "batch-a",
+                },
+                {
+                    "name": "codex-b@example.com-plus.json",
+                    "expires_at": "2026-05-06T20:00:00+08:00",
+                    "batch": "batch-b",
+                },
+                {
+                    "name": "codex-c@example.com-plus.json",
+                    "expires_at": "2026-05-08T20:00:00+08:00",
+                },
+            ]
+        )
+        self.addCleanup(tmp.cleanup)
+
+        self.run_script(
+            "apply-expiry",
+            str(plan),
+            "--now",
+            "2026-05-05T08:00:00+08:00",
+        )
+
+        patches = [req for req in RecordingHandler.requests if req["method"] == "PATCH"]
+        self.assertEqual(
+            [json.loads(req["body"]) for req in patches],
+            [
+                {
+                    "name": "codex-a@example.com-plus.json",
+                    "priority": 30,
+                    "note": "expires 2026-05-05T20:00:00+08:00 batch-a",
+                },
+                {
+                    "name": "codex-b@example.com-plus.json",
+                    "priority": 20,
+                    "note": "expires 2026-05-06T20:00:00+08:00 batch-b",
+                },
+                {
+                    "name": "codex-c@example.com-plus.json",
+                    "priority": 10,
+                    "note": "expires 2026-05-08T20:00:00+08:00",
+                },
+            ],
+        )
+
+    def test_apply_expiry_supports_dry_run(self):
+        tmp, plan = self.write_plan(
+            [
+                {
+                    "name": "codex-a@example.com-plus.json",
+                    "expires_at": "2026-05-05T20:00:00+08:00",
+                }
+            ]
+        )
+        self.addCleanup(tmp.cleanup)
+
+        result = self.run_script(
+            "apply-expiry",
+            str(plan),
+            "--now",
+            "2026-05-05T08:00:00+08:00",
+            "--dry-run",
+        )
+
+        self.assertIn("DRY-RUN", result.stdout)
+        self.assertIn("priority=30", result.stdout)
+        self.assertIn("expires 2026-05-05T20:00:00+08:00", result.stdout)
+        self.assertEqual(RecordingHandler.requests, [])
+
+    def test_apply_expiry_rejects_expired_accounts_by_default(self):
+        tmp, plan = self.write_plan(
+            [
+                {
+                    "name": "codex-expired@example.com-plus.json",
+                    "expires_at": "2026-05-05T07:00:00+08:00",
+                }
+            ]
+        )
+        self.addCleanup(tmp.cleanup)
+
+        result = self.run_script(
+            "apply-expiry",
+            str(plan),
+            "--now",
+            "2026-05-05T08:00:00+08:00",
+            check=False,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already expired", result.stderr)
+        self.assertEqual(RecordingHandler.requests, [])
 
     def test_requires_management_secret(self):
         env = os.environ.copy()

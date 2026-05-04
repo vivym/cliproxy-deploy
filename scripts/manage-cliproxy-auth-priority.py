@@ -9,6 +9,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
@@ -62,6 +63,26 @@ def parse_args() -> argparse.Namespace:
         "--dry-run",
         action="store_true",
         help="Print planned updates without calling the management API.",
+    )
+
+    expiry_parser = subparsers.add_parser(
+        "apply-expiry",
+        help="Compute priorities from account expiration times and apply them.",
+    )
+    expiry_parser.add_argument("plan", type=Path, help="Path to JSON expiry plan.")
+    expiry_parser.add_argument(
+        "--now",
+        help="Current time as ISO-8601. Defaults to current local time.",
+    )
+    expiry_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print planned updates without calling the management API.",
+    )
+    expiry_parser.add_argument(
+        "--allow-expired",
+        action="store_true",
+        help="Set expired accounts to priority 0 instead of failing.",
     )
 
     return parser.parse_args()
@@ -221,6 +242,81 @@ def load_plan(path: Path) -> List[Dict[str, Any]]:
     return plan
 
 
+def parse_datetime(value: str, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{label} must be an ISO-8601 timestamp: {value}") from None
+    if parsed.tzinfo is None:
+        raise ValueError(f"{label} must include a timezone offset: {value}")
+    return parsed
+
+
+def parse_now(value: str | None) -> datetime:
+    if value:
+        return parse_datetime(value, "--now")
+    return datetime.now().astimezone().replace(microsecond=0)
+
+
+def priority_for_expiry(expires_at: datetime, now: datetime) -> int:
+    remaining = expires_at - now
+    seconds = remaining.total_seconds()
+    if seconds < 0:
+        return -1
+    if seconds <= 24 * 60 * 60:
+        return 30
+    if seconds <= 48 * 60 * 60:
+        return 20
+    return 10
+
+
+def load_expiry_plan(path: Path, now: datetime, allow_expired: bool) -> List[Dict[str, Any]]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ValueError(f"plan file not found: {path}") from None
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"plan file is not valid JSON: {exc}") from None
+
+    entries = payload.get("accounts") if isinstance(payload, dict) else payload
+    if not isinstance(entries, list):
+        raise ValueError("expiry plan must be a JSON array or an object with an accounts array")
+
+    plan: List[Dict[str, Any]] = []
+    for index, entry in enumerate(entries, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"expiry plan entry #{index} must be an object")
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"expiry plan entry #{index} is missing name")
+        expires_raw = str(entry.get("expires_at") or "").strip()
+        if not expires_raw:
+            raise ValueError(f"expiry plan entry #{index} is missing expires_at")
+        expires_at = parse_datetime(expires_raw, f"expiry plan entry #{index} expires_at")
+        priority = priority_for_expiry(expires_at, now)
+        if priority < 0:
+            if not allow_expired:
+                raise ValueError(f"{name} already expired at {expires_raw}")
+            priority = 0
+
+        note_parts = [f"expires {expires_raw}"]
+        batch = str(entry.get("batch") or "").strip()
+        if batch:
+            note_parts.append(batch)
+        existing_note = str(entry.get("note") or "").strip()
+        if existing_note:
+            note_parts.append(existing_note)
+
+        plan.append(
+            {
+                "name": name,
+                "priority": priority,
+                "note": " ".join(note_parts),
+            }
+        )
+    return plan
+
+
 def print_plan(plan: Iterable[Dict[str, Any]], prefix: str = "") -> None:
     for entry in plan:
         suffix = ""
@@ -267,6 +363,25 @@ def main() -> int:
                     entry["name"],
                     entry["priority"],
                     entry.get("note"),
+                    args.timeout,
+                )
+                print(f"updated {entry['name']} priority={entry['priority']}")
+            return 0
+
+        if args.command == "apply-expiry":
+            now = parse_now(args.now)
+            plan = load_expiry_plan(args.plan, now, args.allow_expired)
+            if args.dry_run:
+                print("DRY-RUN planned expiry updates:")
+                print_plan(plan, prefix="  ")
+                return 0
+            for entry in plan:
+                patch_auth_file(
+                    args.base_url,
+                    management_key,
+                    entry["name"],
+                    entry["priority"],
+                    entry["note"],
                     args.timeout,
                 )
                 print(f"updated {entry['name']} priority={entry['priority']}")

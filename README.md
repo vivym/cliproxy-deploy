@@ -314,6 +314,30 @@ MANAGEMENT_SECRET=... scripts/manage-cliproxy-auth-priority.py apply priorities.
 MANAGEMENT_SECRET=... scripts/manage-cliproxy-auth-priority.py apply priorities.json
 ```
 
+For short-lived accounts, maintain expiration times and let the helper compute priority and write the expiration into `note`:
+
+```json
+[
+  {
+    "name": "codex-a@example.com-plus.json",
+    "expires_at": "2026-05-05T20:00:00+08:00",
+    "batch": "batch-a"
+  },
+  {
+    "name": "codex-b@example.com-plus.json",
+    "expires_at": "2026-05-06T20:00:00+08:00",
+    "batch": "batch-b"
+  }
+]
+```
+
+```bash
+MANAGEMENT_SECRET=... scripts/manage-cliproxy-auth-priority.py apply-expiry expiry-plan.json --dry-run
+MANAGEMENT_SECRET=... scripts/manage-cliproxy-auth-priority.py apply-expiry expiry-plan.json
+```
+
+The computed priority bands are `30` for accounts expiring within 24 hours, `20` for accounts expiring within 48 hours, and `10` for later accounts. Expired accounts fail by default; pass `--allow-expired` to set them to priority `0`.
+
 ## Backups
 
 Set `BACKUP_DIR` in `.env` to an absolute path outside this repository, then run:
