@@ -54,6 +54,7 @@ scripts/backup-api-site.sh                      Runtime backup helper
 scripts/profile-latency.py                      Public route latency comparison
 scripts/profile-origin.py                       VPS-side origin latency comparison
 scripts/convert-codex-switcher-accounts.py      Convert codex-switcher auth files
+scripts/manage-cliproxy-auth-priority.py        Manage CLIProxyAPI auth priority
 docs/api-site-runbook.md                        Operational runbook
 tests/                                          Template and script tests
 ```
@@ -279,6 +280,39 @@ http://127.0.0.1:8317
 ```
 
 Keep CLIProxyAPI API keys and the management secret enabled. The loopback binding controls network reachability, not application authentication.
+
+## Auth Priority Management
+
+CLIProxyAPI supports per-auth `priority`. Higher priority auths are selected before lower priority auths; auths with the same priority are distributed by the configured routing strategy.
+
+Use the helper through the SSH tunnel:
+
+```bash
+MANAGEMENT_SECRET=... scripts/manage-cliproxy-auth-priority.py list
+```
+
+Set one auth file:
+
+```bash
+MANAGEMENT_SECRET=... scripts/manage-cliproxy-auth-priority.py set \
+  --name codex-a@example.com-plus.json \
+  --priority 20 \
+  --note "expires 2026-05-06 batch-a"
+```
+
+Apply a JSON plan:
+
+```json
+[
+  {"name": "codex-a@example.com-plus.json", "priority": 20, "note": "batch-a"},
+  {"name": "codex-b@example.com-plus.json", "priority": 10, "note": "batch-b"}
+]
+```
+
+```bash
+MANAGEMENT_SECRET=... scripts/manage-cliproxy-auth-priority.py apply priorities.json --dry-run
+MANAGEMENT_SECRET=... scripts/manage-cliproxy-auth-priority.py apply priorities.json
+```
 
 ## Backups
 
