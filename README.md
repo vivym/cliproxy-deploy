@@ -1,58 +1,64 @@
-# CLIProxyAPI Deploy
+# x2r AI Gateway
 
-Docker Compose deployment for a New API-fronted public API site with CLIProxyAPI as an internal upstream.
+Production Docker Compose deployment for an OpenAI-compatible AI gateway at `ai.x2r.store`.
 
-## API Site Mode
+The stack exposes [New API](https://github.com/Calcium-Ion/new-api) as the public user, admin, and SDK entry point. CLIProxyAPI runs behind it as an internal upstream channel for Codex/CLI traffic and is not exposed to the public internet.
 
-This repository now targets `ai.x2r.store` as a New API-fronted public API site. New API is the only public user and SDK entry point. CLIProxyAPI is internal-only and is used as a New API upstream channel.
+## What This Deploys
 
-For implementation and operations, see:
+- Traefik TLS reverse proxy with automatic Let's Encrypt certificates.
+- New API public gateway on one hostname.
+- Postgres and Redis for New API.
+- CLIProxyAPI on the private backend network and host loopback only.
+- CPA Usage Keeper for internal CLIProxyAPI usage collection.
+- Helper scripts for version selection, API-site validation, backups, latency profiling, and account conversion.
 
-- `docs/superpowers/specs/2026-05-03-new-api-cliproxy-api-site-design.md`
-- `docs/superpowers/plans/2026-05-03-new-api-cliproxy-api-site.md`
-- `docs/api-site-runbook.md`
-
-## Hostnames
-
-Configure DNS A/AAAA records to point at the server:
-
-```text
-ai.x2r.store
-```
-
-Open ports `80` and `443` on the server firewall. Do not expose CLIProxyAPI port `8317`, Postgres, Redis, or CPA Usage Keeper to the public internet.
-
-Traefik uses the Docker socket to discover labelled containers, so Traefik and anyone able to start or label containers on this Docker daemon are inside the deployment trust boundary.
-
-## Cloudflare
-
-This hostname is a first-level subdomain of `x2r.store`, so it can use Cloudflare's standard proxied Universal SSL coverage:
+## Architecture
 
 ```text
-A  ai        <server-ip>  Proxied
+Users / SDKs / Codex CLI
+        |
+        v
+https://ai.x2r.store
+        |
+        v
+Traefik :443
+        |
+        v
+New API :3000  ---> Postgres
+        |       ---> Redis
+        |
+        v
+CLIProxyAPI :8317
+        |
+        v
+Upstream model accounts
+
+CPA Usage Keeper reads CLIProxyAPI usage internally.
 ```
 
-Set Cloudflare SSL/TLS mode to `Full (strict)`. Do not use `Flexible`.
+Only `ai.x2r.store` is public. CLIProxyAPI, Postgres, Redis, and CPA Usage Keeper stay private.
 
-Add a cache rule to bypass cache for the hostname:
+## Repository Contents
 
 ```text
-Hostname equals ai.x2r.store       -> Bypass cache
+docker-compose.yml                              Production Compose stack
+config.yaml.template                            CLIProxyAPI production config template
+.env.example                                    Required environment variables
+docker-compose.cliproxy-public.override.yml.template
+                                                Temporary maintenance-only exposure template
+scripts/generate-api-key.py                     Generate internal CLIProxyAPI API keys
+scripts/verify-api-site.sh                      Production verification checks
+scripts/validate-api-site-compose.py            Rendered Compose policy checks
+scripts/backup-api-site.sh                      Runtime backup helper
+scripts/profile-latency.py                      Public route latency comparison
+scripts/profile-origin.py                       VPS-side origin latency comparison
+scripts/convert-codex-switcher-accounts.py      Convert codex-switcher auth files
+docs/api-site-runbook.md                        Operational runbook
+tests/                                          Template and script tests
 ```
 
-If initial Let's Encrypt issuance fails while Cloudflare proxying is enabled, temporarily switch the record to DNS only, restart Traefik, wait for certificate issuance, then switch it back to proxied.
-
-## Files
-
-Committed templates:
-
-```text
-docker-compose.yml
-config.yaml.template
-.env.example
-```
-
-Local-only runtime files:
+Runtime files are intentionally local-only and should not be committed:
 
 ```text
 .env
@@ -60,9 +66,45 @@ config.yaml
 auths/
 logs/
 letsencrypt/
+tmp/
 ```
 
+## Requirements
+
+- A Linux server with Docker Engine and Docker Compose v2.
+- DNS control for the public hostname.
+- Open inbound ports `80` and `443`.
+- No public exposure for port `8317`, Postgres, Redis, or CPA Usage Keeper.
+
+Traefik reads the Docker socket to discover labelled containers. Anyone who can control containers or labels on this Docker daemon is inside the deployment trust boundary.
+
+## DNS And Cloudflare
+
+Create an A or AAAA record for the API hostname:
+
+```text
+ai.x2r.store -> <server-ip>
+```
+
+For Cloudflare:
+
+```text
+A  ai  <server-ip>  Proxied
+```
+
+Use SSL/TLS mode `Full (strict)`. Do not use `Flexible`.
+
+Add a cache rule:
+
+```text
+Hostname equals ai.x2r.store -> Bypass cache
+```
+
+If Let's Encrypt issuance fails while Cloudflare proxying is enabled, temporarily switch the record to DNS only, restart Traefik, wait for certificate issuance, then switch proxying back on.
+
 ## Initial Setup
+
+Create local runtime files:
 
 ```bash
 cp .env.example .env
@@ -72,9 +114,7 @@ touch letsencrypt/acme.json
 chmod 600 letsencrypt/acme.json
 ```
 
-`docker compose config` will fail until `.env` contains all required values, including `ACME_EMAIL`, `AI_HOST`, image tags, generated secrets, and database passwords.
-
-Generate separate values for New API secrets, database passwords, Redis password, the CLIProxyAPI management secret, and the internal New API-to-CLIProxyAPI channel key:
+Generate secrets:
 
 ```bash
 openssl rand -hex 32
@@ -84,6 +124,25 @@ CLIPROXY_INTERNAL_API_KEY="$(scripts/generate-api-key.py)"
 printf 'management secret: %s\ninternal api key: %s\n' "$MANAGEMENT_SECRET" "$CLIPROXY_INTERNAL_API_KEY"
 ```
 
+Edit `.env` and set:
+
+```text
+ACME_EMAIL
+AI_HOST
+NEW_API_IMAGE_TAG
+CLIPROXYAPI_IMAGE_TAG
+CPA_USAGE_KEEPER_IMAGE
+CPA_USAGE_KEEPER_IMAGE_TAG
+NEW_API_SESSION_SECRET
+NEW_API_CRYPTO_SECRET
+POSTGRES_PASSWORD
+REDIS_PASSWORD
+CLIPROXY_INTERNAL_API_KEY
+MANAGEMENT_SECRET
+CPA_USAGE_KEEPER_AUTH_PASSWORD
+BACKUP_DIR
+```
+
 Edit `config.yaml` and replace:
 
 ```text
@@ -91,13 +150,15 @@ replace-with-management-secret
 replace-with-internal-new-api-channel-key
 ```
 
-The `remote-management.secret-key` value must exactly match `MANAGEMENT_SECRET` in `.env`. The `api-keys` entry must exactly match `CLIPROXY_INTERNAL_API_KEY` in `.env`.
+`remote-management.secret-key` in `config.yaml` must exactly match `MANAGEMENT_SECRET` in `.env`.
 
-CLIProxyAPI hashes a plaintext `remote-management.secret-key` on startup and writes it back to `config.yaml`, so keep `config.yaml` writable by the container. CLIProxyAPI remains internal-only in API Site Mode.
+`api-keys` in `config.yaml` must exactly match `CLIPROXY_INTERNAL_API_KEY` in `.env`.
 
-## Local Compose Validation
+CLIProxyAPI hashes a plaintext `remote-management.secret-key` on startup and writes it back to `config.yaml`, so keep `config.yaml` writable by the container.
 
-Validate the rendered Compose configuration from template files before touching production:
+## Validate Before Production
+
+Validate the rendered Compose file in a temporary directory before touching the server deployment:
 
 ```bash
 tmpdir="$(mktemp -d)"
@@ -112,57 +173,134 @@ chmod 600 "$tmpdir/letsencrypt/acme.json"
 scripts/validate-api-site-compose.py /tmp/api-site-compose.json --host ai.x2r.store
 ```
 
-The backend Docker network must not be configured as `internal: true`. New API and CLIProxyAPI both need outbound internet access for upstream API calls, provider connectivity, and operational validation.
+The backend Docker network must allow outbound internet access. New API and CLIProxyAPI need outbound connections for upstream API calls, provider access, and validation.
 
-## Start
+## Start The Stack
 
 ```bash
 docker compose config
+docker compose pull
 docker compose up -d
 docker compose ps
 ```
 
-## Verify
+## Configure New API
 
-API site hostname:
+After first boot, configure New API through the public hostname:
+
+```text
+https://ai.x2r.store
+```
+
+Required production hardening:
+
+- Rotate default admin credentials.
+- Enable invitation-code registration.
+- Set new user initial balance to `0`.
+- Disable unused authentication methods.
+- Disable online payments unless intentionally configured.
+- Configure redeem codes as the only public top-up path if using prepaid access.
+- Add CLIProxyAPI as an internal New API channel with base URL `http://cliproxyapi:8317`.
+- Use `CLIPROXY_INTERNAL_API_KEY` as the channel key.
+- Keep official-provider fallback channels limited to admin test groups until billing is reconciled.
+
+See [docs/api-site-runbook.md](docs/api-site-runbook.md) for the full launch checklist.
+
+## Verify Production
+
+Basic public check:
 
 ```bash
 curl -I https://ai.x2r.store
 ```
 
-Run the API-site verification helper:
+Run the verification helper:
 
 ```bash
 scripts/verify-api-site.sh
 ```
 
-New API is the public management, user, and SDK entry point. CLIProxyAPI management and API routes are internal operations surfaces only.
+For complete launch validation, set test API keys first:
 
-## CLIProxyAPI SSH Tunnel
+```bash
+NEW_API_TEST_API_KEY=sk-... CODEX_TEST_API_KEY=sk-... scripts/verify-api-site.sh
+```
 
-CLIProxyAPI binds `8317` to the server loopback address only:
+The verification helper checks:
+
+- New API public endpoint.
+- `/v1/models` when `NEW_API_TEST_API_KEY` is set.
+- `/v1/responses` when `CODEX_TEST_API_KEY` is set.
+- New API container access to internal CLIProxyAPI.
+- Negative public exposure check for the legacy CLIProxyAPI hostname.
+
+## API Usage
+
+Point OpenAI-compatible clients at:
+
+```text
+https://ai.x2r.store/v1
+```
+
+Example:
+
+```bash
+curl https://ai.x2r.store/v1/models \
+  -H "Authorization: Bearer sk-..."
+```
+
+Responses API smoke test:
+
+```bash
+curl https://ai.x2r.store/v1/responses \
+  -H "Authorization: Bearer sk-..." \
+  -H "Content-Type: application/json" \
+  -d '{"model":"codex-cli","input":"Reply with ok.","store":false}'
+```
+
+## CLIProxyAPI Management
+
+CLIProxyAPI binds to the server loopback address only:
 
 ```yaml
 127.0.0.1:8317:8317
 ```
 
-It is reachable from the VPS itself and from containers on the backend Docker network, but not from the public internet. For local management, create an SSH tunnel from your workstation:
+For local management, create an SSH tunnel:
 
 ```bash
 ssh -L 8317:127.0.0.1:8317 <user>@<server>
 ```
 
-Then use:
+Then open:
 
 ```text
 http://127.0.0.1:8317
 ```
 
-Keep CLIProxyAPI API keys and the management secret enabled. The loopback binding only controls network reachability; it does not replace application authentication.
+Keep CLIProxyAPI API keys and the management secret enabled. The loopback binding controls network reachability, not application authentication.
+
+## Backups
+
+Set `BACKUP_DIR` in `.env` to an absolute path outside this repository, then run:
+
+```bash
+scripts/backup-api-site.sh
+```
+
+The backup helper captures:
+
+- New API Postgres dump.
+- `config.yaml`.
+- `auths/`.
+- CPA Usage Keeper data when the service is running.
+- SHA-256 checksums.
+
+Store backups encrypted and off-host. Run a restore drill before meaningful paid usage.
 
 ## Latency Profiling
 
-Public profiling targets New API through Traefik at `ai.x2r.store`, not CLIProxyAPI internal management routes. From your local machine, compare the normal route, direct Cloudflare route, and direct VPS origin route for an API-site path:
+Compare Cloudflare, proxy, and origin latency from a workstation:
 
 ```bash
 scripts/profile-latency.py \
@@ -173,7 +311,7 @@ scripts/profile-latency.py \
   --csv tmp/local-latency.csv
 ```
 
-If your terminal does not use proxy environment variables, pass the local proxy explicitly:
+If your terminal does not use proxy environment variables, pass a local proxy explicitly:
 
 ```bash
 scripts/profile-latency.py \
@@ -183,17 +321,7 @@ scripts/profile-latency.py \
   --proxy http://127.0.0.1:7890
 ```
 
-For protected New API paths, pass the key through an environment variable so it is not printed:
-
-```bash
-NEW_API_KEY=sk-... scripts/profile-latency.py \
-  --host ai.x2r.store \
-  --origin-ip <vps-ip> \
-  --path /v1/models \
-  --api-key-env NEW_API_KEY
-```
-
-On the VPS in API Site Mode, use origin profiling as an internal diagnostic by comparing Traefik loopback to direct New API container access. Override the direct target explicitly; the script's `cliproxy-direct` label is historical in this mode.
+On the VPS, compare Traefik loopback to direct New API container access:
 
 ```bash
 new_api_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{println .IPAddress}}{{end}}' new-api | awk 'NF{print; exit}')"
@@ -205,12 +333,24 @@ scripts/profile-origin.py \
   --csv tmp/origin-latency.csv
 ```
 
-The derived values are approximate:
+The `--cliproxy-url` option name is historical in API-site mode; point it at the direct New API container URL.
 
-```text
-proxy_delta_ms      ~= cf-default - cf-direct
-cloudflare_delta_ms ~= cf-direct - origin-direct
-traefik_overhead_ms ~= traefik-loopback - direct New API container
+## Account Import
+
+Convert codex-switcher's multi-account `accounts.json` into CLIProxyAPI Codex auth files:
+
+```bash
+scripts/convert-codex-switcher-accounts.py tmp/accounts.json auths
+```
+
+The script writes one `codex-<email>-<plan>.json` file per account, sets generated file permissions to `0600`, and prints only generated file paths.
+
+## OAuth Login
+
+Do not permanently expose OAuth callback ports. Run login commands inside the container and use SSH tunneling or temporary port exposure only when needed:
+
+```bash
+docker compose exec cliproxyapi /CLIProxyAPI/CLIProxyAPI -no-browser --codex-login
 ```
 
 ## Logs
@@ -222,69 +362,10 @@ The template sets:
 ```yaml
 logging-to-file: true
 logs-max-total-size-mb: 2048
+request-log: false
 ```
 
 Adjust `logs-max-total-size-mb` based on available disk space.
-
-## Built-In Usage Queue
-
-CLIProxyAPI's Redis-compatible usage queue is enabled through:
-
-```yaml
-usage-statistics-enabled: true
-redis-usage-queue-retention-seconds: 3600
-```
-
-This is not an external Redis service. It is a small RESP interface on CLIProxyAPI's internal `8317` port. A future collector on the same Docker network can read it with:
-
-```bash
-redis-cli -h cliproxyapi -p 8317 -a "$MANAGEMENT_SECRET" --raw LPOP queue
-```
-
-Do not expose this port publicly. The queue is short-term memory storage, not a billing or analytics database.
-
-## Session Affinity
-
-The template enables CLIProxyAPI session affinity so one client session prefers the same upstream account when possible:
-
-```yaml
-routing:
-  strategy: "round-robin"
-  session-affinity: true
-  session-affinity-ttl: "2h"
-```
-
-This is not a hard pin. CLIProxyAPI may still switch credentials when retrying or when the previously selected credential is unavailable.
-
-## WebSocket Auth
-
-The template enables API-key authentication for CLIProxyAPI WebSocket clients:
-
-```yaml
-ws-auth: true
-```
-
-This protects internal CLIProxyAPI `/v1/ws` clients that connect on the backend network. HTTP API requests and management API requests continue to use their existing `api-keys` and `remote-management.secret-key` authentication.
-
-## Convert Codex Switcher Accounts
-
-Use the helper script to convert codex-switcher's multi-account `accounts.json` into CLIProxyAPI Codex auth files:
-
-```bash
-scripts/convert-codex-switcher-accounts.py tmp/accounts.json auths
-```
-
-The script writes one `codex-<email>-<plan>.json` file per account, sets generated file permissions to `0600`, and prints only generated file paths.
-
-## OAuth Login
-
-Do not permanently expose OAuth callback ports. Run login commands inside the container and use SSH tunneling or temporary port exposure only when needed.
-
-Example:
-
-```bash
-docker compose exec cliproxyapi /CLIProxyAPI/CLIProxyAPI -no-browser --codex-login
-```
 
 ## Troubleshooting
 
@@ -293,11 +374,35 @@ Check service status:
 ```bash
 docker compose ps
 docker compose logs --tail=100 traefik
+docker compose logs --tail=100 new-api
 docker compose logs --tail=100 cliproxyapi
+docker compose logs --tail=100 cpa-usage-keeper
 ```
 
-If HTTPS fails, check DNS, firewall ports `80`/`443`, Traefik logs, and `letsencrypt/acme.json` permissions.
+Common checks:
 
-If management API calls fail, verify `remote-management.secret-key` in `config.yaml`. Repeated failed management-key attempts may trigger a temporary remote IP block; wait for it to expire or restart CLIProxyAPI before retesting.
+- HTTPS failure: verify DNS, firewall ports `80` and `443`, Traefik logs, and `letsencrypt/acme.json` permissions.
+- Management failure: verify `remote-management.secret-key` in `config.yaml`.
+- API failure: verify New API channel configuration, `api-keys`, `auths/`, and CLIProxyAPI logs.
+- Repeated bad management keys may trigger a temporary remote IP block; wait for expiry or restart CLIProxyAPI before retesting.
 
-If API requests fail, verify `api-keys`, auth files under `auths/`, and CLIProxyAPI logs.
+## Development
+
+Run tests:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
+Run Compose policy validation against a rendered config:
+
+```bash
+docker compose config --format json > /tmp/api-site-compose.json
+scripts/validate-api-site-compose.py /tmp/api-site-compose.json --host ai.x2r.store
+```
+
+## More Documentation
+
+- [API site runbook](docs/api-site-runbook.md)
+- [New API site design notes](docs/superpowers/specs/2026-05-03-new-api-cliproxy-api-site-design.md)
+- [Deployment implementation plan](docs/superpowers/plans/2026-05-03-new-api-cliproxy-api-site.md)
