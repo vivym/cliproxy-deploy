@@ -53,6 +53,15 @@ if [[ ! -d "$log_dir" ]]; then
   exit 1
 fi
 
+lock_file="${CLIPROXY_LOG_ARCHIVE_LOCK_FILE:-${log_dir}/.archive-cliproxy-logs.lock}"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$lock_file"
+  if ! flock -n 9; then
+    echo "Another CLIProxyAPI log archive run is active; exiting" >&2
+    exit 0
+  fi
+fi
+
 min_age_minutes="${CLIPROXY_LOG_ARCHIVE_MIN_AGE_MINUTES:-30}"
 delete_after_days="${CLIPROXY_LOG_ARCHIVE_DELETE_AFTER_DAYS:-1}"
 gzip_level="${CLIPROXY_LOG_ARCHIVE_GZIP_LEVEL:-1}"
@@ -148,7 +157,17 @@ compress_old_logs() {
         echo "Skipping open log file: ${file}" >&2
         continue
       fi
-      gzip_file "$file"
+      if [[ ! -e "$file" ]]; then
+        echo "Skipping disappeared log file: ${file}" >&2
+        continue
+      fi
+      if ! gzip_file "$file"; then
+        if [[ ! -e "$file" ]]; then
+          echo "Skipping disappeared log file: ${file}" >&2
+          continue
+        fi
+        return 1
+      fi
     done
 }
 

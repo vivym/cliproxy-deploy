@@ -89,6 +89,21 @@ exec "$@"
         )
         cpulimit.chmod(0o755)
 
+    def write_disappearing_gzip(self, bin_dir, calls_file):
+        gzip = bin_dir / "gzip"
+        gzip.write_text(
+            f"""#!/usr/bin/env bash
+set -euo pipefail
+printf 'gzip %s\\n' "$*" >> {calls_file}
+file="${{@: -1}}"
+rm -f -- "$file"
+printf 'gzip: %s: No such file or directory\\n' "$file" >&2
+exit 1
+""",
+            encoding="utf-8",
+        )
+        gzip.chmod(0o755)
+
     def make_old_enough(self, path):
         old = time.time() - 2 * 60
         os.utime(path, (old, old))
@@ -102,6 +117,7 @@ exec "$@"
         self.assertIn("aws s3 cp", text)
         self.assertIn('CLIPROXY_LOG_ARCHIVE_GZIP_LEVEL:-1', text)
         self.assertIn('CLIPROXY_LOG_ARCHIVE_NICE:-19', text)
+        self.assertIn("flock -n", text)
 
     def test_compresses_old_request_logs_and_uploads_to_r2(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -167,6 +183,36 @@ exec "$@"
             calls = calls_file.read_text(encoding="utf-8")
             self.assertIn(f"nice -n 19 gzip -1n -- {request_log}", calls)
             self.assertIn(f"gzip -1n -- {request_log}", calls)
+
+    def test_skips_log_that_disappears_before_compression(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            script = self.write_script_copy(root)
+            logs = root / "logs"
+            logs.mkdir()
+            request_log = logs / "request-disappears.log"
+            request_log.write_text("full request body\n", encoding="utf-8")
+            self.make_old_enough(request_log)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "tool-calls"
+            self.write_fake_aws(bin_dir, calls_file)
+            self.write_disappearing_gzip(bin_dir, calls_file)
+            env = self.base_env(root, bin_dir)
+            env["CLIPROXY_LOG_ARCHIVE_IONICE_IDLE"] = "false"
+
+            result = subprocess.run(
+                [str(script)],
+                cwd=root,
+                env=env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Skipping disappeared log file", result.stderr)
+            self.assertFalse((logs / "request-disappears.log.gz").exists())
 
     def test_optional_cpulimit_wraps_compression(self):
         with tempfile.TemporaryDirectory() as tmp:
