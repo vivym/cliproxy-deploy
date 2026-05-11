@@ -51,6 +51,7 @@ scripts/generate-api-key.py                     Generate internal CLIProxyAPI AP
 scripts/verify-api-site.sh                      Production verification checks
 scripts/validate-api-site-compose.py            Rendered Compose policy checks
 scripts/backup-api-site.sh                      Runtime backup helper
+scripts/archive-cliproxy-logs.sh                Compress and upload CLIProxyAPI logs to R2
 scripts/profile-latency.py                      Public route latency comparison
 scripts/profile-origin.py                       VPS-side origin latency comparison
 scripts/convert-codex-switcher-accounts.py      Convert codex-switcher auth files
@@ -76,6 +77,7 @@ tmp/
 - DNS control for the public hostname.
 - Open inbound ports `80` and `443`.
 - No public exposure for port `8317`, Postgres, Redis, or CPA Usage Keeper.
+- AWS CLI v2 if using Cloudflare R2 log archiving.
 
 Traefik reads the Docker socket to discover labelled containers. Anyone who can control containers or labels on this Docker daemon is inside the deployment trust boundary.
 
@@ -142,6 +144,22 @@ CLIPROXY_INTERNAL_API_KEY
 MANAGEMENT_SECRET
 CPA_USAGE_KEEPER_AUTH_PASSWORD
 BACKUP_DIR
+```
+
+Optional Cloudflare R2 log archiving variables:
+
+```text
+R2_ACCOUNT_ID
+R2_BUCKET
+R2_ACCESS_KEY_ID
+R2_SECRET_ACCESS_KEY
+CLIPROXY_LOG_ARCHIVE_R2_PREFIX
+CLIPROXY_LOG_ARCHIVE_MIN_AGE_MINUTES
+CLIPROXY_LOG_ARCHIVE_DELETE_AFTER_DAYS=1
+CLIPROXY_LOG_ARCHIVE_GZIP_LEVEL=1
+CLIPROXY_LOG_ARCHIVE_NICE=19
+CLIPROXY_LOG_ARCHIVE_IONICE_IDLE=true
+CLIPROXY_LOG_ARCHIVE_CPU_LIMIT_PERCENT
 ```
 
 Edit `config.yaml` and replace:
@@ -424,6 +442,16 @@ request-log: false
 ```
 
 Adjust `logs-max-total-size-mb` based on available disk space.
+
+When full request logging is temporarily enabled, each request log can be archived without touching files that are still being written:
+
+```bash
+scripts/archive-cliproxy-logs.sh
+```
+
+The archiver compresses request-log files older than `CLIPROXY_LOG_ARCHIVE_MIN_AGE_MINUTES`, uploads `.gz` files to Cloudflare R2 with `aws s3 cp`, marks successful uploads, and deletes uploaded local copies after `CLIPROXY_LOG_ARCHIVE_DELETE_AFTER_DAYS=1`. Compression defaults to `gzip -1`, `nice -n 19`, and idle `ionice` when available; set `CLIPROXY_LOG_ARCHIVE_CPU_LIMIT_PERCENT` only if `cpulimit` is installed and a hard CPU cap is required. Install it as a cron job or systemd timer on the host; do not treat R2 upload as declassification because full request logs remain sensitive after compression and upload.
+
+Setup details are in [docs/cliproxy-log-archive-r2-runbook.md](docs/cliproxy-log-archive-r2-runbook.md).
 
 ## Troubleshooting
 

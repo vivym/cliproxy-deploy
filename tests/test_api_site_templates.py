@@ -27,8 +27,30 @@ class ApiSiteTemplateTests(unittest.TestCase):
             "CPA_USAGE_KEEPER_IMAGE=",
             "CPA_USAGE_KEEPER_IMAGE_TAG=",
             "BACKUP_DIR=",
+            "R2_ACCOUNT_ID=",
+            "R2_BUCKET=",
+            "R2_ACCESS_KEY_ID=",
+            "R2_SECRET_ACCESS_KEY=",
+            "CLIPROXY_LOG_ARCHIVE_R2_PREFIX=",
+            "CLIPROXY_LOG_ARCHIVE_GZIP_LEVEL=1",
+            "CLIPROXY_LOG_ARCHIVE_NICE=19",
+            "CLIPROXY_LOG_ARCHIVE_IONICE_IDLE=true",
+            "CLIPROXY_LOG_ARCHIVE_CPU_LIMIT_PERCENT=",
         ]:
             self.assertIn(name, text)
+
+    def test_log_archive_script_is_documented(self):
+        readme = self.read("README.md")
+        runbook = self.read("docs/api-site-runbook.md")
+        archive_runbook = self.read("docs/cliproxy-log-archive-r2-runbook.md")
+        for text in [readme, runbook, archive_runbook]:
+            self.assertIn("scripts/archive-cliproxy-logs.sh", text)
+            self.assertIn("Cloudflare R2", text)
+            self.assertIn("gzip -1", text)
+            self.assertIn("CLIPROXY_LOG_ARCHIVE_CPU_LIMIT_PERCENT", text)
+            self.assertIn("CLIPROXY_LOG_ARCHIVE_DELETE_AFTER_DAYS=1", text)
+        self.assertIn("docs/cliproxy-log-archive-r2-runbook.md", readme)
+        self.assertIn("docs/cliproxy-log-archive-r2-runbook.md", runbook)
 
     def test_cliproxy_config_template_is_production_safe(self):
         text = self.read("config.yaml.template")

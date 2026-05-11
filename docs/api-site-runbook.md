@@ -100,6 +100,46 @@ For each case, record user balance before, user balance after, observed quota de
 - Use the CLIProxyAPI management key from `.env`.
 - Do not expose the dashboard unless protected.
 
+## CLIProxyAPI Log Archiving
+
+Use this only for short troubleshooting windows where `request-log: true` is enabled. Full request logs can include request bodies, response bodies, headers, streaming chunks, and upstream API data.
+
+Set Cloudflare R2 credentials in `.env`:
+
+```text
+R2_ACCOUNT_ID=...
+R2_BUCKET=...
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+CLIPROXY_LOG_ARCHIVE_R2_PREFIX=cliproxy-logs
+CLIPROXY_LOG_ARCHIVE_MIN_AGE_MINUTES=30
+CLIPROXY_LOG_ARCHIVE_DELETE_AFTER_DAYS=1
+CLIPROXY_LOG_ARCHIVE_GZIP_LEVEL=1
+CLIPROXY_LOG_ARCHIVE_NICE=19
+CLIPROXY_LOG_ARCHIVE_IONICE_IDLE=true
+CLIPROXY_LOG_ARCHIVE_CPU_LIMIT_PERCENT=
+```
+
+Install AWS CLI v2 on the host, then run:
+
+```bash
+scripts/archive-cliproxy-logs.sh
+```
+
+The script compresses request-log files older than the safety window, uploads `.gz` files to Cloudflare R2, writes a `.uploaded` marker only after successful upload, and deletes uploaded local copies after `CLIPROXY_LOG_ARCHIVE_DELETE_AFTER_DAYS=1`.
+
+Compression is intentionally low-impact by default: `gzip -1`, `nice -n 19`, and idle `ionice` when available. If the host is still CPU-bound, install `cpulimit` and set `CLIPROXY_LOG_ARCHIVE_CPU_LIMIT_PERCENT=25` or another 1-100 percentage.
+
+Example cron entry:
+
+```cron
+*/10 * * * * cd /opt/cliproxy-deploy && scripts/archive-cliproxy-logs.sh >> /var/log/cliproxy-log-archive.log 2>&1
+```
+
+Do not back up active uncompressed request logs. For backups, prefer already uploaded R2 objects or local `.gz` files with `.uploaded` markers.
+
+Detailed setup steps are in [docs/cliproxy-log-archive-r2-runbook.md](cliproxy-log-archive-r2-runbook.md).
+
 ## Backup And Restore
 
 - Run `scripts/backup-api-site.sh`.
