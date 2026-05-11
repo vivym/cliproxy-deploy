@@ -120,6 +120,10 @@ gzip_file() {
   local -a cmd
   cmd=(gzip "-${gzip_level}n" -- "$file")
 
+  if [[ -n "$cpu_limit_percent" ]]; then
+    cmd=(cpulimit -l "$cpu_limit_percent" -- "${cmd[@]}")
+  fi
+
   if [[ "$nice_level" != "0" ]]; then
     require_command nice
     cmd=(nice -n "$nice_level" "${cmd[@]}")
@@ -127,10 +131,6 @@ gzip_file() {
 
   if [[ "$ionice_idle" == "true" ]] && command -v ionice >/dev/null 2>&1; then
     cmd=(ionice -c 3 "${cmd[@]}")
-  fi
-
-  if [[ -n "$cpu_limit_percent" ]]; then
-    cmd=(cpulimit -l "$cpu_limit_percent" -- "${cmd[@]}")
   fi
 
   "${cmd[@]}"

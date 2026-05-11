@@ -198,7 +198,11 @@ exec "$@"
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = calls_file.read_text(encoding="utf-8")
             self.assertIn(
-                f"cpulimit -l 25 -- nice -n 19 gzip -1n -- {request_log}",
+                f"nice -n 19 cpulimit -l 25 -- gzip -1n -- {request_log}",
+                calls,
+            )
+            self.assertIn(
+                f"cpulimit -l 25 -- gzip -1n -- {request_log}",
                 calls,
             )
 
