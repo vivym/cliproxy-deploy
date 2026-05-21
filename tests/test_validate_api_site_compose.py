@@ -18,6 +18,8 @@ SPEC.loader.exec_module(validate_api_site_compose)
 
 
 EXPECTED_HOST = "ai.x2r.store"
+EXPECTED_CLIPROXY_HOST = "cliproxy.x2r.store"
+EXPECTED_KEEPER_HOST = "keeper.x2r.store"
 
 
 def valid_compose():
@@ -29,6 +31,7 @@ def valid_compose():
                 "networks": ["proxy", "backend"],
                 "labels": {
                     "traefik.enable": "true",
+                    "traefik.docker.network": "proxy",
                     "traefik.http.routers.new-api.rule": "Host(`ai.x2r.store`)",
                     "traefik.http.routers.new-api.entrypoints": "websecure",
                     "traefik.http.routers.new-api.tls": "true",
@@ -46,10 +49,19 @@ def valid_compose():
             },
             "cliproxyapi": {
                 "image": "eceasy/cli-proxy-api:v1.2.3",
-                "networks": ["backend"],
+                "networks": ["proxy", "backend"],
                 "ports": ["127.0.0.1:8317:8317"],
                 "expose": ["8317"],
-                "labels": {"traefik.enable": "false"},
+                "labels": {
+                    "traefik.enable": "true",
+                    "traefik.docker.network": "proxy",
+                    "traefik.http.routers.cliproxyapi.rule": "Host(`cliproxy.x2r.store`)",
+                    "traefik.http.routers.cliproxyapi.entrypoints": "websecure",
+                    "traefik.http.routers.cliproxyapi.tls": "true",
+                    "traefik.http.routers.cliproxyapi.tls.certresolver": "le",
+                    "traefik.http.routers.cliproxyapi.service": "cliproxyapi",
+                    "traefik.http.services.cliproxyapi.loadbalancer.server.port": "8317",
+                },
             },
             "postgres": {
                 "image": "postgres:16-alpine",
@@ -63,8 +75,23 @@ def valid_compose():
             },
             "cpa-usage-keeper": {
                 "image": "ghcr.io/willxup/cpa-usage-keeper:v1.3.3",
-                "networks": ["backend"],
+                "networks": ["proxy", "backend"],
+                "expose": ["8080"],
                 "volumes": ["cpa-usage-keeper-data:/data"],
+                "environment": {
+                    "AUTH_ENABLED": "true",
+                    "LOGIN_PASSWORD": "keeper-secret",
+                },
+                "labels": {
+                    "traefik.enable": "true",
+                    "traefik.docker.network": "proxy",
+                    "traefik.http.routers.cpa-usage-keeper.rule": "Host(`keeper.x2r.store`)",
+                    "traefik.http.routers.cpa-usage-keeper.entrypoints": "websecure",
+                    "traefik.http.routers.cpa-usage-keeper.tls": "true",
+                    "traefik.http.routers.cpa-usage-keeper.tls.certresolver": "le",
+                    "traefik.http.routers.cpa-usage-keeper.service": "cpa-usage-keeper",
+                    "traefik.http.services.cpa-usage-keeper.loadbalancer.server.port": "8080",
+                },
             },
         },
         "networks": {"proxy": {}, "backend": {}},
@@ -77,8 +104,16 @@ def valid_compose():
 
 
 class ValidateApiSiteComposeTests(unittest.TestCase):
+    def validate(self, compose):
+        return validate_api_site_compose.validate(
+            compose,
+            EXPECTED_HOST,
+            EXPECTED_CLIPROXY_HOST,
+            EXPECTED_KEEPER_HOST,
+        )
+
     def assert_has_error(self, compose, expected):
-        errors = validate_api_site_compose.validate(compose, EXPECTED_HOST)
+        errors = self.validate(compose)
 
         self.assertTrue(
             any(expected in error for error in errors),
@@ -86,24 +121,33 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         )
 
     def test_valid_compose_has_no_errors(self):
-        self.assertEqual(validate_api_site_compose.validate(valid_compose(), EXPECTED_HOST), [])
+        self.assertEqual(self.validate(valid_compose()), [])
 
-    def test_rejects_cliproxyapi_public_traefik_router(self):
+    def test_rejects_missing_cliproxyapi_public_traefik_router(self):
         compose = valid_compose()
-        compose["services"]["cliproxyapi"]["labels"] = {
-            "traefik.enable": "true",
-            "traefik.http.routers.cliproxyapi.rule": "Host(`api.x2r.store`)",
-        }
+        del compose["services"]["cliproxyapi"]["labels"]["traefik.http.routers.cliproxyapi.rule"]
 
-        self.assert_has_error(compose, "cliproxyapi must not enable Traefik")
+        self.assert_has_error(
+            compose,
+            "cliproxyapi Traefik label traefik.http.routers.cliproxyapi.rule must be Host(`cliproxy.x2r.store`)",
+        )
 
-    def test_rejects_cliproxyapi_traefik_router_label_without_enable(self):
+    def test_rejects_wrong_cliproxyapi_public_host(self):
         compose = valid_compose()
-        compose["services"]["cliproxyapi"]["labels"] = {
-            "traefik.http.routers.cliproxyapi.rule": "Host(`cliproxy.x2r.store`)",
-        }
+        compose["services"]["cliproxyapi"]["labels"]["traefik.http.routers.cliproxyapi.rule"] = (
+            "Host(`wrong.x2r.store`)"
+        )
 
-        self.assert_has_error(compose, "cliproxyapi must not define Traefik labels")
+        self.assert_has_error(
+            compose,
+            "cliproxyapi Traefik label traefik.http.routers.cliproxyapi.rule must be Host(`cliproxy.x2r.store`)",
+        )
+
+    def test_rejects_cpa_usage_keeper_auth_disabled(self):
+        compose = valid_compose()
+        compose["services"]["cpa-usage-keeper"]["environment"]["AUTH_ENABLED"] = "false"
+
+        self.assert_has_error(compose, "cpa-usage-keeper must enable AUTH_ENABLED")
 
     def test_rejects_untagged_backend_service_image(self):
         compose = valid_compose()
@@ -153,7 +197,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         compose = valid_compose()
         compose["services"]["redis"]["labels"] = ["traefik.enable=false"]
 
-        self.assertEqual(validate_api_site_compose.validate(compose, EXPECTED_HOST), [])
+        self.assertEqual(self.validate(compose), [])
 
     def test_rejects_backend_service_non_exact_traefik_enable_false(self):
         compose = valid_compose()
@@ -228,7 +272,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
             }
         ]
 
-        self.assertEqual(validate_api_site_compose.validate(compose, EXPECTED_HOST), [])
+        self.assertEqual(self.validate(compose), [])
 
     def test_rejects_unexpected_service_traefik_labels(self):
         compose = valid_compose()
@@ -306,7 +350,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         compose = valid_compose()
         compose["services"]["new-api"]["image"] = "calciumion/new-api:latest"
 
-        errors = validate_api_site_compose.validate(compose, EXPECTED_HOST)
+        errors = self.validate(compose)
 
         image_errors = [
             error for error in errors
@@ -372,6 +416,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
         compose = valid_compose()
         compose["services"]["new-api"]["labels"] = [
             "traefik.enable=true",
+            "traefik.docker.network=proxy",
             "traefik.http.routers.new-api.rule=Host(`ai.x2r.store`)",
             "traefik.http.routers.new-api.entrypoints=websecure",
             "traefik.http.routers.new-api.tls=true",
@@ -397,7 +442,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
             }
         ]
 
-        self.assertEqual(validate_api_site_compose.validate(compose, EXPECTED_HOST), [])
+        self.assertEqual(self.validate(compose), [])
 
     def test_environment_list_entries_without_value_are_included(self):
         environment = validate_api_site_compose.environment_for({"environment": ["SQL_DSN"]})
@@ -419,7 +464,7 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
                     mock.patch.object(validate_api_site_compose.sys, "stderr", stderr):
                 result = validate_api_site_compose.main()
 
-        self.assertEqual(result, 0)
+            self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue(), "api-site compose validation passed\n")
         self.assertEqual(stderr.getvalue(), "")
 
@@ -458,7 +503,12 @@ class ValidateApiSiteComposeTests(unittest.TestCase):
             with mock.patch.object(
                 validate_api_site_compose.sys,
                 "argv",
-                ["validate-api-site-compose.py", compose_file.name, "--host", "api.example.com"],
+                [
+                    "validate-api-site-compose.py",
+                    compose_file.name,
+                    "--host",
+                    "api.example.com",
+                ],
             ), mock.patch.object(validate_api_site_compose.sys, "stdout", stdout), \
                     mock.patch.object(validate_api_site_compose.sys, "stderr", stderr):
                 result = validate_api_site_compose.main()

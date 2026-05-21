@@ -35,18 +35,14 @@ REQUIRED_NEW_API_ENV = {
     "SESSION_SECRET",
     "CRYPTO_SECRET",
 }
-REQUIRED_NEW_API_TRAEFIK_LABELS = {
-    "traefik.http.routers.new-api.entrypoints": "websecure",
-    "traefik.http.routers.new-api.tls": "true",
-    "traefik.http.routers.new-api.tls.certresolver": "le",
-    "traefik.http.routers.new-api.service": "new-api",
-    "traefik.http.services.new-api.loadbalancer.server.port": "3000",
+PUBLIC_TRAEFIK_SERVICES = {
+    "new-api": "3000",
+    "cliproxyapi": "8317",
+    "cpa-usage-keeper": "8080",
 }
-BACKEND_ONLY_SERVICES = {
-    "cliproxyapi",
+PRIVATE_BACKEND_ONLY_SERVICES = {
     "postgres",
     "redis",
-    "cpa-usage-keeper",
 }
 REQUIRED_SERVICE_VOLUMES = {
     "postgres": "postgres-data",
@@ -190,7 +186,78 @@ def _service(compose: Dict[str, Any], name: str) -> Dict[str, Any]:
     return service if isinstance(service, dict) else {}
 
 
-def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
+def required_public_traefik_labels(
+    service_name: str,
+    expected_host: str,
+    internal_port: str,
+) -> Dict[str, str]:
+    return {
+        "traefik.enable": "true",
+        "traefik.docker.network": "proxy",
+        "traefik.http.routers.{}.rule".format(service_name): "Host(`{}`)".format(expected_host),
+        "traefik.http.routers.{}.entrypoints".format(service_name): "websecure",
+        "traefik.http.routers.{}.tls".format(service_name): "true",
+        "traefik.http.routers.{}.tls.certresolver".format(service_name): "le",
+        "traefik.http.routers.{}.service".format(service_name): service_name,
+        "traefik.http.services.{}.loadbalancer.server.port".format(service_name): internal_port,
+    }
+
+
+def validate_public_traefik_service(
+    service_name: str,
+    service: Dict[str, Any],
+    expected_host: str,
+    internal_port: str,
+    errors: List[str],
+) -> None:
+    labels = labels_for(service)
+    required_labels = required_public_traefik_labels(
+        service_name,
+        expected_host,
+        internal_port,
+    )
+    for label, expected_value in sorted(required_labels.items()):
+        actual_value = labels.get(label)
+        if label.endswith(".tls") or label == "traefik.enable":
+            matches = actual_value is not None and actual_value.lower() == expected_value
+        else:
+            matches = actual_value == expected_value
+        if not matches:
+            errors.append(
+                "{} Traefik label {} must be {}".format(
+                    service_name,
+                    label,
+                    expected_value,
+                )
+            )
+
+    router_prefix = "traefik.http.routers.{}.".format(service_name)
+    service_prefix = "traefik.http.services.{}.".format(service_name)
+    for label in labels:
+        if label.startswith("traefik.http.routers.") and not label.startswith(router_prefix):
+            errors.append("{} must not define extra Traefik router labels".format(service_name))
+        if label.startswith("traefik.http.services.") and not label.startswith(service_prefix):
+            errors.append("{} must not define extra Traefik service labels".format(service_name))
+        if (
+            label.startswith("traefik.")
+            and label not in {"traefik.enable", "traefik.docker.network"}
+            and not label.startswith(router_prefix)
+            and not label.startswith(service_prefix)
+        ):
+            errors.append("{} must not define unsupported Traefik labels".format(service_name))
+
+    service_networks = networks_for(service)
+    for network_name in ("proxy", "backend"):
+        if network_name not in service_networks:
+            errors.append("{} must join {}".format(service_name, network_name))
+
+
+def validate(
+    compose: Dict[str, Any],
+    expected_host: str,
+    expected_cliproxy_host: str = "cliproxy.x2r.store",
+    expected_keeper_host: str = "keeper.x2r.store",
+) -> List[str]:
     errors = []
     services = compose.get("services", {})
     networks = compose.get("networks", {})
@@ -223,55 +290,40 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
     if "backend" in networks_for(traefik):
         errors.append("traefik must not join backend")
 
+    public_hosts = {
+        "new-api": expected_host,
+        "cliproxyapi": expected_cliproxy_host,
+        "cpa-usage-keeper": expected_keeper_host,
+    }
+    for service_name, internal_port in sorted(PUBLIC_TRAEFIK_SERVICES.items()):
+        validate_public_traefik_service(
+            service_name,
+            _service(compose, service_name),
+            public_hosts[service_name],
+            internal_port,
+            errors,
+        )
+
     new_api = _service(compose, "new-api")
-    new_api_labels = labels_for(new_api)
-    if new_api_labels.get("traefik.enable", "").lower() != "true":
-        errors.append("new-api must enable Traefik")
-    expected_rule = "Host(`{}`)".format(expected_host)
-    if new_api_labels.get("traefik.http.routers.new-api.rule") != expected_rule:
-        errors.append("new-api Traefik router must route {}".format(expected_rule))
-    if any(
-        label.startswith("traefik.http.routers.")
-        and not label.startswith("traefik.http.routers.new-api.")
-        for label in new_api_labels
-    ):
-        errors.append("new-api must not define extra Traefik router labels")
-    if any(
-        label.startswith("traefik.http.services.")
-        and not label.startswith("traefik.http.services.new-api.")
-        for label in new_api_labels
-    ):
-        errors.append("new-api must not define extra Traefik service labels")
-    for label, expected_value in sorted(REQUIRED_NEW_API_TRAEFIK_LABELS.items()):
-        actual_value = new_api_labels.get(label)
-        if label == "traefik.http.routers.new-api.tls":
-            matches = actual_value is not None and actual_value.lower() == expected_value
-        else:
-            matches = actual_value == expected_value
-        if not matches:
-            errors.append(
-                "new-api Traefik label {} must be {}".format(label, expected_value)
-            )
-    new_api_networks = networks_for(new_api)
-    for network_name in ("proxy", "backend"):
-        if network_name not in new_api_networks:
-            errors.append("new-api must join {}".format(network_name))
     new_api_environment = environment_for(new_api)
     for env_name in sorted(REQUIRED_NEW_API_ENV):
         if env_name not in new_api_environment:
             errors.append("new-api missing required environment {}".format(env_name))
 
+    keeper_environment = environment_for(_service(compose, "cpa-usage-keeper"))
+    if keeper_environment.get("AUTH_ENABLED", "").lower() != "true":
+        errors.append("cpa-usage-keeper must enable AUTH_ENABLED")
+    if not keeper_environment.get("LOGIN_PASSWORD"):
+        errors.append("cpa-usage-keeper must set LOGIN_PASSWORD")
+
     for service_name, service in sorted(services.items()):
         if not isinstance(service, dict):
             continue
-        if (
-            service_name not in {"traefik", "cliproxyapi"}
-            and has_host_ports(service)
-        ):
+        if service_name not in {"traefik", "cliproxyapi"} and has_host_ports(service):
             errors.append("{} must not publish host ports".format(service_name))
         if service_name == "cliproxyapi" and not cliproxyapi_has_loopback_port(service):
             errors.append(CLIPROXY_LOOPBACK_PORT_ERROR)
-        if service_name in {"traefik", "new-api"}:
+        if service_name in {"traefik", *PUBLIC_TRAEFIK_SERVICES}:
             continue
         labels = label_pairs_for(service)
         if any(label == "traefik.enable" and value != "false" for label, value in labels):
@@ -288,7 +340,7 @@ def validate(compose: Dict[str, Any], expected_host: str) -> List[str]:
         if "proxy" in networks_for(service):
             errors.append("{} must not join proxy".format(service_name))
 
-    for service_name in sorted(BACKEND_ONLY_SERVICES):
+    for service_name in sorted(PRIVATE_BACKEND_ONLY_SERVICES):
         service = _service(compose, service_name)
         if networks_for(service) != {"backend"}:
             errors.append("{} must only join backend".format(service_name))
@@ -315,6 +367,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate rendered api-site Compose JSON.")
     parser.add_argument("compose_json", help="Path to rendered Compose JSON")
     parser.add_argument("--host", default="ai.x2r.store", help="Expected public hostname for New API")
+    parser.add_argument(
+        "--cliproxy-host",
+        default="cliproxy.x2r.store",
+        help="Expected public hostname for CLIProxyAPI",
+    )
+    parser.add_argument(
+        "--keeper-host",
+        default="keeper.x2r.store",
+        help="Expected public hostname for CPA Usage Keeper",
+    )
     args = parser.parse_args()
 
     try:
@@ -328,7 +390,7 @@ def main() -> int:
         print("ERROR: compose JSON must be an object", file=sys.stderr)
         return 1
 
-    errors = validate(compose, args.host)
+    errors = validate(compose, args.host, args.cliproxy_host, args.keeper_host)
     if errors:
         for error in errors:
             print("ERROR: {}".format(error), file=sys.stderr)

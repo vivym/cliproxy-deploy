@@ -119,9 +119,17 @@ services:
       timeout: 5s
       retries: 5
     networks:
+      - proxy
       - backend
     labels:
-      - "traefik.enable=false"
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.services.cliproxyapi.loadbalancer.server.port=8317"
+      - "traefik.http.routers.cliproxyapi.rule=Host(`${CLIPROXY_HOST:?set CLIPROXY_HOST}`)"
+      - "traefik.http.routers.cliproxyapi.entrypoints=websecure"
+      - "traefik.http.routers.cliproxyapi.tls=true"
+      - "traefik.http.routers.cliproxyapi.tls.certresolver=le"
+      - "traefik.http.routers.cliproxyapi.service=cliproxyapi"
 
   cpa-usage-keeper:
     image: ${CPA_USAGE_KEEPER_IMAGE:?set CPA_USAGE_KEEPER_IMAGE}:${CPA_USAGE_KEEPER_IMAGE_TAG:?set CPA_USAGE_KEEPER_IMAGE_TAG}
@@ -143,8 +151,20 @@ services:
       WORK_DIR: /data
     volumes:
       - "cpa-usage-keeper-data:/data"
+    expose:
+      - "8080"
     networks:
+      - proxy
       - backend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=proxy"
+      - "traefik.http.services.cpa-usage-keeper.loadbalancer.server.port=8080"
+      - "traefik.http.routers.cpa-usage-keeper.rule=Host(`${CPA_USAGE_KEEPER_HOST:?set CPA_USAGE_KEEPER_HOST}`)"
+      - "traefik.http.routers.cpa-usage-keeper.entrypoints=websecure"
+      - "traefik.http.routers.cpa-usage-keeper.tls=true"
+      - "traefik.http.routers.cpa-usage-keeper.tls.certresolver=le"
+      - "traefik.http.routers.cpa-usage-keeper.service=cpa-usage-keeper"
 
 networks:
   proxy:

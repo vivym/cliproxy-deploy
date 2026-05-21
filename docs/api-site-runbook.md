@@ -18,7 +18,8 @@ Do not use GitHub's Latest marker blindly. Select the highest non-prerelease sem
 4. Copy `config.yaml.template` to `config.yaml`.
 5. Replace `config.yaml` `remote-management.secret-key` with the exact `MANAGEMENT_SECRET` value from `.env`.
 6. Replace `config.yaml` `api-keys` with the exact `CLIPROXY_INTERNAL_API_KEY` value from `.env`.
-7. Create `auths`, `logs`, and `letsencrypt`.
+7. Set `AI_HOST`, `CLIPROXY_HOST`, and `CPA_USAGE_KEEPER_HOST` to DNS names that point at the server.
+8. Create `auths`, `logs`, and `letsencrypt`.
 
 `MANAGEMENT_SECRET` must match in `.env` and `config.yaml`; CPA Usage Keeper reads it from `.env`, while CLIProxyAPI authenticates against `config.yaml`. `CLIPROXY_INTERNAL_API_KEY` must also match; New API uses the `.env` value for the internal channel and CLIProxyAPI accepts the `config.yaml` value.
 
@@ -49,11 +50,10 @@ Do not use GitHub's Latest marker blindly. Select the highest non-prerelease sem
 
 ## CLIProxyAPI Management Access
 
-- Keep CLIProxyAPI off Traefik and off public hostnames.
-- Use the host loopback binding `127.0.0.1:8317:8317` only for SSH tunnel management.
-- From your workstation, run `ssh -L 8317:127.0.0.1:8317 <user>@<server>` and manage CLIProxyAPI through `http://127.0.0.1:8317`.
-- Do not replace this with `8317:8317` or `0.0.0.0:8317:8317`.
+- CLIProxyAPI is public through Traefik at `https://${CLIPROXY_HOST}`.
+- Do not replace the loopback host port with `8317:8317` or `0.0.0.0:8317:8317`; public access should stay behind Traefik HTTPS.
 - Keep CLIProxyAPI API key authentication and `remote-management.secret-key` enabled.
+- For local maintenance, the host loopback binding `127.0.0.1:8317:8317` remains available through `ssh -L 8317:127.0.0.1:8317 <user>@<server>`.
 
 ## Codex Validation
 
@@ -95,10 +95,12 @@ For each case, record user balance before, user balance after, observed quota de
 
 ## Usage Keeper
 
-- Keep CPA Usage Keeper private on the backend network.
+- CPA Usage Keeper is public through Traefik at `https://${CPA_USAGE_KEEPER_HOST}`.
 - Persist its data.
 - Use the CLIProxyAPI management key from `.env`.
-- Do not expose the dashboard unless protected.
+- Keep `CPA_USAGE_KEEPER_AUTH_ENABLED=true`.
+- Set a strong `CPA_USAGE_KEEPER_AUTH_PASSWORD`.
+- Launch validation must confirm unauthenticated `/api/v1/usage/overview` returns `401`.
 
 ## CLIProxyAPI Log Archiving
 
@@ -174,7 +176,11 @@ test -f .env
 test -f config.yaml
 ! rg -n 'replace-with-|CHANGEME|change-me' .env config.yaml
 docker compose config --format json > /tmp/api-site-compose.json
-scripts/validate-api-site-compose.py /tmp/api-site-compose.json --host ai.x2r.store
+scripts/validate-api-site-compose.py \
+  /tmp/api-site-compose.json \
+  --host ai.x2r.store \
+  --cliproxy-host cliproxy.x2r.store \
+  --keeper-host keeper.x2r.store
 : "${NEW_API_TEST_API_KEY:?set NEW_API_TEST_API_KEY for launch validation}"
 : "${CODEX_TEST_API_KEY:?set CODEX_TEST_API_KEY for /v1/responses launch validation}"
 scripts/verify-api-site.sh > /tmp/api-site-verify.log

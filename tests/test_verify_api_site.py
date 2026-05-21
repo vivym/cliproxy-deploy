@@ -13,16 +13,19 @@ SCRIPT = ROOT / "scripts" / "verify-api-site.sh"
 
 
 class VerifyApiSiteTests(unittest.TestCase):
-    def test_script_checks_public_new_api_and_blocks_cliproxy_public(self):
+    def test_script_checks_public_new_api_cliproxy_and_keeper(self):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertIn("source .env", text)
         self.assertIn("AI_HOST", text)
+        self.assertIn("CLIPROXY_HOST", text)
+        self.assertIn("CPA_USAGE_KEEPER_HOST", text)
         self.assertIn("/v1/models", text)
+        self.assertIn("/management.html", text)
         self.assertIn("docker compose exec -T new-api", text)
         self.assertIn("http://cliproxyapi:8317/v1/models", text)
-        self.assertIn("CLIPROXY_PUBLIC_HOST", text)
-        self.assertIn("CLIPROXY_PUBLIC_HOST:?set CLIPROXY_PUBLIC_HOST", text)
-        self.assertIn("must not be publicly reachable", text)
+        self.assertIn("/api/v1/usage/overview", text)
+        self.assertIn("must require authentication", text)
+        self.assertNotIn("CLIPROXY_PUBLIC_HOST", text)
         self.assertNotIn("curl -k", text)
         self.assertNotIn("Skipping internal CLIProxyAPI reachability check", text)
 
@@ -32,7 +35,7 @@ class VerifyApiSiteTests(unittest.TestCase):
         self.assertIn("CODEX_TEST_API_KEY", text)
         self.assertIn("store", text)
 
-    def run_script_with_public_mode(self, public_mode):
+    def run_script_with_keeper_status(self, keeper_status):
         with tempfile.TemporaryDirectory() as tmp:
             repo = pathlib.Path(tmp) / "repo"
             scripts = repo / "scripts"
@@ -44,7 +47,8 @@ class VerifyApiSiteTests(unittest.TestCase):
                 "\n".join(
                     [
                         "AI_HOST=ai.example.test",
-                        "CLIPROXY_PUBLIC_HOST=legacy.example.test",
+                        "CLIPROXY_HOST=cliproxy.example.test",
+                        "CPA_USAGE_KEEPER_HOST=keeper.example.test",
                         "CLIPROXY_INTERNAL_API_KEY=internal-secret",
                     ]
                 )
@@ -64,26 +68,22 @@ for arg in "$@"; do
 done
 
 if [[ "$url" == "https://legacy.example.test/v1/models" ]]; then
-  case "${FAKE_PUBLIC_MODE:?set FAKE_PUBLIC_MODE}" in
-    http)
+  exit 99
+fi
+
+if [[ "$url" == "https://keeper.example.test/api/v1/usage/overview" ]]; then
+  case "${FAKE_KEEPER_STATUS:?set FAKE_KEEPER_STATUS}" in
+    401)
+      printf '401'
+      exit 0
+      ;;
+    200)
       printf '200'
       exit 0
       ;;
-    refused)
+    000)
       printf '000'
       exit 7
-      ;;
-    timeout)
-      printf '000'
-      exit 28
-      ;;
-    dns)
-      printf '000'
-      exit 6
-      ;;
-    tls)
-      printf '000'
-      exit 60
       ;;
   esac
 fi
@@ -100,7 +100,7 @@ exit 0
 
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-            env["FAKE_PUBLIC_MODE"] = public_mode
+            env["FAKE_KEEPER_STATUS"] = keeper_status
             return subprocess.run(
                 [str(scripts / "verify-api-site.sh")],
                 cwd=repo,
@@ -114,41 +114,21 @@ exit 0
         path.write_text(textwrap.dedent(text), encoding="utf-8")
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
-    def test_public_cliproxy_http_response_fails_verification(self):
-        result = self.run_script_with_public_mode("http")
+    def test_keeper_unauthenticated_401_passes_public_check(self):
+        result = self.run_script_with_keeper_status("401")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("API-site verification checks completed", result.stdout)
+
+    def test_keeper_unauthenticated_success_fails_public_check(self):
+        result = self.run_script_with_keeper_status("200")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("must not be publicly reachable", result.stderr)
+        self.assertIn("CPA Usage Keeper must require authentication", result.stderr)
         self.assertIn("HTTP 200", result.stderr)
 
-    def test_public_cliproxy_connection_refused_passes_negative_check(self):
-        result = self.run_script_with_public_mode("refused")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("API-site verification checks completed", result.stdout)
-
-    def test_public_cliproxy_timeout_passes_negative_check(self):
-        result = self.run_script_with_public_mode("timeout")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("API-site verification checks completed", result.stdout)
-
-    def test_public_cliproxy_dns_failure_fails_verification(self):
-        result = self.run_script_with_public_mode("dns")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("curl exit code 6", result.stderr)
-        self.assertIn("HTTP 000", result.stderr)
-
-    def test_public_cliproxy_tls_failure_fails_verification(self):
-        result = self.run_script_with_public_mode("tls")
-
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("curl exit code 60", result.stderr)
-        self.assertIn("HTTP 000", result.stderr)
-
     def test_optional_credentialed_checks_are_skipped_when_keys_unset(self):
-        result = self.run_script_with_public_mode("refused")
+        result = self.run_script_with_keeper_status("401")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Skipping /v1/models credentialed check", result.stdout)

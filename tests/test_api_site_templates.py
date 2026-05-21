@@ -12,6 +12,8 @@ class ApiSiteTemplateTests(unittest.TestCase):
     def test_env_example_uses_ai_host_and_required_secrets(self):
         text = self.read(".env.example")
         self.assertIn("AI_HOST=ai.x2r.store", text)
+        self.assertIn("CLIPROXY_HOST=cliproxy.x2r.store", text)
+        self.assertIn("CPA_USAGE_KEEPER_HOST=keeper.x2r.store", text)
         self.assertNotIn("API_HOST=cliproxy.x2r.store", text)
         self.assertIn("Use URL-safe generated values because these passwords are embedded in DSN URLs.", text)
         self.assertIn("openssl rand -hex 24", text)
@@ -65,9 +67,9 @@ class ApiSiteTemplateTests(unittest.TestCase):
             self.assertIn("`letsencrypt/`", text)
             self.assertIn("`logs/` is not included", text)
 
-    def test_cliproxy_config_template_is_production_safe(self):
+    def test_cliproxy_config_template_matches_public_management_policy(self):
         text = self.read("config.yaml.template")
-        self.assertIn("disable-control-panel: true", text)
+        self.assertIn("disable-control-panel: false", text)
         self.assertIn("request-log: false", text)
         self.assertIn("redis-usage-queue-retention-seconds: 3600", text)
         self.assertIn("replace-with-internal-new-api-channel-key", text)
@@ -79,14 +81,16 @@ class ApiSiteTemplateTests(unittest.TestCase):
         for service in ["new-api:", "postgres:", "redis:", "cpa-usage-keeper:", "cliproxyapi:"]:
             self.assertIn(service, text)
         self.assertIn("traefik.http.routers.new-api.rule=Host(`${AI_HOST:?set AI_HOST}`)", text)
-        self.assertIn("traefik.enable=false", text)
+        self.assertIn("traefik.http.routers.cliproxyapi.rule=Host(`${CLIPROXY_HOST:?set CLIPROXY_HOST}`)", text)
+        self.assertIn("traefik.http.routers.cpa-usage-keeper.rule=Host(`${CPA_USAGE_KEEPER_HOST:?set CPA_USAGE_KEEPER_HOST}`)", text)
+        self.assertIn("traefik.http.services.cpa-usage-keeper.loadbalancer.server.port=8080", text)
         self.assertIn("backend:", text)
         self.assertIn("http://localhost:3000/api/status", text)
         self.assertIn("http://localhost:8317", text)
         self.assertIn("127.0.0.1:8317:8317", text)
         self.assertIn("cliproxyapi:\n        condition: service_healthy", text)
 
-    def test_cliproxy_public_override_is_template_only(self):
+    def test_cliproxy_public_override_documents_legacy_temporary_mode(self):
         text = self.read("docker-compose.cliproxy-public.override.yml.template")
         self.assertIn("TEMPORARY MAINTENANCE ONLY", text)
         self.assertIn("Decommission by: YYYY-MM-DD HH:MM TZ", text)

@@ -1,43 +1,45 @@
 # x2r AI Gateway
 
-Production Docker Compose deployment for an OpenAI-compatible AI gateway at `ai.x2r.store`.
+Production Docker Compose deployment for an OpenAI-compatible AI gateway at `ai.x2r.store`, `cliproxy.x2r.store`, and `keeper.x2r.store`.
 
-The stack exposes [New API](https://github.com/Calcium-Ion/new-api) as the public user, admin, and SDK entry point. CLIProxyAPI runs behind it as an internal upstream channel for Codex/CLI traffic and is not exposed to the public internet.
+The stack exposes [New API](https://github.com/Calcium-Ion/new-api) as the public user, admin, and SDK entry point. CLIProxyAPI and CPA Usage Keeper also have public HTTPS hostnames and rely on their own application-level keys or login protection.
 
 ## What This Deploys
 
 - Traefik TLS reverse proxy with automatic Let's Encrypt certificates.
 - New API public gateway on one hostname.
 - Postgres and Redis for New API.
-- CLIProxyAPI on the private backend network and host loopback only.
-- CPA Usage Keeper for internal CLIProxyAPI usage collection.
+- CLIProxyAPI on a public HTTPS hostname, the private backend network, and host loopback for local maintenance.
+- CPA Usage Keeper on a public HTTPS hostname with password login enabled by default.
 - Helper scripts for version selection, API-site validation, backups, latency profiling, and account conversion.
 
 ## Architecture
 
 ```text
 Users / SDKs / Codex CLI
-        |
-        v
+        |                 Operators
+        |                    |
+        v                    v
 https://ai.x2r.store
+https://cliproxy.x2r.store
+https://keeper.x2r.store
         |
         v
 Traefik :443
         |
-        v
-New API :3000  ---> Postgres
-        |       ---> Redis
+        +--> New API :3000  ---> Postgres
+        |       |
+        |       v
+        |   CLIProxyAPI :8317 ---> Upstream model accounts
         |
-        v
-CLIProxyAPI :8317
+        +--> CLIProxyAPI :8317
         |
-        v
-Upstream model accounts
+        +--> CPA Usage Keeper :8080
 
-CPA Usage Keeper reads CLIProxyAPI usage internally.
+CPA Usage Keeper reads CLIProxyAPI usage internally through the backend network.
 ```
 
-Only `ai.x2r.store` is public. CLIProxyAPI, Postgres, Redis, and CPA Usage Keeper stay private.
+Postgres and Redis stay private. New API, CLIProxyAPI, and CPA Usage Keeper are public through Traefik.
 
 ## Repository Contents
 
@@ -75,25 +77,29 @@ tmp/
 ## Requirements
 
 - A Linux server with Docker Engine and Docker Compose v2.
-- DNS control for the public hostname.
+- DNS control for the public hostnames.
 - Open inbound ports `80` and `443`.
-- No public exposure for port `8317`, Postgres, Redis, or CPA Usage Keeper.
+- No direct public exposure for port `8317`, Postgres, Redis, or the CPA Usage Keeper container port.
 - AWS CLI v2 if using Cloudflare R2 log archiving.
 
 Traefik reads the Docker socket to discover labelled containers. Anyone who can control containers or labels on this Docker daemon is inside the deployment trust boundary.
 
 ## DNS And Cloudflare
 
-Create an A or AAAA record for the API hostname:
+Create A or AAAA records for the public hostnames:
 
 ```text
 ai.x2r.store -> <server-ip>
+cliproxy.x2r.store -> <server-ip>
+keeper.x2r.store -> <server-ip>
 ```
 
 For Cloudflare:
 
 ```text
-A  ai  <server-ip>  Proxied
+A  ai        <server-ip>  Proxied
+A  cliproxy  <server-ip>  Proxied
+A  keeper    <server-ip>  Proxied
 ```
 
 Use SSL/TLS mode `Full (strict)`. Do not use `Flexible`.
@@ -101,7 +107,7 @@ Use SSL/TLS mode `Full (strict)`. Do not use `Flexible`.
 Add a cache rule:
 
 ```text
-Hostname equals ai.x2r.store -> Bypass cache
+Hostname in ai.x2r.store, cliproxy.x2r.store, keeper.x2r.store -> Bypass cache
 ```
 
 If Let's Encrypt issuance fails while Cloudflare proxying is enabled, temporarily switch the record to DNS only, restart Traefik, wait for certificate issuance, then switch proxying back on.
@@ -133,6 +139,8 @@ Edit `.env` and set:
 ```text
 ACME_EMAIL
 AI_HOST
+CLIPROXY_HOST
+CPA_USAGE_KEEPER_HOST
 NEW_API_IMAGE_TAG
 CLIPROXYAPI_IMAGE_TAG
 CPA_USAGE_KEEPER_IMAGE
@@ -190,7 +198,11 @@ mkdir -p "$tmpdir/auths" "$tmpdir/logs" "$tmpdir/letsencrypt"
 touch "$tmpdir/letsencrypt/acme.json"
 chmod 600 "$tmpdir/letsencrypt/acme.json"
 (cd "$tmpdir" && docker compose config --format json) > /tmp/api-site-compose.json
-scripts/validate-api-site-compose.py /tmp/api-site-compose.json --host ai.x2r.store
+scripts/validate-api-site-compose.py \
+  /tmp/api-site-compose.json \
+  --host ai.x2r.store \
+  --cliproxy-host cliproxy.x2r.store \
+  --keeper-host keeper.x2r.store
 ```
 
 The backend Docker network must allow outbound internet access. New API and CLIProxyAPI need outbound connections for upstream API calls, provider access, and validation.
@@ -249,10 +261,12 @@ NEW_API_TEST_API_KEY=sk-... CODEX_TEST_API_KEY=sk-... scripts/verify-api-site.sh
 The verification helper checks:
 
 - New API public endpoint.
+- CLIProxyAPI public endpoint with `CLIPROXY_INTERNAL_API_KEY`.
+- CPA Usage Keeper public health endpoint.
+- CPA Usage Keeper unauthenticated API access returns `401`.
 - `/v1/models` when `NEW_API_TEST_API_KEY` is set.
 - `/v1/responses` when `CODEX_TEST_API_KEY` is set.
 - New API container access to internal CLIProxyAPI.
-- Negative public exposure check for the legacy CLIProxyAPI hostname.
 
 ## API Usage
 
@@ -280,13 +294,19 @@ curl https://ai.x2r.store/v1/responses \
 
 ## CLIProxyAPI Management
 
-CLIProxyAPI binds to the server loopback address only:
+CLIProxyAPI is public at:
+
+```text
+https://cliproxy.x2r.store
+```
+
+It also keeps the server loopback binding for local maintenance:
 
 ```yaml
 127.0.0.1:8317:8317
 ```
 
-For local management, create an SSH tunnel:
+You can manage it through the public hostname with `remote-management.secret-key`, or create an SSH tunnel:
 
 ```bash
 ssh -L 8317:127.0.0.1:8317 <user>@<server>
@@ -298,13 +318,13 @@ Then open:
 http://127.0.0.1:8317
 ```
 
-Keep CLIProxyAPI API keys and the management secret enabled. The loopback binding controls network reachability, not application authentication.
+Keep CLIProxyAPI API keys and the management secret enabled. Public access relies on application authentication, not network isolation.
 
 ## Auth Priority Management
 
 CLIProxyAPI supports per-auth `priority`. Higher priority auths are selected before lower priority auths; auths with the same priority are distributed by the configured routing strategy.
 
-Use the helper through the SSH tunnel:
+Use the helper through the public hostname or the SSH tunnel:
 
 ```bash
 MANAGEMENT_SECRET=... scripts/manage-cliproxy-auth-priority.py list
@@ -494,11 +514,15 @@ Run Compose policy validation against a rendered config:
 
 ```bash
 docker compose config --format json > /tmp/api-site-compose.json
-scripts/validate-api-site-compose.py /tmp/api-site-compose.json --host ai.x2r.store
+scripts/validate-api-site-compose.py \
+  /tmp/api-site-compose.json \
+  --host ai.x2r.store \
+  --cliproxy-host cliproxy.x2r.store \
+  --keeper-host keeper.x2r.store
 ```
 
 ## More Documentation
 
 - [API site runbook](docs/api-site-runbook.md)
-- [New API site design notes](docs/superpowers/specs/2026-05-03-new-api-cliproxy-api-site-design.md)
-- [Deployment implementation plan](docs/superpowers/plans/2026-05-03-new-api-cliproxy-api-site.md)
+- [Historical New API site design notes](docs/superpowers/specs/2026-05-03-new-api-cliproxy-api-site-design.md)
+- [Historical deployment implementation plan](docs/superpowers/plans/2026-05-03-new-api-cliproxy-api-site.md)
