@@ -27,8 +27,10 @@ fi
 backup_package="$(cd "$(dirname "$backup_package")" && pwd -P)/$(basename "$backup_package")"
 restore_tmp="$(mktemp -d)"
 backup_dir="${restore_tmp}/backup"
+runtime_dir="${restore_tmp}/runtime"
 trap 'rm -rf "$restore_tmp"' EXIT
 mkdir -p "$backup_dir"
+mkdir -p "$runtime_dir"
 tar -xzf "$backup_package" -C "$backup_dir"
 
 for required_path in cliproxy-runtime.tgz newapi-postgres.dump redis-data; do
@@ -85,9 +87,46 @@ restore_volume_dir() {
     alpine sh -c 'rm -rf /target/* /target/.[!.]* /target/..?* 2>/dev/null || true; cp -a /backup/. /target/'
 }
 
+clear_volume_dir() {
+  local service="$1"
+  local destination="$2"
+  local volume_name
+
+  volume_name="$(service_volume_name "$service" "$destination")"
+  if [[ -z "$volume_name" ]]; then
+    echo "Could not find ${destination} volume for ${service}" >&2
+    exit 1
+  fi
+
+  docker run --rm \
+    -v "${volume_name}:/target" \
+    alpine sh -c 'rm -rf /target/* /target/.[!.]* /target/..?* 2>/dev/null || true'
+}
+
+extract_runtime_files() {
+  local required_path
+
+  tar -xzf "${backup_dir}/cliproxy-runtime.tgz" -C "$runtime_dir"
+  for required_path in .env config.yaml auths letsencrypt; do
+    if [[ ! -e "${runtime_dir}/${required_path}" ]]; then
+      echo "Missing required runtime restore source: ${runtime_dir}/${required_path}" >&2
+      exit 1
+    fi
+  done
+}
+
+restore_runtime_files() {
+  rm -f "$repo_root/.env" "$repo_root/config.yaml"
+  rm -rf "$repo_root/auths" "$repo_root/letsencrypt"
+  cp -a "${runtime_dir}/.env" "$repo_root/.env"
+  cp -a "${runtime_dir}/config.yaml" "$repo_root/config.yaml"
+  cp -a "${runtime_dir}/auths" "$repo_root/auths"
+  cp -a "${runtime_dir}/letsencrypt" "$repo_root/letsencrypt"
+}
+
 wait_for_postgres() {
   local attempt
-  for attempt in $(seq 1 30); do
+  for ((attempt = 1; attempt <= 30; attempt++)); do
     if docker compose exec -T postgres pg_isready \
       -U "${POSTGRES_USER:?set POSTGRES_USER}" \
       -d "${POSTGRES_DB:?set POSTGRES_DB}" >/dev/null 2>&1; then
@@ -102,14 +141,18 @@ wait_for_postgres() {
 
 verify_checksums
 
-tar -xzf "${backup_dir}/cliproxy-runtime.tgz" -C "$repo_root"
+extract_runtime_files
+docker compose --env-file "${runtime_dir}/.env" down
+restore_runtime_files
 chmod 600 letsencrypt/acme.json 2>/dev/null || true
 
 set -a
+# shellcheck source=/dev/null
 source .env
 set +a
 
-docker compose down
+docker compose create postgres >/dev/null
+clear_volume_dir postgres /var/lib/postgresql/data
 
 docker compose create redis >/dev/null
 restore_volume_dir redis /data "${backup_dir}/redis-data"

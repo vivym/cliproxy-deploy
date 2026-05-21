@@ -56,7 +56,7 @@ class BackupApiSiteTests(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('partial_dest="${dest}.partial"', text)
         self.assertIn(
-            'if [[ -e "$partial_dest" || -e "$dest" || -e "$partial_package" || -e "$package" ]]; then',
+            'if [[ -e "$partial_dest" || -e "$dest" || -e "$partial_package" || -e "$package" || -e "$checksum_tmp" ]]; then',
             text,
         )
         self.assertIn('partial_package="${package}.partial"', text)
@@ -288,6 +288,260 @@ done
             self.assertIn("auths", archive_listing)
             self.assertIn("letsencrypt", archive_listing)
             self.assertNotIn("logs", archive_listing)
+
+    def test_script_stops_keeper_while_copying_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            (root / ".env").write_text(
+                "POSTGRES_USER=user\nPOSTGRES_DB=db\nREDIS_PASSWORD=redis-pw\n",
+                encoding="utf-8",
+            )
+            (root / "config.yaml").write_text("config: true\n", encoding="utf-8")
+            (root / "auths").mkdir()
+            (root / "letsencrypt").mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+if [[ "$1 $2 $3" == "compose exec -T" ]]; then
+  if [[ "$4" == "redis" ]]; then
+    exit 0
+  fi
+  echo "postgres dump"
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose cp redis:/data" ]]; then
+  mkdir -p "$4"
+  echo "redis data" > "$4/dump.rdb"
+  exit 0
+fi
+if [[ "$1 $2" == "compose ps" ]]; then
+  echo "cpa-usage-keeper"
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose stop cpa-usage-keeper" ]]; then
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose start cpa-usage-keeper" ]]; then
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose cp cpa-usage-keeper:/data" ]]; then
+  mkdir -p "$4"
+  echo "keeper data" > "$4/state.db"
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            sha256sum = bin_dir / "sha256sum"
+            sha256sum.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  printf 'fakehash  %s\\n' "$1"
+  shift
+done
+""",
+                encoding="utf-8",
+            )
+            sha256sum.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "external-backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = calls_file.read_text(encoding="utf-8").splitlines()
+            stop_index = calls.index("compose stop cpa-usage-keeper")
+            copy_index = calls.index(
+                next(call for call in calls if call.startswith("compose cp cpa-usage-keeper:/data "))
+            )
+            start_index = calls.index("compose start cpa-usage-keeper")
+            self.assertLess(stop_index, copy_index)
+            self.assertLess(copy_index, start_index)
+
+    def test_script_quiesces_write_services_before_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            (root / ".env").write_text(
+                "POSTGRES_USER=user\nPOSTGRES_DB=db\nREDIS_PASSWORD=redis-pw\n",
+                encoding="utf-8",
+            )
+            (root / "config.yaml").write_text("config: true\n", encoding="utf-8")
+            (root / "auths").mkdir()
+            (root / "letsencrypt").mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+if [[ "$1 $2" == "compose ps" ]]; then
+  echo "traefik"
+  echo "new-api"
+  echo "cliproxyapi"
+  echo "cpa-usage-keeper"
+  exit 0
+fi
+if [[ "$1 $2" == "compose stop" ]]; then
+  exit 0
+fi
+if [[ "$1 $2" == "compose start" ]]; then
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose exec -T" ]]; then
+  if [[ "$4" == "redis" ]]; then
+    exit 0
+  fi
+  echo "postgres dump"
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose cp redis:/data" ]]; then
+  mkdir -p "$4"
+  echo "redis data" > "$4/dump.rdb"
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose cp cpa-usage-keeper:/data" ]]; then
+  mkdir -p "$4"
+  echo "keeper data" > "$4/state.db"
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            sha256sum = bin_dir / "sha256sum"
+            sha256sum.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  printf 'fakehash  %s\\n' "$1"
+  shift
+done
+""",
+                encoding="utf-8",
+            )
+            sha256sum.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "external-backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = calls_file.read_text(encoding="utf-8").splitlines()
+            snapshot_index = calls.index(
+                next(call for call in calls if call.startswith("compose exec -T postgres "))
+            )
+            stop_services = ["cpa-usage-keeper", "new-api", "cliproxyapi", "traefik"]
+            for service in stop_services:
+                self.assertLess(calls.index(f"compose stop {service}"), snapshot_index)
+
+            package_index = max(
+                index
+                for index, call in enumerate(calls)
+                if call.startswith("compose cp cpa-usage-keeper:/data ")
+                or call.startswith("compose cp redis:/data ")
+                or call.startswith("compose exec -T ")
+            )
+            for service in ["traefik", "cliproxyapi", "new-api", "cpa-usage-keeper"]:
+                self.assertGreater(calls.index(f"compose start {service}"), package_index)
+
+    def test_script_restarts_quiesced_services_when_snapshot_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            (root / ".env").write_text(
+                "POSTGRES_USER=user\nPOSTGRES_DB=db\nREDIS_PASSWORD=redis-pw\n",
+                encoding="utf-8",
+            )
+            (root / "config.yaml").write_text("config: true\n", encoding="utf-8")
+            (root / "auths").mkdir()
+            (root / "letsencrypt").mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+if [[ "$1 $2" == "compose ps" ]]; then
+  echo "new-api"
+  echo "cliproxyapi"
+  exit 0
+fi
+if [[ "$1 $2" == "compose stop" ]]; then
+  exit 0
+fi
+if [[ "$1 $2" == "compose start" ]]; then
+  exit 0
+fi
+if [[ "$1 $2 $3 $4" == "compose exec -T postgres" ]]; then
+  echo "pg_dump failed" >&2
+  exit 42
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "external-backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 42)
+            self.assertIn("pg_dump failed", result.stderr)
+            calls = calls_file.read_text(encoding="utf-8").splitlines()
+            self.assertIn("compose stop new-api", calls)
+            self.assertIn("compose stop cliproxyapi", calls)
+            self.assertIn("compose start cliproxyapi", calls)
+            self.assertIn("compose start new-api", calls)
+            self.assertNotIn("compose start cpa-usage-keeper", calls)
 
 
 if __name__ == "__main__":

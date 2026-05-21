@@ -6,6 +6,7 @@ cd "$repo_root"
 
 if [[ -f .env ]]; then
   set -a
+  # shellcheck source=/dev/null
   source .env
   set +a
 fi
@@ -35,6 +36,7 @@ dest="${backup_root}/${timestamp}"
 partial_dest="${dest}.partial"
 package="${dest}.tgz"
 partial_package="${package}.partial"
+checksum_tmp="${dest}.SHA256SUMS.partial"
 
 case "$backup_root" in
   "$repo_root"|"$repo_root"/*)
@@ -43,7 +45,7 @@ case "$backup_root" in
     ;;
 esac
 
-if [[ -e "$partial_dest" || -e "$dest" || -e "$partial_package" || -e "$package" ]]; then
+if [[ -e "$partial_dest" || -e "$dest" || -e "$partial_package" || -e "$package" || -e "$checksum_tmp" ]]; then
   echo "Backup destination already exists: $package" >&2
   exit 1
 fi
@@ -56,6 +58,40 @@ checksum_file() {
   fi
 }
 
+stopped_services=()
+
+service_is_running() {
+  local service="$1"
+  printf '%s\n' "$running_services" | grep -qx "$service"
+}
+
+stop_running_service() {
+  local service="$1"
+
+  if service_is_running "$service"; then
+    docker compose stop "$service" >/dev/null
+    stopped_services+=("$service")
+  fi
+}
+
+restart_stopped_services_best_effort() {
+  local index
+
+  for ((index = ${#stopped_services[@]} - 1; index >= 0; index--)); do
+    docker compose start "${stopped_services[$index]}" >/dev/null || true
+  done
+}
+
+start_stopped_services() {
+  local index
+
+  for ((index = ${#stopped_services[@]} - 1; index >= 0; index--)); do
+    docker compose start "${stopped_services[$index]}" >/dev/null
+  done
+  stopped_services=()
+}
+trap restart_stopped_services_best_effort EXIT
+
 for required_path in .env config.yaml auths letsencrypt; do
   if [[ ! -e "$required_path" ]]; then
     echo "Missing required backup source: $required_path" >&2
@@ -63,8 +99,14 @@ for required_path in .env config.yaml auths letsencrypt; do
   fi
 done
 
+running_services="$(docker compose ps --services --filter status=running)"
+
 mkdir -p "$partial_dest"
 chmod 700 "$partial_dest"
+
+for service in cpa-usage-keeper new-api cliproxyapi traefik; do
+  stop_running_service "$service"
+done
 
 docker compose exec -T postgres pg_dump \
   -U "${POSTGRES_USER:?set POSTGRES_USER}" \
@@ -83,20 +125,20 @@ tar -czf "${partial_dest}/cliproxy-runtime.tgz" \
   auths \
   letsencrypt
 
-running_services="$(docker compose ps --services --filter status=running)"
 if printf '%s\n' "$running_services" | grep -qx "cpa-usage-keeper"; then
   docker compose cp cpa-usage-keeper:/data "${partial_dest}/cpa-usage-keeper-data"
 fi
 
 (
   cd "$partial_dest"
-  find . -type f ! -name SHA256SUMS -print0 \
+  find . -type f -print0 \
     | sort -z \
     | while IFS= read -r -d '' backup_file; do
         checksum_file "$backup_file"
       done \
-    > SHA256SUMS
+    > "$checksum_tmp"
 )
+mv "$checksum_tmp" "${partial_dest}/SHA256SUMS"
 
 (
   cd "$partial_dest"
@@ -105,5 +147,7 @@ fi
 chmod 600 "$partial_package"
 mv "$partial_package" "$package"
 rm -rf "$partial_dest"
+start_stopped_services
+trap - EXIT
 
 echo "Backup package written to ${package}"
