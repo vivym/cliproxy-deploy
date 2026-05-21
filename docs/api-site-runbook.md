@@ -143,11 +143,17 @@ Detailed setup steps are in [docs/cliproxy-log-archive-r2-runbook.md](cliproxy-l
 ## Backup And Restore
 
 - Run `scripts/backup-api-site.sh`.
-- Store encrypted backups off-host.
+- Store encrypted backup packages off-host.
+- `logs/` is not included because request logs may contain sensitive request and response data.
+- Each backup package includes New API Postgres dump, Redis data, `.env`, `config.yaml`, `auths`, `letsencrypt/`, and optional CPA Usage Keeper data.
 - Before meaningful paid usage, run a disposable restore drill:
+  - Restore with `scripts/restore-api-site.sh /path/to/cliproxy-api-site-backup.tgz`.
+  - Restore `.env`.
   - Restore `config.yaml`.
   - Restore `auths`.
+  - Restore `letsencrypt/`.
   - Restore `newapi-postgres.dump` with `pg_restore` into disposable New API Postgres.
+  - Restore Redis data.
   - Restore CPA Usage Keeper data if `cpa-usage-keeper-data` is present.
   - Run compose validation and `scripts/verify-api-site.sh`.
 

@@ -51,6 +51,7 @@ scripts/generate-api-key.py                     Generate internal CLIProxyAPI AP
 scripts/verify-api-site.sh                      Production verification checks
 scripts/validate-api-site-compose.py            Rendered Compose policy checks
 scripts/backup-api-site.sh                      Runtime backup helper
+scripts/restore-api-site.sh                     Runtime restore helper
 scripts/archive-cliproxy-logs.sh                Compress and upload CLIProxyAPI logs to R2
 scripts/profile-latency.py                      Public route latency comparison
 scripts/profile-origin.py                       VPS-side origin latency comparison
@@ -367,12 +368,21 @@ scripts/backup-api-site.sh
 The backup helper captures:
 
 - New API Postgres dump.
+- Redis data.
+- `.env`.
 - `config.yaml`.
 - `auths/`.
+- `letsencrypt/`.
 - CPA Usage Keeper data when the service is running.
 - SHA-256 checksums.
 
-Store backups encrypted and off-host. Run a restore drill before meaningful paid usage.
+The script writes a timestamped backup package under `BACKUP_DIR`. `logs/` is not included because request logs may contain sensitive request and response data. Store backup packages encrypted and off-host. Restore on a new server with:
+
+```bash
+scripts/restore-api-site.sh /path/to/cliproxy-api-site-backup.tgz
+```
+
+Run a restore drill before meaningful paid usage.
 
 ## Latency Profiling
 

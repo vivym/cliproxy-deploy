@@ -33,6 +33,8 @@ fi
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 dest="${backup_root}/${timestamp}"
 partial_dest="${dest}.partial"
+package="${dest}.tgz"
+partial_package="${package}.partial"
 
 case "$backup_root" in
   "$repo_root"|"$repo_root"/*)
@@ -41,8 +43,8 @@ case "$backup_root" in
     ;;
 esac
 
-if [[ -e "$partial_dest" || -e "$dest" ]]; then
-  echo "Backup destination already exists: $dest" >&2
+if [[ -e "$partial_dest" || -e "$dest" || -e "$partial_package" || -e "$package" ]]; then
+  echo "Backup destination already exists: $package" >&2
   exit 1
 fi
 
@@ -54,7 +56,7 @@ checksum_file() {
   fi
 }
 
-for required_path in config.yaml auths; do
+for required_path in .env config.yaml auths letsencrypt; do
   if [[ ! -e "$required_path" ]]; then
     echo "Missing required backup source: $required_path" >&2
     exit 1
@@ -70,9 +72,16 @@ docker compose exec -T postgres pg_dump \
   --format=custom \
   > "${partial_dest}/newapi-postgres.dump"
 
+docker compose exec -T redis redis-cli \
+  -a "${REDIS_PASSWORD:?set REDIS_PASSWORD}" \
+  SAVE >/dev/null
+docker compose cp redis:/data "${partial_dest}/redis-data"
+
 tar -czf "${partial_dest}/cliproxy-runtime.tgz" \
+  .env \
   config.yaml \
-  auths
+  auths \
+  letsencrypt
 
 running_services="$(docker compose ps --services --filter status=running)"
 if printf '%s\n' "$running_services" | grep -qx "cpa-usage-keeper"; then
@@ -89,6 +98,12 @@ fi
     > SHA256SUMS
 )
 
-mv "$partial_dest" "$dest"
+(
+  cd "$partial_dest"
+  tar -czf "$partial_package" .
+)
+chmod 600 "$partial_package"
+mv "$partial_package" "$package"
+rm -rf "$partial_dest"
 
-echo "Backup written to ${dest}"
+echo "Backup package written to ${package}"

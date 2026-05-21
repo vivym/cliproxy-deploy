@@ -34,8 +34,13 @@ class BackupApiSiteTests(unittest.TestCase):
         self.assertIn("Missing required backup source", text)
         self.assertNotIn("2>/dev/null || true", text)
         self.assertIn("docker compose exec -T postgres pg_dump", text)
+        self.assertIn("docker compose exec -T redis redis-cli", text)
+        self.assertIn("docker compose cp redis:/data", text)
         self.assertIn("auths", text)
+        self.assertIn(".env", text)
         self.assertIn("config.yaml", text)
+        self.assertIn("letsencrypt", text)
+        self.assertNotIn(" logs", text)
         self.assertIn("cpa-usage-keeper", text)
         self.assertIn('running_services="$(docker compose ps --services --filter status=running)"', text)
 
@@ -50,8 +55,12 @@ class BackupApiSiteTests(unittest.TestCase):
     def test_script_uses_partial_dir_before_final_move(self):
         text = SCRIPT.read_text(encoding="utf-8")
         self.assertIn('partial_dest="${dest}.partial"', text)
-        self.assertIn('if [[ -e "$partial_dest" || -e "$dest" ]]; then', text)
-        self.assertIn('mv "$partial_dest" "$dest"', text)
+        self.assertIn(
+            'if [[ -e "$partial_dest" || -e "$dest" || -e "$partial_package" || -e "$package" ]]; then',
+            text,
+        )
+        self.assertIn('partial_package="${package}.partial"', text)
+        self.assertIn('mv "$partial_package" "$package"', text)
 
     def test_script_rejects_relative_backup_dir_before_docker_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -116,9 +125,13 @@ exit 99
             root = tmp_root / "repo"
             root.mkdir()
             backup_script = self.write_script_copy(root)
-            (root / ".env").write_text("POSTGRES_USER=user\nPOSTGRES_DB=db\n", encoding="utf-8")
+            (root / ".env").write_text(
+                "POSTGRES_USER=user\nPOSTGRES_DB=db\nREDIS_PASSWORD=redis-pw\n",
+                encoding="utf-8",
+            )
             (root / "config.yaml").write_text("config: true\n", encoding="utf-8")
             (root / "auths").mkdir()
+            (root / "letsencrypt").mkdir()
             bin_dir = root / "bin"
             bin_dir.mkdir()
             docker = bin_dir / "docker"
@@ -126,7 +139,15 @@ exit 99
                 """#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1 $2 $3" == "compose exec -T" ]]; then
+  if [[ "$4" == "redis" ]]; then
+    exit 0
+  fi
   echo "postgres dump"
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose cp redis:/data" ]]; then
+  mkdir -p "$4"
+  echo "redis data" > "$4/appendonly.aof"
   exit 0
 fi
 if [[ "$1 $2" == "compose ps" ]]; then
@@ -174,9 +195,15 @@ done
             root = tmp_root / "repo"
             root.mkdir()
             backup_script = self.write_script_copy(root)
-            (root / ".env").write_text("POSTGRES_USER=user\nPOSTGRES_DB=db\n", encoding="utf-8")
+            (root / ".env").write_text(
+                "POSTGRES_USER=user\nPOSTGRES_DB=db\nREDIS_PASSWORD=redis-pw\n",
+                encoding="utf-8",
+            )
             (root / "config.yaml").write_text("config: true\n", encoding="utf-8")
             (root / "auths").mkdir()
+            (root / "letsencrypt").mkdir()
+            (root / "logs").mkdir()
+            (root / "logs" / "request-secret.log").write_text("secret\n", encoding="utf-8")
             bin_dir = root / "bin"
             bin_dir.mkdir()
             docker = bin_dir / "docker"
@@ -184,7 +211,15 @@ done
                 """#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1 $2 $3" == "compose exec -T" ]]; then
+  if [[ "$4" == "redis" ]]; then
+    exit 0
+  fi
   echo "postgres dump"
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose cp redis:/data" ]]; then
+  mkdir -p "$4"
+  echo "redis data" > "$4/dump.rdb"
   exit 0
 fi
 if [[ "$1 $2" == "compose ps" ]]; then
@@ -222,14 +257,37 @@ done
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            prefix = "Backup written to "
+            prefix = "Backup package written to "
             self.assertIn(prefix, result.stdout)
-            backup_dir = pathlib.Path(result.stdout.strip().removeprefix(prefix))
-            sums = (backup_dir / "SHA256SUMS").read_text(encoding="utf-8")
+            backup_package = pathlib.Path(result.stdout.strip().removeprefix(prefix))
+            self.assertEqual(backup_package.suffix, ".tgz")
+
+            extract_dir = tmp_root / "extracted-backup"
+            extract_dir.mkdir()
+            subprocess.run(
+                ["tar", "-xzf", str(backup_package), "-C", str(extract_dir)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+
+            sums = (extract_dir / "SHA256SUMS").read_text(encoding="utf-8")
             self.assertIn("./newapi-postgres.dump", sums)
             self.assertIn("./cliproxy-runtime.tgz", sums)
+            self.assertIn("./redis-data/dump.rdb", sums)
             self.assertNotIn(".partial", sums)
-            self.assertNotIn(str(backup_dir), sums)
+            self.assertNotIn(str(backup_package), sums)
+            archive_listing = subprocess.run(
+                ["tar", "-tzf", str(extract_dir / "cliproxy-runtime.tgz")],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout
+            self.assertIn(".env", archive_listing)
+            self.assertIn("config.yaml", archive_listing)
+            self.assertIn("auths", archive_listing)
+            self.assertIn("letsencrypt", archive_listing)
+            self.assertNotIn("logs", archive_listing)
 
 
 if __name__ == "__main__":

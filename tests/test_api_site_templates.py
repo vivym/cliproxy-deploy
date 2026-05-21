@@ -52,6 +52,19 @@ class ApiSiteTemplateTests(unittest.TestCase):
         self.assertIn("docs/cliproxy-log-archive-r2-runbook.md", readme)
         self.assertIn("docs/cliproxy-log-archive-r2-runbook.md", runbook)
 
+    def test_backup_and_restore_scripts_are_documented(self):
+        readme = self.read("README.md")
+        runbook = self.read("docs/api-site-runbook.md")
+        for text in [readme, runbook]:
+            self.assertIn("scripts/backup-api-site.sh", text)
+            self.assertIn("scripts/restore-api-site.sh", text)
+            self.assertIn("backup package", text)
+            self.assertIn("New API Postgres dump", text)
+            self.assertIn("Redis data", text)
+            self.assertIn("`.env`", text)
+            self.assertIn("`letsencrypt/`", text)
+            self.assertIn("`logs/` is not included", text)
+
     def test_cliproxy_config_template_is_production_safe(self):
         text = self.read("config.yaml.template")
         self.assertIn("disable-control-panel: true", text)
