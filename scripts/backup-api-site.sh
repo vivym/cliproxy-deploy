@@ -99,6 +99,26 @@ for required_path in .env config.yaml auths letsencrypt; do
   fi
 done
 
+: "${POSTGRES_USER:?set POSTGRES_USER}"
+: "${POSTGRES_DB:?set POSTGRES_DB}"
+: "${REDIS_PASSWORD:?set REDIS_PASSWORD}"
+
+# Backup commands use docker compose only to locate existing containers, so
+# provide parse-only defaults for unrelated required Compose interpolation.
+export ACME_EMAIL="${ACME_EMAIL:-backup@example.invalid}"
+export AI_HOST="${AI_HOST:-ai.backup.invalid}"
+export CLIPROXY_HOST="${CLIPROXY_HOST:-cliproxy.backup.invalid}"
+export CPA_USAGE_KEEPER_HOST="${CPA_USAGE_KEEPER_HOST:-keeper.backup.invalid}"
+export NEW_API_IMAGE_TAG="${NEW_API_IMAGE_TAG:-backup-placeholder}"
+export CLIPROXYAPI_IMAGE_TAG="${CLIPROXYAPI_IMAGE_TAG:-backup-placeholder}"
+export CPA_USAGE_KEEPER_IMAGE="${CPA_USAGE_KEEPER_IMAGE:-backup-placeholder}"
+export CPA_USAGE_KEEPER_IMAGE_TAG="${CPA_USAGE_KEEPER_IMAGE_TAG:-backup-placeholder}"
+export NEW_API_SESSION_SECRET="${NEW_API_SESSION_SECRET:-backup-placeholder}"
+export NEW_API_CRYPTO_SECRET="${NEW_API_CRYPTO_SECRET:-backup-placeholder}"
+export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-backup-placeholder}"
+export MANAGEMENT_SECRET="${MANAGEMENT_SECRET:-backup-placeholder}"
+export CPA_USAGE_KEEPER_AUTH_PASSWORD="${CPA_USAGE_KEEPER_AUTH_PASSWORD:-backup-placeholder}"
+
 running_services="$(docker compose ps --services --filter status=running)"
 
 mkdir -p "$partial_dest"

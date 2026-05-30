@@ -289,6 +289,78 @@ done
             self.assertIn("letsencrypt", archive_listing)
             self.assertNotIn("logs", archive_listing)
 
+    def test_script_does_not_require_unrelated_compose_label_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            (root / ".env").write_text(
+                "POSTGRES_USER=user\nPOSTGRES_DB=db\nREDIS_PASSWORD=redis-pw\n",
+                encoding="utf-8",
+            )
+            (root / "config.yaml").write_text("config: true\n", encoding="utf-8")
+            (root / "auths").mkdir()
+            (root / "letsencrypt").mkdir()
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker = bin_dir / "docker"
+            docker.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "compose" && -z "${CLIPROXY_HOST:-}" ]]; then
+  echo "error while interpolating services.cliproxyapi.labels.[]: required variable CLIPROXY_HOST is missing a value: set CLIPROXY_HOST" >&2
+  exit 1
+fi
+if [[ "$1 $2" == "compose ps" ]]; then
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose exec -T" ]]; then
+  if [[ "$4" == "redis" ]]; then
+    exit 0
+  fi
+  echo "postgres dump"
+  exit 0
+fi
+if [[ "$1 $2 $3" == "compose cp redis:/data" ]]; then
+  mkdir -p "$4"
+  echo "redis data" > "$4/dump.rdb"
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            sha256sum = bin_dir / "sha256sum"
+            sha256sum.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+while [[ $# -gt 0 ]]; do
+  printf 'fakehash  %s\\n' "$1"
+  shift
+done
+""",
+                encoding="utf-8",
+            )
+            sha256sum.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "external-backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Backup package written to ", result.stdout)
+
     def test_script_stops_keeper_while_copying_data(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = pathlib.Path(tmp)
