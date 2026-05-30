@@ -28,7 +28,12 @@ backup_package="$(cd "$(dirname "$backup_package")" && pwd -P)/$(basename "$back
 restore_tmp="$(mktemp -d)"
 backup_dir="${restore_tmp}/backup"
 runtime_dir="${restore_tmp}/runtime"
-trap 'rm -rf "$restore_tmp"' EXIT
+cleanup_restore_tmp() {
+  local status=$?
+  rm -rf "$restore_tmp"
+  exit "$status"
+}
+trap cleanup_restore_tmp EXIT
 mkdir -p "$backup_dir"
 mkdir -p "$runtime_dir"
 tar -xzf "$backup_package" -C "$backup_dir"
@@ -53,6 +58,16 @@ verify_checksums() {
       shasum -a 256 -c SHA256SUMS
     fi
   )
+}
+
+require_env() {
+  local name="$1"
+  local source_file="$2"
+
+  if [[ -z "${!name:-}" ]]; then
+    echo "set ${name} in ${source_file}" >&2
+    exit 1
+  fi
 }
 
 service_volume_name() {
@@ -128,8 +143,8 @@ wait_for_postgres() {
   local attempt
   for ((attempt = 1; attempt <= 30; attempt++)); do
     if docker compose exec -T postgres pg_isready \
-      -U "${POSTGRES_USER:?set POSTGRES_USER}" \
-      -d "${POSTGRES_DB:?set POSTGRES_DB}" >/dev/null 2>&1; then
+      -U "${POSTGRES_USER}" \
+      -d "${POSTGRES_DB}" >/dev/null 2>&1; then
       return
     fi
     sleep 2
@@ -151,6 +166,9 @@ set -a
 source .env
 set +a
 
+require_env POSTGRES_USER "${repo_root}/.env"
+require_env POSTGRES_DB "${repo_root}/.env"
+
 docker compose create postgres >/dev/null
 clear_volume_dir postgres /var/lib/postgresql/data
 
@@ -165,8 +183,8 @@ fi
 docker compose up -d postgres
 wait_for_postgres
 docker compose exec -T postgres pg_restore \
-  -U "${POSTGRES_USER:?set POSTGRES_USER}" \
-  -d "${POSTGRES_DB:?set POSTGRES_DB}" \
+  -U "${POSTGRES_USER}" \
+  -d "${POSTGRES_DB}" \
   --clean \
   --if-exists \
   --no-owner \

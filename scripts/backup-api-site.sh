@@ -58,6 +58,15 @@ checksum_file() {
   fi
 }
 
+require_env() {
+  local name="$1"
+
+  if [[ -z "${!name:-}" ]]; then
+    echo "set ${name}" >&2
+    exit 1
+  fi
+}
+
 stopped_services=()
 
 service_is_running() {
@@ -75,11 +84,14 @@ stop_running_service() {
 }
 
 restart_stopped_services_best_effort() {
+  local status=$?
   local index
 
   for ((index = ${#stopped_services[@]} - 1; index >= 0; index--)); do
     docker compose start "${stopped_services[$index]}" >/dev/null || true
   done
+
+  return "$status"
 }
 
 start_stopped_services() {
@@ -99,9 +111,9 @@ for required_path in .env config.yaml auths letsencrypt; do
   fi
 done
 
-: "${POSTGRES_USER:?set POSTGRES_USER}"
-: "${POSTGRES_DB:?set POSTGRES_DB}"
-: "${REDIS_PASSWORD:?set REDIS_PASSWORD}"
+require_env POSTGRES_USER
+require_env POSTGRES_DB
+require_env REDIS_PASSWORD
 
 # Backup commands use docker compose only to locate existing containers, so
 # provide parse-only defaults for unrelated required Compose interpolation.
@@ -129,13 +141,13 @@ for service in cpa-usage-keeper new-api cliproxyapi traefik; do
 done
 
 docker compose exec -T postgres pg_dump \
-  -U "${POSTGRES_USER:?set POSTGRES_USER}" \
-  -d "${POSTGRES_DB:?set POSTGRES_DB}" \
+  -U "${POSTGRES_USER}" \
+  -d "${POSTGRES_DB}" \
   --format=custom \
   > "${partial_dest}/newapi-postgres.dump"
 
 docker compose exec -T redis redis-cli \
-  -a "${REDIS_PASSWORD:?set REDIS_PASSWORD}" \
+  -a "${REDIS_PASSWORD}" \
   SAVE >/dev/null
 docker compose cp redis:/data "${partial_dest}/redis-data"
 

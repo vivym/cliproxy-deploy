@@ -57,6 +57,64 @@ class RestoreApiSiteTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Backup package does not exist", result.stderr)
 
+    def test_script_preserves_env_validation_failure_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            restore_script = self.write_script_copy(root)
+
+            package_src = tmp_root / "backup-src"
+            package_src.mkdir()
+            runtime_src = tmp_root / "runtime-src"
+            runtime_src.mkdir()
+            (runtime_src / ".env").write_text(
+                "POSTGRES_DB=db\nREDIS_PASSWORD=redis-pw\n",
+                encoding="utf-8",
+            )
+            (runtime_src / "config.yaml").write_text("new: true\n", encoding="utf-8")
+            (runtime_src / "auths").mkdir()
+            (runtime_src / "letsencrypt").mkdir()
+            (runtime_src / "letsencrypt" / "acme.json").write_text("{}", encoding="utf-8")
+            subprocess.run(
+                ["tar", "-czf", str(package_src / "cliproxy-runtime.tgz"), "."],
+                cwd=runtime_src,
+                check=True,
+            )
+            (package_src / "newapi-postgres.dump").write_text("dump\n", encoding="utf-8")
+            (package_src / "redis-data").mkdir()
+            (package_src / "redis-data" / "dump.rdb").write_text("redis\n", encoding="utf-8")
+            backup_package = tmp_root / "backup.tgz"
+            subprocess.run(["tar", "-czf", str(backup_package), "."], cwd=package_src, check=True)
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker = bin_dir / "docker"
+            docker.write_text(
+                """#!/usr/bin/env bash
+if [[ "$1 $2" == "compose --env-file" && "${4:-}" == "down" ]]; then
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(backup_package)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("set POSTGRES_USER", result.stderr)
+            self.assertNotIn("unexpected docker call", result.stderr)
+
     def test_script_replaces_runtime_paths_without_touching_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = pathlib.Path(tmp)

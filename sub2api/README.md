@@ -11,6 +11,7 @@ This directory is a self-contained Docker Compose stack for Sub2API behind Traef
 ## Files
 
 - `docker-compose.yml`
+- `docker-compose.newapi.yml`
 - `.env.example`
 
 ## First setup
@@ -76,6 +77,28 @@ docker compose up -d
 ```
 
 Include `.env`, `data/`, `postgres_data/`, `redis_data/`, and `letsencrypt/` in server backups. `data/config.yaml` contains the generated Sub2API runtime config and secrets, so do not delete it after first start.
+
+## New API sidecar and migration
+
+Use `docker-compose.newapi.yml` when this server should keep Sub2API and also host New API. This override reuses `sub2api-traefik` and the existing `sub2api-proxy` network. It does not define another Traefik container and does not deploy CLIProxyAPI or CPA Usage Keeper.
+
+Add the New API sidecar values from `.env.example` to `.env`. Generate the New API passwords and secrets with `openssl rand -hex 32`; they are embedded in `SQL_DSN` and `REDIS_CONN_STRING`, so keep them URL-safe.
+
+Validate the combined Compose config before restore:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.newapi.yml config >/dev/null
+```
+
+Restore New API data from an API-site backup package without touching Sub2API runtime files:
+
+```bash
+../scripts/restore-newapi-only.sh /path/to/cliproxy-api-site-backup.tgz
+```
+
+The restore imports only `newapi-postgres.dump` and `redis-data/` into New API's dedicated volumes. It intentionally does not restore `config.yaml`, `auths/`, `letsencrypt/`, CLIProxyAPI data, CPA Usage Keeper data, or logs.
+
+After restore, point New API channels at Sub2API, usually with an upstream base URL of `http://sub2api:8080/v1` from inside Docker or `https://${SUB2API_HOST}/v1` through the public route.
 
 ## Notes
 
