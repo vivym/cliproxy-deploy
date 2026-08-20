@@ -4,16 +4,20 @@
 # Superpowers visual brainstorming cache
 .superpowers/
 
-# Local secrets and generated runtime config
+# Local secrets
 .env
-config.yaml
 
-# CLIProxyAPI runtime state
-auths/
-logs/
+# Deployment runtime state
+/data/
+/postgres_data/
+/redis_data/
+/letsencrypt/
 
-# Traefik ACME certificates
-letsencrypt/
+# Protect ignored runtime state during the one-time server layout migration.
+/sub2api/data/
+/sub2api/postgres_data/
+/sub2api/redis_data/
+/sub2api/letsencrypt/
 
 # Local editor and OS files
 .DS_Store

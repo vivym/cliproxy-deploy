@@ -1147,7 +1147,7 @@ Lark 的审批订阅接口目前要求 `approval:approval` 或 `approval:definit
 
 ## 部署拓扑
 
-在 `sub2api/docker-compose.newapi.yml` 增加 `lark-quota-controller`，并把自定义 New API fork 镜像固定到不可变 tag 或 digest。
+在 `docker-compose.newapi.yml` 增加 `lark-quota-controller`，并把自定义 New API fork 镜像固定到不可变 tag 或 digest。
 
 网络：
 
@@ -1479,7 +1479,7 @@ New API 检查：
 
 ### WP4：部署和运维
 
-- 修改 `sub2api/docker-compose.newapi.yml`。
+- 修改 `docker-compose.newapi.yml`。
 - 增加 `lark-integration` network、Traefik path router 和 Controller volume。
 - 固定 New API fork 和 Controller image digest。
 - 扩展 `.env.example`，但不提交任何 secret。
