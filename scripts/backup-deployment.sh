@@ -8,6 +8,64 @@ usage() {
   echo "Usage: scripts/backup-deployment.sh [DEPLOYMENT_DIR]" >&2
 }
 
+validate_deployment_files() {
+  if [[ ! -f "${deployment_dir}/docker-compose.yml" ]]; then
+    echo "Missing required deployment file: ${deployment_dir}/docker-compose.yml" >&2
+    exit 1
+  fi
+}
+
+dotenv_value() {
+  local key="$1"
+  local optional="${2:-false}"
+
+  if [[ "$optional" == "true" ]]; then
+    python3 "$dotenv_reader" --allow-missing .env "$key"
+  else
+    python3 "$dotenv_reader" .env "$key"
+  fi
+}
+
+require_env() {
+  local name="$1"
+
+  if [[ -z "${!name:-}" ]]; then
+    echo "set ${name} in ${deployment_dir}/.env" >&2
+    exit 1
+  fi
+}
+
+load_backup_credentials() {
+  SUB2API_POSTGRES_USER="$(dotenv_value SUB2API_POSTGRES_USER)"
+  SUB2API_POSTGRES_DB="$(dotenv_value SUB2API_POSTGRES_DB)"
+  NEW_API_POSTGRES_USER="$(dotenv_value NEW_API_POSTGRES_USER)"
+  NEW_API_POSTGRES_DB="$(dotenv_value NEW_API_POSTGRES_DB)"
+  NEW_API_REDIS_PASSWORD="$(dotenv_value NEW_API_REDIS_PASSWORD)"
+}
+
+compose() {
+  local -a clean_env=(env -i "PATH=$PATH" "HOME=${HOME:-/nonexistent}")
+  local docker_variable
+
+  for docker_variable in DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG; do
+    if [[ -n "${!docker_variable:-}" ]]; then
+      clean_env+=("${docker_variable}=${!docker_variable}")
+    fi
+  done
+  "${clean_env[@]}" docker compose "$@"
+}
+
+configure_layout() {
+  sub2api_postgres_service=sub2api-postgres
+  sub2api_redis_service=sub2api-redis
+  new_api_postgres_service=new-api-postgres
+  new_api_redis_service=new-api-redis
+  sub2api_app_data_dir=sub2api-data
+  sub2api_postgres_data_dir=sub2api-postgres-data
+  sub2api_redis_data_dir=sub2api-redis-data
+}
+
+backup_main() {
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
@@ -23,13 +81,9 @@ if [[ ! -d "$deployment_dir" ]]; then
   exit 1
 fi
 deployment_dir="$(cd "$deployment_dir" && pwd -P)"
-for required_file in docker-compose.yml docker-compose.newapi.yml; do
-  if [[ ! -f "${deployment_dir}/${required_file}" ]]; then
-    echo "Missing required deployment file: ${deployment_dir}/${required_file}" >&2
-    exit 1
-  fi
-done
+validate_deployment_files
 cd "$deployment_dir"
+configure_layout
 
 if [[ ! -f .env ]]; then
   echo "Missing required backup source: .env" >&2
@@ -37,19 +91,8 @@ if [[ ! -f .env ]]; then
 fi
 python3 "$dotenv_reader" --validate .env
 
-dotenv_value() {
-  local key="$1"
-  local optional="${2:-false}"
-
-  if [[ "$optional" == "true" ]]; then
-    python3 "$dotenv_reader" --allow-missing .env "$key"
-  else
-    python3 "$dotenv_reader" .env "$key"
-  fi
-}
-
 env_backup_root="$(dotenv_value BACKUP_DIR true)"
-backup_root="${BACKUP_DIR:-${env_backup_root:-/var/backups/sub2api}}"
+backup_root="${BACKUP_DIR:-${env_backup_root:-/var/backups/new-api}}"
 if [[ "$backup_root" != /* ]]; then
   echo "BACKUP_DIR must be an absolute path outside the repository: $backup_root" >&2
   exit 1
@@ -76,7 +119,12 @@ case "$backup_root" in
     ;;
 esac
 
-for required_path in .env data postgres_data redis_data letsencrypt; do
+for required_path in \
+  .env \
+  "$sub2api_app_data_dir" \
+  "$sub2api_postgres_data_dir" \
+  "$sub2api_redis_data_dir" \
+  letsencrypt; do
   if [[ ! -e "$required_path" ]]; then
     echo "Missing required backup source: $required_path" >&2
     exit 1
@@ -106,36 +154,13 @@ if [[ -e "$partial_dest" || -e "$dest" || -e "$partial_package" || -e "$package"
   exit 1
 fi
 
-require_env() {
-  local name="$1"
-
-  if [[ -z "${!name:-}" ]]; then
-    echo "set ${name} in ${deployment_dir}/.env" >&2
-    exit 1
-  fi
-}
+load_backup_credentials
 
 for required_env in \
-  POSTGRES_USER POSTGRES_DB REDIS_PASSWORD \
-  NEWAPI_POSTGRES_USER NEWAPI_POSTGRES_DB NEWAPI_REDIS_PASSWORD; do
-  printf -v "$required_env" '%s' "$(dotenv_value "$required_env")"
+  SUB2API_POSTGRES_USER SUB2API_POSTGRES_DB \
+  NEW_API_POSTGRES_USER NEW_API_POSTGRES_DB NEW_API_REDIS_PASSWORD; do
   require_env "$required_env"
 done
-
-compose() {
-  local -a clean_env=(env -i "PATH=$PATH" "HOME=${HOME:-/nonexistent}")
-  local docker_variable
-
-  for docker_variable in DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG; do
-    if [[ -n "${!docker_variable:-}" ]]; then
-      clean_env+=("${docker_variable}=${!docker_variable}")
-    fi
-  done
-  "${clean_env[@]}" docker compose \
-    -f docker-compose.yml \
-    -f docker-compose.newapi.yml \
-    "$@"
-}
 
 checksum_file() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -196,31 +221,31 @@ stop_running_service traefik
 stop_running_service new-api
 stop_running_service sub2api
 
-compose exec -T postgres pg_dump \
-  -U "$POSTGRES_USER" \
-  -d "$POSTGRES_DB" \
+compose exec -T "$sub2api_postgres_service" pg_dump \
+  -U "$SUB2API_POSTGRES_USER" \
+  -d "$SUB2API_POSTGRES_DB" \
   --format=custom \
   > "${partial_dest}/sub2api-postgres.dump"
 
-compose exec -T newapi-postgres pg_dump \
-  -U "$NEWAPI_POSTGRES_USER" \
-  -d "$NEWAPI_POSTGRES_DB" \
+compose exec -T "$new_api_postgres_service" pg_dump \
+  -U "$NEW_API_POSTGRES_USER" \
+  -d "$NEW_API_POSTGRES_DB" \
   --format=custom \
-  > "${partial_dest}/newapi-postgres.dump"
+  > "${partial_dest}/new-api-postgres.dump"
 
-compose exec -T redis redis-cli SAVE >/dev/null
-stop_running_service redis
-compose cp redis:/data "${partial_dest}/sub2api-redis-data"
+compose exec -T "$sub2api_redis_service" redis-cli SAVE >/dev/null
+stop_running_service "$sub2api_redis_service"
+compose cp "${sub2api_redis_service}:/data" "${partial_dest}/sub2api-redis-data"
 
-compose exec -T newapi-redis redis-cli \
-  -a "$NEWAPI_REDIS_PASSWORD" \
+compose exec -T "$new_api_redis_service" redis-cli \
+  -a "$NEW_API_REDIS_PASSWORD" \
   SAVE >/dev/null
-stop_running_service newapi-redis
-compose cp newapi-redis:/data "${partial_dest}/redis-data"
+stop_running_service "$new_api_redis_service"
+compose cp "${new_api_redis_service}:/data" "${partial_dest}/new-api-redis-data"
 
 tar -czf "${partial_dest}/deployment-runtime.tgz" \
   .env \
-  data \
+  "$sub2api_app_data_dir" \
   letsencrypt
 
 (
@@ -247,3 +272,8 @@ release_lock
 trap - EXIT
 
 echo "Backup package written to ${package}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  backup_main "$@"
+fi

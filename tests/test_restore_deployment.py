@@ -32,7 +32,9 @@ class RestoreDeploymentTests(unittest.TestCase):
         if runtime_env_lines is None:
             runtime_env_lines = [
                 "ACME_EMAIL=admin@example.test",
-                "SUB2API_HOST=sub2api.example.test",
+                "SUB2API_HOST=legacy-sub2api.example.test",
+                "SUB2API_PROXY_SUBNET=172.31.20.0/24",
+                "SUB2API_BACKEND_SUBNET=172.31.21.0/24",
                 "SUB2API_ADMIN_HOST=admin.example.test",
                 "POSTGRES_USER=sub2api",
                 "POSTGRES_DB=sub2api",
@@ -46,7 +48,7 @@ class RestoreDeploymentTests(unittest.TestCase):
                 "NEWAPI_POSTGRES_USER=newapi",
                 "NEWAPI_POSTGRES_DB=newapi",
                 "NEWAPI_POSTGRES_PASSWORD=newapi-pw",
-                "NEWAPI_REDIS_PASSWORD=newapi-redis",
+                "NEWAPI_REDIS_PASSWORD=new-api-redis",
                 "NEW_API_SESSION_SECRET=session-secret",
                 "NEW_API_CRYPTO_SECRET=crypto-secret",
             ]
@@ -54,8 +56,8 @@ class RestoreDeploymentTests(unittest.TestCase):
             "\n".join(runtime_env_lines) + "\n",
             encoding="utf-8",
         )
-        (runtime_src / "data").mkdir()
-        (runtime_src / "data" / "config.yaml").write_text(
+        (runtime_src / "sub2api-data").mkdir()
+        (runtime_src / "sub2api-data" / "config.yaml").write_text(
             "restored: true\n", encoding="utf-8"
         )
         (runtime_src / "letsencrypt").mkdir()
@@ -68,7 +70,7 @@ class RestoreDeploymentTests(unittest.TestCase):
         (backup_src / "sub2api-postgres.dump").write_text(
             "sub2api dump\n", encoding="utf-8"
         )
-        (backup_src / "newapi-postgres.dump").write_text(
+        (backup_src / "new-api-postgres.dump").write_text(
             "newapi dump\n", encoding="utf-8"
         )
         for directory, content in [
@@ -95,11 +97,11 @@ class RestoreDeploymentTests(unittest.TestCase):
         self.assertIn("set -euo pipefail", text)
         self.assertIn("deployment-runtime.tgz", text)
         self.assertIn("sub2api-postgres.dump", text)
-        self.assertIn("newapi-postgres.dump", text)
+        self.assertIn("new-api-postgres.dump", text)
         self.assertIn("sub2api-redis-data", text)
-        self.assertIn("redis-data", text)
+        self.assertIn("new-api-redis-data", text)
         self.assertIn("SHA256SUMS", text)
-        self.assertIn("docker-compose.newapi.yml", text)
+        self.assertNotIn("docker-compose.newapi.yml", text)
         self.assertIn("pg_restore", text)
         self.assertIn("Restore completed", text)
         self.assertNotIn("cliproxy", text.lower())
@@ -111,9 +113,13 @@ class RestoreDeploymentTests(unittest.TestCase):
             root.mkdir()
             restore_script = self.write_script_copy(root)
             (root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-            (root / "docker-compose.newapi.yml").write_text("services: {}\n", encoding="utf-8")
             (root / ".env").write_text("OLD_ENV=true\n", encoding="utf-8")
-            for directory in ["data", "letsencrypt", "postgres_data", "redis_data"]:
+            for directory in [
+                "sub2api-data",
+                "letsencrypt",
+                "sub2api-postgres-data",
+                "sub2api-redis-data",
+            ]:
                 (root / directory).mkdir()
                 (root / directory / "stale").write_text("stale\n", encoding="utf-8")
             package = self.create_backup_package(tmp_root)
@@ -132,8 +138,8 @@ if [[ "$1" == "compose" && "$*" == *" ps -aq "* ]]; then
 fi
 if [[ "$1" == "inspect" ]]; then
   case "${{@: -1}}" in
-    newapi-postgres-container) echo "newapi-postgres-data-volume" ;;
-    newapi-redis-container) echo "newapi-redis-data-volume" ;;
+    new-api-postgres-container) echo "new-api-postgres-data-volume" ;;
+    new-api-redis-container) echo "new-api-redis-data-volume" ;;
   esac
   exit 0
 fi
@@ -160,7 +166,12 @@ exit 99
             result = subprocess.run(
                 [str(restore_script), str(package), str(root)],
                 cwd=root,
-                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                env={
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                    "EDGE_SUBNET": "172.31.30.0/24",
+                    "SUB2API_DATA_SUBNET": "172.31.31.0/24",
+                    "NEW_API_DATA_SUBNET": "172.31.32.0/24",
+                },
                 text=True,
                 capture_output=True,
                 check=False,
@@ -170,20 +181,39 @@ exit 99
             self.assertIn("Restore completed", result.stdout)
             self.assertIn(
                 "restored: true",
-                (root / "data" / "config.yaml").read_text(encoding="utf-8"),
+                (root / "sub2api-data" / "config.yaml").read_text(encoding="utf-8"),
             )
-            self.assertFalse((root / "postgres_data" / "stale").exists())
-            self.assertFalse((root / "redis_data" / "stale").exists())
+            self.assertFalse((root / "sub2api-postgres-data" / "stale").exists())
+            self.assertFalse((root / "sub2api-redis-data" / "stale").exists())
             self.assertEqual(
-                (root / "redis_data" / "dump.rdb").read_text(encoding="utf-8"),
+                (root / "sub2api-redis-data" / "dump.rdb").read_text(
+                    encoding="utf-8"
+                ),
                 "sub2api redis\n",
             )
+            restored_env = (root / ".env").read_text(encoding="utf-8")
+            self.assertEqual((root / ".env").stat().st_mode & 0o777, 0o600)
+            self.assertIn("EDGE_SUBNET=172.31.30.0/24", restored_env)
+            self.assertIn("SUB2API_DATA_SUBNET=172.31.31.0/24", restored_env)
+            self.assertIn("NEW_API_DATA_SUBNET=172.31.32.0/24", restored_env)
+            self.assertIn("SUB2API_POSTGRES_USER=sub2api", restored_env)
+            self.assertIn("SUB2API_POSTGRES_DB=sub2api", restored_env)
+            self.assertIn("SUB2API_POSTGRES_PASSWORD=sub2api-pw", restored_env)
+            self.assertIn("SUB2API_REDIS_PASSWORD=sub2api-redis", restored_env)
+            self.assertIn("NEW_API_POSTGRES_USER=newapi", restored_env)
+            self.assertIn("NEW_API_POSTGRES_DB=newapi", restored_env)
+            self.assertIn("NEW_API_POSTGRES_PASSWORD=newapi-pw", restored_env)
+            self.assertIn("NEW_API_REDIS_PASSWORD=new-api-redis", restored_env)
+            self.assertNotIn("SUB2API_PROXY_SUBNET", restored_env)
+            self.assertNotIn("SUB2API_BACKEND_SUBNET", restored_env)
+            self.assertNotIn("SUB2API_HOST", restored_env)
+            self.assertNotIn("NEWAPI_", restored_env)
             calls = calls_file.read_text(encoding="utf-8")
             self.assertIn(" down", calls)
-            self.assertIn("exec -T postgres pg_restore", calls)
-            self.assertIn("exec -T newapi-postgres pg_restore", calls)
-            self.assertIn("newapi-postgres-data-volume:/target", calls)
-            self.assertIn("newapi-redis-data-volume:/target", calls)
+            self.assertIn("exec -T sub2api-postgres pg_restore", calls)
+            self.assertIn("exec -T new-api-postgres pg_restore", calls)
+            self.assertIn("new-api-postgres-data-volume:/target", calls)
+            self.assertIn("new-api-redis-data-volume:/target", calls)
 
     def test_restore_rejects_unsafe_archive_paths_before_docker(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -191,7 +221,6 @@ exit 99
             restore_script = self.write_script_copy(root)
             (root / ".env").write_text("placeholder=true\n", encoding="utf-8")
             (root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-            (root / "docker-compose.newapi.yml").write_text("services: {}\n", encoding="utf-8")
             package = root / "unsafe.tgz"
             with tarfile.open(package, "w:gz") as archive:
                 member = tarfile.TarInfo("../escape")
@@ -230,11 +259,13 @@ exit 99
             (root / "docker-compose.yml").write_text(
                 "services: {}\n", encoding="utf-8"
             )
-            (root / "docker-compose.newapi.yml").write_text(
-                "services: {}\n", encoding="utf-8"
-            )
             (root / ".env").write_text("CURRENT_ENV=true\n", encoding="utf-8")
-            for directory in ["data", "letsencrypt", "postgres_data", "redis_data"]:
+            for directory in [
+                "sub2api-data",
+                "letsencrypt",
+                "sub2api-postgres-data",
+                "sub2api-redis-data",
+            ]:
                 (root / directory).mkdir()
                 (root / directory / "current").write_text(
                     "current\n", encoding="utf-8"
@@ -276,7 +307,12 @@ exit 99
             self.assertEqual(
                 (root / ".env").read_text(encoding="utf-8"), "CURRENT_ENV=true\n"
             )
-            for directory in ["data", "letsencrypt", "postgres_data", "redis_data"]:
+            for directory in [
+                "sub2api-data",
+                "letsencrypt",
+                "sub2api-postgres-data",
+                "sub2api-redis-data",
+            ]:
                 self.assertTrue((root / directory / "current").exists(), directory)
 
     def test_restore_rejects_runtime_env_interpolation_without_execution(self):
@@ -288,11 +324,13 @@ exit 99
             (root / "docker-compose.yml").write_text(
                 "services: {}\n", encoding="utf-8"
             )
-            (root / "docker-compose.newapi.yml").write_text(
-                "services: {}\n", encoding="utf-8"
-            )
             (root / ".env").write_text("CURRENT_ENV=true\n", encoding="utf-8")
-            for directory in ["data", "letsencrypt", "postgres_data", "redis_data"]:
+            for directory in [
+                "sub2api-data",
+                "letsencrypt",
+                "sub2api-postgres-data",
+                "sub2api-redis-data",
+            ]:
                 (root / directory).mkdir()
 
             executed_marker = root / "env-executed"

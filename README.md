@@ -1,39 +1,41 @@
-# Sub2API + New API deployment
+# New API gateway deployment
 
-Production Docker Compose deployment for Sub2API and New API behind a shared
-Traefik instance.
+Production Docker Compose deployment for the New API gateway. New API is the
+only public user and SDK entry point. Sub2API is an internal model upstream
+with a separate administrator route.
 
-The repository root is the deployment interface. Run all Compose and operation
-commands from this directory.
+The repository root is the complete deployment interface. Every Compose and
+operations command runs from this directory and uses the single
+`docker-compose.yml` file. The Compose project is fixed as `name: new-api`.
 
 ## Topology
 
 ```text
-Internet
-  |
-  v
+Users and SDKs
+      |
+      v
 Traefik :80/:443
-  |-- Sub2API API and admin UI :8080
-  `-- New API :3000
+      |
+      +--> New API :3000 --> Sub2API :8080 --> model providers
+      |
+Operators only
+      `--> Sub2API administrator UI :8080
 
-Sub2API -> Postgres + Redis
-New API -> dedicated Postgres + Redis
+New API --> dedicated Postgres + Redis
+Sub2API  --> dedicated Postgres + Redis
 ```
 
-The base Compose file deploys Sub2API. The New API file is an overlay and must
-be used together with the base file. The Compose project is explicitly fixed
-as `name: sub2api` so moving the repository does not silently select different
-New API named volumes.
+Sub2API has no public OpenAI-compatible API route. Configure New API channels
+to use `http://sub2api:8080/v1` on the shared Docker edge network.
 
 ## Files
 
 ```text
-docker-compose.yml          Sub2API, Traefik, Postgres, and Redis
-docker-compose.newapi.yml   New API and its dedicated Postgres and Redis
+docker-compose.yml          Complete New API gateway stack
 .env.example                Deployment configuration template
 scripts/backup-deployment.sh
 scripts/restore-deployment.sh
-scripts/restore-newapi.sh
+scripts/restore-new-api.sh
 scripts/verify-deployment.sh
 docs/architecture/          Current architecture documents
 docs/runbooks/              Current operational procedures
@@ -44,9 +46,9 @@ Local runtime state is ignored by Git:
 
 ```text
 .env
-data/
-postgres_data/
-redis_data/
+sub2api-data/
+sub2api-postgres-data/
+sub2api-redis-data/
 letsencrypt/
 tmp/
 ```
@@ -58,7 +60,8 @@ it as production state.
 
 - Linux with Docker Engine and Docker Compose v2
 - Python 3, `curl`, and GNU-compatible `tar`
-- DNS for all public hosts and reachable TCP ports `80` and `443`
+- DNS for `NEW_API_HOST` and `SUB2API_ADMIN_HOST`
+- Reachable TCP ports `80` and `443`
 
 ## Initial setup
 
@@ -66,109 +69,97 @@ it as production state.
 cp .env.example .env
 openssl rand -hex 32
 ${EDITOR:-vi} .env
-mkdir -p data postgres_data redis_data letsencrypt
+mkdir -p sub2api-data sub2api-postgres-data sub2api-redis-data letsencrypt
 touch letsencrypt/acme.json
 chmod 600 letsencrypt/acme.json
-docker compose -f docker-compose.yml -f docker-compose.newapi.yml config >/dev/null
-docker compose -f docker-compose.yml -f docker-compose.newapi.yml up -d
+docker compose config >/dev/null
+docker compose up -d
 ```
 
 Set every required secret in `.env`. Pin `SUB2API_IMAGE_TAG` and
-`NEW_API_IMAGE_TAG` to reviewed release tags or immutable digests for
+`NEW_API_IMAGE_TAG` to reviewed release tags or immutable digests in
 production.
 
 ## Public routes
 
-- `SUB2API_HOST`: OpenAI-compatible Sub2API route, normally `/v1`
-- `SUB2API_ADMIN_HOST`: Sub2API administrator UI
-- `NEW_API_HOST`: New API user, administrator, and SDK entry point
+- `NEW_API_HOST`: user, administrator, and SDK entry point
+- `SUB2API_ADMIN_HOST`: operator-only Sub2API administrator UI
 
-All three DNS names must point to the host before the first ACME request. Ports
-`80` and `443` must be reachable. Database and Redis ports are not published.
-
-New API should call Sub2API through `http://sub2api:8080/v1` on the Docker
-network. The public Sub2API URL is also available when an externally routed
-upstream is required.
+Both DNS names must point to the host before the first ACME request. Database,
+Redis, and the Sub2API OpenAI-compatible API are not published.
 
 ## Common operations
 
-Use both Compose files for every operation that includes New API:
-
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.newapi.yml config
-docker compose -f docker-compose.yml -f docker-compose.newapi.yml pull
-docker compose -f docker-compose.yml -f docker-compose.newapi.yml up -d
-docker compose -f docker-compose.yml -f docker-compose.newapi.yml ps
-```
-
-Verify public routes and container health:
-
-```bash
+docker compose config
+docker compose pull
+docker compose up -d
+docker compose ps
 scripts/verify-deployment.sh
 ```
 
-Create a consistent deployment backup outside the repository:
+Create a consistent backup outside the repository:
 
 ```bash
-BACKUP_DIR=/var/backups/sub2api scripts/backup-deployment.sh
+BACKUP_DIR=/var/backups/new-api scripts/backup-deployment.sh
 ```
 
-Restore the complete deployment from a backup produced by that command:
+Restore every state domain from a backup produced by that command:
 
 ```bash
 scripts/restore-deployment.sh /path/to/backup-package.tgz
 ```
 
-Full restore is destructive: it replaces Sub2API runtime state, both Postgres
-databases, and both Redis data domains. It validates archive paths, checksums,
-and required sources before stopping the current deployment.
+Full restore is destructive. It replaces Sub2API runtime state, both Postgres
+databases, and both Redis data domains after validating archive paths,
+checksums, required files, and the restored Compose environment.
 
 Restore only New API data from a compatible deployment or historical API-site
 backup without modifying Sub2API state:
 
 ```bash
-scripts/restore-newapi.sh /path/to/backup-package.tgz
+scripts/restore-new-api.sh /path/to/backup-package.tgz
 ```
 
-The New API restore accepts the historical `newapi-postgres.dump` plus
-`redis-data/` package contract. Historical runtime metadata may seed missing
-New API environment values, but it never replaces Sub2API runtime data.
+The New API-only restore uses `new-api-postgres.dump` and
+`new-api-redis-data/`. It also accepts the historical `newapi-postgres.dump`
+and `redis-data/` names at the restore boundary. Historical runtime metadata
+may seed missing New API environment values, but never replaces Sub2API state.
+Packages without `SHA256SUMS` are rejected by default. After verifying a
+historical package by an independent receipt, opt in for that one restore with
+`ALLOW_UNVERIFIED_LEGACY_BACKUP=true`.
 
-## Data movement warning
+## Deployment identity
 
-The base stack uses root-relative bind mounts for `data/`, `postgres_data/`,
-`redis_data/`, and `letsencrypt/`. Moving the Compose files without moving these
-directories points containers at empty paths.
+The current deployment owns these explicit identities:
 
-Before changing the server checkout layout:
+- Compose project: `new-api`
+- Edge network: `new-api-edge`
+- Data networks: `new-api-data`, `new-api-sub2api-data`
+- Named volumes: `new-api-postgres-data`, `new-api-redis-data`
 
-1. Record current container mounts and named volumes.
-2. Create and verify a backup package.
-3. Stop the current deployment.
-4. Move the bind-mounted directories with the Compose files.
-5. Confirm the Compose project remains `sub2api`.
-6. Render the configuration and inspect every mount before starting.
-
-Do not run the old and promoted Compose layouts simultaneously because they use
-the same explicit container and network names.
+Changing a project, network, or volume name creates a different Docker object.
+Do not migrate from an older `sub2api` project by moving directories or
+assuming similarly named volumes are reused. Follow
+[`docs/runbooks/migrate-to-new-api-deploy.md`](docs/runbooks/migrate-to-new-api-deploy.md)
+for a verified backup and full restore into the new identities.
 
 ## Security notes
 
-- The Traefik Docker socket mount is effectively inside the host Docker trust
-  boundary even though it is read-only.
+- The Traefik Docker socket mount is inside the host Docker trust boundary even
+  when mounted read-only.
 - Keep `.env`, `data/config.yaml`, database state, backup packages, and ACME
   material outside Git.
-- Operational scripts parse `.env` as strict one-line dotenv data and never
+- Operations scripts parse `.env` as strict one-line dotenv data and never
   execute it as shell. Variable interpolation is rejected; single-quote a
   literal `$` in a value.
-- Keep the upstream allowlist enabled. Add required domains instead of broadly
-  allowing private or arbitrary hosts.
-- Pin images and review changes before production upgrades.
+- Keep the Sub2API upstream allowlist enabled and add specific required domains.
+- Restrict `SUB2API_ADMIN_HOST` with an additional access control layer when
+  the deployment environment supports one.
 
 ## Lark integration
 
 The planned Lark login, wallet grant, and managed subscription integration is
 specified in
 [`docs/architecture/lark-entitlement-integration.md`](docs/architecture/lark-entitlement-integration.md).
-Its controller and policy bundle will extend this root deployment rather than
-introducing a second deployment directory.
+Its controller and policy bundle extend the single root Compose deployment.

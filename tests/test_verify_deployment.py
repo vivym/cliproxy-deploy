@@ -15,15 +15,16 @@ class VerifyDeploymentTests(unittest.TestCase):
         text = SCRIPT.read_text(encoding="utf-8")
 
         self.assertIn("set -euo pipefail", text)
-        self.assertIn("SUB2API_HOST", text)
+        self.assertNotIn("SUB2API_HOST", text)
         self.assertIn("SUB2API_ADMIN_HOST", text)
         self.assertIn("NEW_API_HOST", text)
         self.assertIn("/health", text)
         self.assertIn("/api/status", text)
         self.assertIn("http://sub2api:8080/health", text)
-        self.assertIn("SUB2API_TEST_API_KEY", text)
+        self.assertIn("expected 404", text)
         self.assertIn("NEW_API_TEST_API_KEY", text)
-        self.assertIn("docker-compose.newapi.yml", text)
+        self.assertNotIn("SUB2API_TEST_API_KEY", text)
+        self.assertNotIn("docker-compose.newapi.yml", text)
         self.assertNotIn("curl -k", text)
         for legacy_term in ["CLIPROXY", "CPA_USAGE_KEEPER", "cliproxyapi"]:
             self.assertNotIn(legacy_term, text)
@@ -44,7 +45,6 @@ class VerifyDeploymentTests(unittest.TestCase):
             (root / ".env").write_text(
                 "\n".join(
                     [
-                        "SUB2API_HOST=sub2api.example.test",
                         "SUB2API_ADMIN_HOST=admin.example.test",
                         "NEW_API_HOST=ai.example.test",
                     ]
@@ -57,7 +57,7 @@ class VerifyDeploymentTests(unittest.TestCase):
                 """#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$*" == *" ps --services --filter status=running" ]]; then
-  printf '%s\\n' traefik postgres redis sub2api newapi-postgres newapi-redis new-api
+  printf '%s\\n' traefik sub2api-postgres sub2api-redis sub2api new-api-postgres new-api-redis new-api
   exit 0
 fi
 if [[ "$*" == *" exec -T new-api wget "* ]]; then
@@ -70,7 +70,15 @@ exit 99
             )
             docker.chmod(0o755)
             curl = bin_dir / "curl"
-            curl.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+            curl.write_text(
+                """#!/usr/bin/env bash
+if [[ "$*" == *" -w %{http_code} "* ]]; then
+  printf '404'
+fi
+exit 0
+""",
+                encoding="utf-8",
+            )
             curl.chmod(0o755)
             env = os.environ.copy()
             env["PATH"] = f"{bin_dir}{os.pathsep}/usr/bin:/bin"
@@ -86,7 +94,6 @@ exit 99
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Deployment verification checks completed", result.stdout)
-            self.assertIn("Skipping Sub2API credentialed check", result.stdout)
             self.assertIn("Skipping New API credentialed check", result.stdout)
 
 

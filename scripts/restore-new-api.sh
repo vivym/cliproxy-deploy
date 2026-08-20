@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 dotenv_reader="${repo_root}/scripts/read-dotenv.py"
 
 usage() {
-  echo "Usage: scripts/restore-newapi.sh BACKUP_PACKAGE [DEPLOYMENT_DIR]" >&2
+  echo "Usage: scripts/restore-new-api.sh BACKUP_PACKAGE [DEPLOYMENT_DIR]" >&2
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -29,7 +29,7 @@ if [[ ! -d "$deployment_dir" ]]; then
   echo "Deployment directory does not exist: $deployment_dir" >&2
   exit 1
 fi
-for required_path in .env docker-compose.yml docker-compose.newapi.yml; do
+for required_path in .env docker-compose.yml; do
   if [[ ! -f "${deployment_dir}/${required_path}" ]]; then
     echo "Missing required Deployment file: ${deployment_dir}/${required_path}" >&2
     exit 1
@@ -87,16 +87,33 @@ validate_archive() {
 validate_archive "$backup_package" "backup package"
 tar -xzf "$backup_package" -C "$backup_dir"
 
-for required_path in newapi-postgres.dump redis-data; do
-  if [[ ! -e "${backup_dir}/${required_path}" ]]; then
-    echo "Missing required restore source: ${backup_dir}/${required_path}" >&2
-    exit 1
-  fi
-done
+if [[ -f "${backup_dir}/new-api-postgres.dump" ]]; then
+  new_api_postgres_dump="${backup_dir}/new-api-postgres.dump"
+elif [[ -f "${backup_dir}/newapi-postgres.dump" ]]; then
+  new_api_postgres_dump="${backup_dir}/newapi-postgres.dump"
+else
+  echo "Missing required restore source: ${backup_dir}/new-api-postgres.dump" >&2
+  exit 1
+fi
+
+if [[ -d "${backup_dir}/new-api-redis-data" ]]; then
+  new_api_redis_data="${backup_dir}/new-api-redis-data"
+elif [[ -d "${backup_dir}/redis-data" ]]; then
+  new_api_redis_data="${backup_dir}/redis-data"
+else
+  echo "Missing required restore source: ${backup_dir}/new-api-redis-data" >&2
+  exit 1
+fi
 
 verify_checksums() {
   if [[ ! -f "${backup_dir}/SHA256SUMS" ]]; then
-    return
+    if [[ "${ALLOW_UNVERIFIED_LEGACY_BACKUP:-false}" != "true" ]]; then
+      echo "Missing required restore source: ${backup_dir}/SHA256SUMS" >&2
+      echo "Set ALLOW_UNVERIFIED_LEGACY_BACKUP=true only for a separately verified historical package" >&2
+      exit 1
+    fi
+    echo "WARNING: restoring an unverified historical package by explicit request" >&2
+    return 0
   fi
 
   (
@@ -174,7 +191,7 @@ quote_env_value() {
   printf "'"
 }
 
-seed_newapi_env_from_backup() {
+seed_new_api_env_from_backup() {
   local runtime_archive
   local runtime_format
 
@@ -200,10 +217,14 @@ seed_newapi_env_from_backup() {
   if [[ "$runtime_format" == "current" ]]; then
     set_env_if_missing_or_blank NEW_API_HOST "$(dotenv_value "$runtime_env" NEW_API_HOST true)"
     set_env_if_missing_or_blank NEW_API_IMAGE_TAG "$(dotenv_value "$runtime_env" NEW_API_IMAGE_TAG true)"
-    set_env_if_missing_or_blank NEWAPI_POSTGRES_USER "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_USER true)"
-    set_env_if_missing_or_blank NEWAPI_POSTGRES_DB "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_DB true)"
-    set_env_if_missing_or_blank NEWAPI_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_PASSWORD true)"
-    set_env_if_missing_or_blank NEWAPI_REDIS_PASSWORD "$(dotenv_value "$runtime_env" NEWAPI_REDIS_PASSWORD true)"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_USER "$(dotenv_value "$runtime_env" NEW_API_POSTGRES_USER true)"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_DB "$(dotenv_value "$runtime_env" NEW_API_POSTGRES_DB true)"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" NEW_API_POSTGRES_PASSWORD true)"
+    set_env_if_missing_or_blank NEW_API_REDIS_PASSWORD "$(dotenv_value "$runtime_env" NEW_API_REDIS_PASSWORD true)"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_USER "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_USER true)"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_DB "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_DB true)"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_PASSWORD true)"
+    set_env_if_missing_or_blank NEW_API_REDIS_PASSWORD "$(dotenv_value "$runtime_env" NEWAPI_REDIS_PASSWORD true)"
     set_env_if_missing_or_blank NEW_API_SESSION_SECRET "$(dotenv_value "$runtime_env" NEW_API_SESSION_SECRET true)"
     set_env_if_missing_or_blank NEW_API_CRYPTO_SECRET "$(dotenv_value "$runtime_env" NEW_API_CRYPTO_SECRET true)"
     return
@@ -211,15 +232,15 @@ seed_newapi_env_from_backup() {
 
   set_env_if_missing_or_blank NEW_API_HOST "$(dotenv_value "$runtime_env" AI_HOST true)"
   set_env_if_missing_or_blank NEW_API_IMAGE_TAG "$(dotenv_value "$runtime_env" NEW_API_IMAGE_TAG true)"
-  set_env_if_missing_or_blank NEWAPI_POSTGRES_USER "$(dotenv_value "$runtime_env" POSTGRES_USER true)"
-  set_env_if_missing_or_blank NEWAPI_POSTGRES_DB "$(dotenv_value "$runtime_env" POSTGRES_DB true)"
-  set_env_if_missing_or_blank NEWAPI_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" POSTGRES_PASSWORD true)"
-  set_env_if_missing_or_blank NEWAPI_REDIS_PASSWORD "$(dotenv_value "$runtime_env" REDIS_PASSWORD true)"
+  set_env_if_missing_or_blank NEW_API_POSTGRES_USER "$(dotenv_value "$runtime_env" POSTGRES_USER true)"
+  set_env_if_missing_or_blank NEW_API_POSTGRES_DB "$(dotenv_value "$runtime_env" POSTGRES_DB true)"
+  set_env_if_missing_or_blank NEW_API_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" POSTGRES_PASSWORD true)"
+  set_env_if_missing_or_blank NEW_API_REDIS_PASSWORD "$(dotenv_value "$runtime_env" REDIS_PASSWORD true)"
   set_env_if_missing_or_blank NEW_API_SESSION_SECRET "$(dotenv_value "$runtime_env" NEW_API_SESSION_SECRET true)"
   set_env_if_missing_or_blank NEW_API_CRYPTO_SECRET "$(dotenv_value "$runtime_env" NEW_API_CRYPTO_SECRET true)"
 }
 
-load_newapi_env() {
+load_new_api_env() {
   local env_file="${deployment_dir}/.env"
   local required_name
   local required_value
@@ -227,8 +248,8 @@ load_newapi_env() {
   python3 "$dotenv_reader" --validate "$env_file"
   for required_name in \
     NEW_API_HOST NEW_API_IMAGE_TAG \
-    NEWAPI_POSTGRES_USER NEWAPI_POSTGRES_DB \
-    NEWAPI_POSTGRES_PASSWORD NEWAPI_REDIS_PASSWORD \
+    NEW_API_POSTGRES_USER NEW_API_POSTGRES_DB \
+    NEW_API_POSTGRES_PASSWORD NEW_API_REDIS_PASSWORD \
     NEW_API_SESSION_SECRET NEW_API_CRYPTO_SECRET; do
     required_value="$(dotenv_value "$env_file" "$required_name" true)"
     if [[ -z "$required_value" ]]; then
@@ -237,8 +258,8 @@ load_newapi_env() {
     fi
   done
 
-  NEWAPI_POSTGRES_USER="$(dotenv_value "$env_file" NEWAPI_POSTGRES_USER)"
-  NEWAPI_POSTGRES_DB="$(dotenv_value "$env_file" NEWAPI_POSTGRES_DB)"
+  NEW_API_POSTGRES_USER="$(dotenv_value "$env_file" NEW_API_POSTGRES_USER)"
+  NEW_API_POSTGRES_DB="$(dotenv_value "$env_file" NEW_API_POSTGRES_DB)"
 }
 
 compose() {
@@ -252,10 +273,7 @@ compose() {
   done
   (
     cd "$deployment_dir"
-    "${clean_env[@]}" docker compose \
-      -f docker-compose.yml \
-      -f docker-compose.newapi.yml \
-      "$@"
+    "${clean_env[@]}" docker compose "$@"
   )
 }
 
@@ -310,9 +328,9 @@ restore_volume_dir() {
 wait_for_postgres() {
   local attempt
   for ((attempt = 1; attempt <= 30; attempt++)); do
-    if compose exec -T newapi-postgres pg_isready \
-      -U "${NEWAPI_POSTGRES_USER}" \
-      -d "${NEWAPI_POSTGRES_DB}" >/dev/null 2>&1; then
+    if compose exec -T new-api-postgres pg_isready \
+      -U "${NEW_API_POSTGRES_USER}" \
+      -d "${NEW_API_POSTGRES_DB}" >/dev/null 2>&1; then
       return
     fi
     sleep 2
@@ -323,30 +341,41 @@ wait_for_postgres() {
 }
 
 verify_checksums
-seed_newapi_env_from_backup
-load_newapi_env
+seed_new_api_env_from_backup
+load_new_api_env
 
-compose stop new-api >/dev/null 2>&1 || true
-compose stop newapi-postgres >/dev/null 2>&1 || true
-compose stop newapi-redis >/dev/null 2>&1 || true
+for service in new-api new-api-postgres new-api-redis; do
+  if ! compose stop "$service" >/dev/null; then
+    echo "Failed to stop service before restore: ${service}" >&2
+    exit 1
+  fi
+done
 
-compose create newapi-postgres >/dev/null
-clear_volume_dir newapi-postgres /var/lib/postgresql/data
+running_services="$(compose ps --services --filter status=running)"
+for service in new-api new-api-postgres new-api-redis; do
+  if printf '%s\n' "$running_services" | grep -qx "$service"; then
+    echo "Service is still running; refusing to clear restore volumes: ${service}" >&2
+    exit 1
+  fi
+done
 
-compose create newapi-redis >/dev/null
-restore_volume_dir newapi-redis /data "${backup_dir}/redis-data"
+compose create new-api-postgres >/dev/null
+clear_volume_dir new-api-postgres /var/lib/postgresql/data
 
-compose up -d newapi-postgres
+compose create new-api-redis >/dev/null
+restore_volume_dir new-api-redis /data "$new_api_redis_data"
+
+compose up -d new-api-postgres
 wait_for_postgres
-compose exec -T newapi-postgres pg_restore \
-  -U "${NEWAPI_POSTGRES_USER}" \
-  -d "${NEWAPI_POSTGRES_DB}" \
+compose exec -T new-api-postgres pg_restore \
+  -U "${NEW_API_POSTGRES_USER}" \
+  -d "${NEW_API_POSTGRES_DB}" \
   --clean \
   --if-exists \
   --no-owner \
-  < "${backup_dir}/newapi-postgres.dump"
+  < "$new_api_postgres_dump"
 
-compose up -d newapi-redis
+compose up -d new-api-redis
 compose up -d new-api
 
 echo "New API-only restore completed from ${backup_package}"

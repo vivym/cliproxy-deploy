@@ -614,7 +614,7 @@ New API fork 为 integration router 增加独立内部 listener，例如 `0.0.0.
 
 Controller 通过 `lark-integration` Docker network 访问 `http://new-api:3001`。不能只依赖“不给内部 path 单独创建 router”，因为现有 New API 的 `Host(ai.x2r.store)` catch-all 会把同一 public listener 上的所有 path 都暴露出去。
 
-Docker 端口不能按 network 单独附着：监听 `0.0.0.0:3001` 后，同一 New API 容器连接的其他容器网络也能到达该端口。因此安全边界是“未发布、未路由 + 专用 bearer auth”，而不是声称只有 `lark-integration` 可达。生产验收必须从 proxy/backend 同网容器验证未授权请求返回 `401`。如果未来要求严格的网络级单一可达性，应改为共享 Unix socket、独立 sidecar 或明确的容器防火墙规则。
+Docker 端口不能按 network 单独附着：监听 `0.0.0.0:3001` 后，同一 New API 容器连接的其他容器网络也能到达该端口。因此安全边界是“未发布、未路由 + 专用 bearer auth”，而不是声称只有 `lark-integration` 可达。生产验收必须从 `edge` / `new-api-data` 同网容器验证未授权请求返回 `401`。如果未来要求严格的网络级单一可达性，应改为共享 Unix socket、独立 sidecar 或明确的容器防火墙规则。
 
 Controller 使用专用窄权限凭证：
 
@@ -1147,36 +1147,36 @@ Lark 的审批订阅接口目前要求 `approval:approval` 或 `approval:definit
 
 ## 部署拓扑
 
-在 `docker-compose.newapi.yml` 增加 `lark-quota-controller`，并把自定义 New API fork 镜像固定到不可变 tag 或 digest。
+在根目录唯一的 `docker-compose.yml` 中增加 `lark-quota-controller`，并把自定义 New API fork 镜像固定到不可变 tag 或 digest。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
 
 网络：
 
 ```text
-sub2api-proxy:
+edge (new-api-edge):
   traefik
   new-api
   lark-quota-controller
 
-newapi-backend:
+new-api-data:
   new-api
-  postgres
-  redis
+  new-api-postgres
+  new-api-redis
 
-lark-integration:
+lark-integration (new-api-lark-integration):
   new-api
   lark-quota-controller
 ```
 
 约束：
 
-- Controller 不加入 `newapi-backend`。
+- Controller 不加入 `new-api-data`。
 - Controller 不获得 New API Postgres 或 Redis 密码。
 - `lark-integration` 不发布 host port。
-- Controller 通过 `sub2api-proxy` 获得对 Lark API 的出站网络。
+- Controller 通过 `edge` 获得对 Lark API 的出站网络。
 - Traefik 只把三个 Lark public path 路由到 Controller。
 - `/internal/*` 和 New API `/api/integrations/v1/*` 都不配置公网 router。
 - New API `:3001` 不 `publish` host port，也不加入 Traefik service labels；由于进程监听 `0.0.0.0:3001`，它仍可被该容器所在的所有 Docker network 访问，专用 bearer auth 是必需边界。
-- 部署验收从 `sub2api-proxy` 和 `newapi-backend` 上的非 Controller 容器主动请求 `:3001`，确认无凭证为 `401`、公网没有 route；如需网络级隔离，再增加容器防火墙、Unix socket 或独立 sidecar。
+- 部署验收从 `edge` 和 `new-api-data` 上的非 Controller 容器主动请求 `:3001`，确认无凭证为 `401`、公网没有 route；如需网络级隔离，再增加容器防火墙、Unix socket 或独立 sidecar。
 
 Traefik 路由需要比 New API catch-all 更高优先级：
 
@@ -1479,8 +1479,8 @@ New API 检查：
 
 ### WP4：部署和运维
 
-- 修改 `docker-compose.newapi.yml`。
-- 增加 `lark-integration` network、Traefik path router 和 Controller volume。
+- 修改根目录唯一的 `docker-compose.yml`，不引入 overlay 或第二套部署入口。
+- 增加显式命名为 `new-api-lark-integration` 的 `lark-integration` network、Traefik path router 和 Controller volume。
 - 固定 New API fork 和 Controller image digest。
 - 扩展 `.env.example`，但不提交任何 secret。
 - 扩展带 quiesce barrier、receipt 和同包校验的 backup、restore 和 verify 脚本。

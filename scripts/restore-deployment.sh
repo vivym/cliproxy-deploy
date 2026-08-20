@@ -35,12 +35,10 @@ if [[ "$deployment_dir" == "/" ]]; then
   echo "Refusing to restore with the filesystem root as DEPLOYMENT_DIR" >&2
   exit 1
 fi
-for required_file in .env docker-compose.yml docker-compose.newapi.yml; do
-  if [[ ! -f "${deployment_dir}/${required_file}" ]]; then
-    echo "Missing required deployment file: ${deployment_dir}/${required_file}" >&2
-    exit 1
-  fi
-done
+if [[ ! -f "${deployment_dir}/docker-compose.yml" ]]; then
+  echo "Missing required deployment file: ${deployment_dir}/docker-compose.yml" >&2
+  exit 1
+fi
 
 restore_tmp="$(mktemp -d)"
 backup_dir="${restore_tmp}/backup"
@@ -90,14 +88,30 @@ tar -xzf "$backup_package" -C "$backup_dir"
 for required_path in \
   deployment-runtime.tgz \
   sub2api-postgres.dump \
-  newapi-postgres.dump \
-  sub2api-redis-data \
-  redis-data; do
+  sub2api-redis-data; do
   if [[ ! -e "${backup_dir}/${required_path}" ]]; then
     echo "Missing required restore source: ${backup_dir}/${required_path}" >&2
     exit 1
   fi
 done
+
+if [[ -f "${backup_dir}/new-api-postgres.dump" ]]; then
+  new_api_postgres_dump="${backup_dir}/new-api-postgres.dump"
+elif [[ -f "${backup_dir}/newapi-postgres.dump" ]]; then
+  new_api_postgres_dump="${backup_dir}/newapi-postgres.dump"
+else
+  echo "Missing required restore source: ${backup_dir}/new-api-postgres.dump" >&2
+  exit 1
+fi
+
+if [[ -d "${backup_dir}/new-api-redis-data" ]]; then
+  new_api_redis_data="${backup_dir}/new-api-redis-data"
+elif [[ -d "${backup_dir}/redis-data" ]]; then
+  new_api_redis_data="${backup_dir}/redis-data"
+else
+  echo "Missing required restore source: ${backup_dir}/new-api-redis-data" >&2
+  exit 1
+fi
 
 verify_checksums() {
   if [[ ! -f "${backup_dir}/SHA256SUMS" ]]; then
@@ -118,18 +132,129 @@ verify_checksums() {
 verify_checksums
 validate_archive "${backup_dir}/deployment-runtime.tgz" "deployment runtime"
 tar -xzf "${backup_dir}/deployment-runtime.tgz" -C "$runtime_dir"
-for required_path in .env data letsencrypt; do
+for required_path in .env letsencrypt; do
   if [[ ! -e "${runtime_dir}/${required_path}" ]]; then
     echo "Missing required runtime restore source: ${runtime_dir}/${required_path}" >&2
     exit 1
   fi
 done
 
+if [[ -d "${runtime_dir}/sub2api-data" ]]; then
+  runtime_sub2api_data="${runtime_dir}/sub2api-data"
+elif [[ -d "${runtime_dir}/data" ]]; then
+  runtime_sub2api_data="${runtime_dir}/data"
+else
+  echo "Missing required runtime restore source: ${runtime_dir}/sub2api-data" >&2
+  exit 1
+fi
+
 dotenv_value() {
   local env_file="$1"
   local key="$2"
 
   python3 "$dotenv_reader" "$env_file" "$key"
+}
+
+optional_dotenv_value() {
+  local env_file="$1"
+  local key="$2"
+
+  python3 "$dotenv_reader" --allow-missing "$env_file" "$key"
+}
+
+quote_env_value() {
+  local value="$1"
+  local char
+  local index
+
+  if [[ "$value" =~ ^[A-Za-z0-9_./:@%+=,-]+$ ]]; then
+    printf '%s' "$value"
+    return
+  fi
+
+  printf "'"
+  for ((index = 0; index < ${#value}; index++)); do
+    char="${value:index:1}"
+    case "$char" in
+      "'"|"\\") printf '\\%s' "$char" ;;
+      *) printf '%s' "$char" ;;
+    esac
+  done
+  printf "'"
+}
+
+append_env_value() {
+  local env_file="$1"
+  local key="$2"
+  local value="$3"
+
+  if [[ -n "$value" ]]; then
+    printf '%s=%s\n' "$key" "$(quote_env_value "$value")" >> "$env_file"
+  fi
+}
+
+normalize_runtime_env() {
+  local env_file="$1"
+  local normalized_env="${env_file}.normalized"
+  local edge_subnet
+  local new_api_data_subnet
+  local sub2api_data_subnet
+  local backup_dir_value
+  local sub2api_postgres_user
+  local sub2api_postgres_db
+  local sub2api_postgres_password
+  local sub2api_redis_password
+  local new_api_postgres_user
+  local new_api_postgres_db
+  local new_api_postgres_password
+  local new_api_redis_password
+
+  edge_subnet="${EDGE_SUBNET:-$(optional_dotenv_value "$env_file" EDGE_SUBNET)}"
+  sub2api_data_subnet="${SUB2API_DATA_SUBNET:-$(optional_dotenv_value "$env_file" SUB2API_DATA_SUBNET)}"
+  new_api_data_subnet="${NEW_API_DATA_SUBNET:-$(optional_dotenv_value "$env_file" NEW_API_DATA_SUBNET)}"
+  backup_dir_value="$(optional_dotenv_value "$env_file" BACKUP_DIR)"
+  if [[ "$backup_dir_value" == "/var/backups/sub2api" ]]; then
+    backup_dir_value=/var/backups/new-api
+  fi
+
+  sub2api_postgres_user="$(optional_dotenv_value "$env_file" SUB2API_POSTGRES_USER)"
+  sub2api_postgres_db="$(optional_dotenv_value "$env_file" SUB2API_POSTGRES_DB)"
+  sub2api_postgres_password="$(optional_dotenv_value "$env_file" SUB2API_POSTGRES_PASSWORD)"
+  sub2api_redis_password="$(optional_dotenv_value "$env_file" SUB2API_REDIS_PASSWORD)"
+  new_api_postgres_user="$(optional_dotenv_value "$env_file" NEW_API_POSTGRES_USER)"
+  new_api_postgres_db="$(optional_dotenv_value "$env_file" NEW_API_POSTGRES_DB)"
+  new_api_postgres_password="$(optional_dotenv_value "$env_file" NEW_API_POSTGRES_PASSWORD)"
+  new_api_redis_password="$(optional_dotenv_value "$env_file" NEW_API_REDIS_PASSWORD)"
+
+  sub2api_postgres_user="${sub2api_postgres_user:-$(optional_dotenv_value "$env_file" POSTGRES_USER)}"
+  sub2api_postgres_db="${sub2api_postgres_db:-$(optional_dotenv_value "$env_file" POSTGRES_DB)}"
+  sub2api_postgres_password="${sub2api_postgres_password:-$(optional_dotenv_value "$env_file" POSTGRES_PASSWORD)}"
+  sub2api_redis_password="${sub2api_redis_password:-$(optional_dotenv_value "$env_file" REDIS_PASSWORD)}"
+  new_api_postgres_user="${new_api_postgres_user:-$(optional_dotenv_value "$env_file" NEWAPI_POSTGRES_USER)}"
+  new_api_postgres_db="${new_api_postgres_db:-$(optional_dotenv_value "$env_file" NEWAPI_POSTGRES_DB)}"
+  new_api_postgres_password="${new_api_postgres_password:-$(optional_dotenv_value "$env_file" NEWAPI_POSTGRES_PASSWORD)}"
+  new_api_redis_password="${new_api_redis_password:-$(optional_dotenv_value "$env_file" NEWAPI_REDIS_PASSWORD)}"
+
+  awk '
+    !/^[[:space:]]*(SUB2API_HOST|SUB2API_TEST_API_KEY|SUB2API_PROXY_SUBNET|SUB2API_BACKEND_SUBNET|POSTGRES_USER|POSTGRES_DB|POSTGRES_PASSWORD|REDIS_PASSWORD|NEWAPI_POSTGRES_USER|NEWAPI_POSTGRES_DB|NEWAPI_POSTGRES_PASSWORD|NEWAPI_REDIS_PASSWORD|SUB2API_POSTGRES_USER|SUB2API_POSTGRES_DB|SUB2API_POSTGRES_PASSWORD|SUB2API_REDIS_PASSWORD|NEW_API_POSTGRES_USER|NEW_API_POSTGRES_DB|NEW_API_POSTGRES_PASSWORD|NEW_API_REDIS_PASSWORD|EDGE_SUBNET|SUB2API_DATA_SUBNET|NEW_API_DATA_SUBNET|BACKUP_DIR)[[:space:]]*=/
+  ' "$env_file" > "$normalized_env"
+
+  printf '\n' >> "$normalized_env"
+  append_env_value "$normalized_env" SUB2API_POSTGRES_USER "$sub2api_postgres_user"
+  append_env_value "$normalized_env" SUB2API_POSTGRES_DB "$sub2api_postgres_db"
+  append_env_value "$normalized_env" SUB2API_POSTGRES_PASSWORD "$sub2api_postgres_password"
+  append_env_value "$normalized_env" SUB2API_REDIS_PASSWORD "$sub2api_redis_password"
+  append_env_value "$normalized_env" NEW_API_POSTGRES_USER "$new_api_postgres_user"
+  append_env_value "$normalized_env" NEW_API_POSTGRES_DB "$new_api_postgres_db"
+  append_env_value "$normalized_env" NEW_API_POSTGRES_PASSWORD "$new_api_postgres_password"
+  append_env_value "$normalized_env" NEW_API_REDIS_PASSWORD "$new_api_redis_password"
+  append_env_value "$normalized_env" EDGE_SUBNET "$edge_subnet"
+  append_env_value "$normalized_env" SUB2API_DATA_SUBNET "$sub2api_data_subnet"
+  append_env_value "$normalized_env" NEW_API_DATA_SUBNET "$new_api_data_subnet"
+  append_env_value "$normalized_env" BACKUP_DIR "$backup_dir_value"
+
+  chmod 600 "$normalized_env"
+  mv "$normalized_env" "$env_file"
 }
 
 compose_with_env_file() {
@@ -147,7 +272,6 @@ compose_with_env_file() {
   if [[ -n "$env_file" ]]; then
     compose_command+=(--env-file "$env_file")
   fi
-  compose_command+=(-f docker-compose.yml -f docker-compose.newapi.yml)
   (
     cd "$deployment_dir"
     "${clean_env[@]}" "${compose_command[@]}" "$@"
@@ -156,12 +280,14 @@ compose_with_env_file() {
 
 runtime_env="${runtime_dir}/.env"
 python3 "$dotenv_reader" --validate "$runtime_env"
+normalize_runtime_env "$runtime_env"
+python3 "$dotenv_reader" --validate "$runtime_env"
 compose_with_env_file "$runtime_env" config --quiet
 
-POSTGRES_USER="$(dotenv_value "$runtime_env" POSTGRES_USER)"
-POSTGRES_DB="$(dotenv_value "$runtime_env" POSTGRES_DB)"
-NEWAPI_POSTGRES_USER="$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_USER)"
-NEWAPI_POSTGRES_DB="$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_DB)"
+SUB2API_POSTGRES_USER="$(dotenv_value "$runtime_env" SUB2API_POSTGRES_USER)"
+SUB2API_POSTGRES_DB="$(dotenv_value "$runtime_env" SUB2API_POSTGRES_DB)"
+NEW_API_POSTGRES_USER="$(dotenv_value "$runtime_env" NEW_API_POSTGRES_USER)"
+NEW_API_POSTGRES_DB="$(dotenv_value "$runtime_env" NEW_API_POSTGRES_DB)"
 
 require_env() {
   local name="$1"
@@ -173,8 +299,8 @@ require_env() {
 }
 
 for required_env in \
-  POSTGRES_USER POSTGRES_DB \
-  NEWAPI_POSTGRES_USER NEWAPI_POSTGRES_DB; do
+  SUB2API_POSTGRES_USER SUB2API_POSTGRES_DB \
+  NEW_API_POSTGRES_USER NEW_API_POSTGRES_DB; do
   require_env "$required_env"
 done
 
@@ -249,42 +375,54 @@ wait_for_postgres() {
   exit 1
 }
 
-compose down
+compose_with_env_file "$runtime_env" down
 
 rm -f "${deployment_dir}/.env"
-rm -rf "${deployment_dir}/data" "${deployment_dir}/letsencrypt"
+rm -rf \
+  "${deployment_dir}/data" \
+  "${deployment_dir}/sub2api-data" \
+  "${deployment_dir}/letsencrypt"
 cp -a "${runtime_dir}/.env" "${deployment_dir}/.env"
-cp -a "${runtime_dir}/data" "${deployment_dir}/data"
+cp -a "$runtime_sub2api_data" "${deployment_dir}/sub2api-data"
 cp -a "${runtime_dir}/letsencrypt" "${deployment_dir}/letsencrypt"
+chmod 600 "${deployment_dir}/.env"
 chmod 600 "${deployment_dir}/letsencrypt/acme.json" 2>/dev/null || true
 
-rm -rf "${deployment_dir}/postgres_data" "${deployment_dir}/redis_data"
-mkdir -p "${deployment_dir}/postgres_data" "${deployment_dir}/redis_data"
-cp -a "${backup_dir}/sub2api-redis-data/." "${deployment_dir}/redis_data/"
+rm -rf \
+  "${deployment_dir}/postgres_data" \
+  "${deployment_dir}/redis_data" \
+  "${deployment_dir}/sub2api-postgres-data" \
+  "${deployment_dir}/sub2api-redis-data"
+mkdir -p \
+  "${deployment_dir}/sub2api-postgres-data" \
+  "${deployment_dir}/sub2api-redis-data"
+cp -a \
+  "${backup_dir}/sub2api-redis-data/." \
+  "${deployment_dir}/sub2api-redis-data/"
 
-compose create newapi-postgres newapi-redis >/dev/null
-clear_service_volume newapi-postgres /var/lib/postgresql/data
-replace_service_volume newapi-redis /data "${backup_dir}/redis-data"
+compose create new-api-postgres new-api-redis >/dev/null
+clear_service_volume new-api-postgres /var/lib/postgresql/data
+replace_service_volume new-api-redis /data "$new_api_redis_data"
 
-compose up -d postgres newapi-postgres
-wait_for_postgres postgres "$POSTGRES_USER" "$POSTGRES_DB"
-wait_for_postgres newapi-postgres "$NEWAPI_POSTGRES_USER" "$NEWAPI_POSTGRES_DB"
+compose up -d sub2api-postgres new-api-postgres
+wait_for_postgres sub2api-postgres "$SUB2API_POSTGRES_USER" "$SUB2API_POSTGRES_DB"
+wait_for_postgres new-api-postgres "$NEW_API_POSTGRES_USER" "$NEW_API_POSTGRES_DB"
 
-compose exec -T postgres pg_restore \
-  -U "$POSTGRES_USER" \
-  -d "$POSTGRES_DB" \
+compose exec -T sub2api-postgres pg_restore \
+  -U "$SUB2API_POSTGRES_USER" \
+  -d "$SUB2API_POSTGRES_DB" \
   --clean \
   --if-exists \
   --no-owner \
   < "${backup_dir}/sub2api-postgres.dump"
 
-compose exec -T newapi-postgres pg_restore \
-  -U "$NEWAPI_POSTGRES_USER" \
-  -d "$NEWAPI_POSTGRES_DB" \
+compose exec -T new-api-postgres pg_restore \
+  -U "$NEW_API_POSTGRES_USER" \
+  -d "$NEW_API_POSTGRES_DB" \
   --clean \
   --if-exists \
   --no-owner \
-  < "${backup_dir}/newapi-postgres.dump"
+  < "$new_api_postgres_dump"
 
 compose up -d
 

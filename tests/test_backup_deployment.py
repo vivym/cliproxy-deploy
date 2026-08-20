@@ -6,6 +6,7 @@ import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "backup-deployment.sh"
+LEGACY_SCRIPT = ROOT / "scripts" / "migrations" / "backup-legacy-deployment.sh"
 DOTENV_READER = ROOT / "scripts" / "read-dotenv.py"
 
 
@@ -21,26 +22,43 @@ class BackupDeploymentTests(unittest.TestCase):
         )
         return backup_script
 
+    def write_legacy_script_copy(self, root):
+        backup_script = self.write_script_copy(root)
+        migrations = root / "scripts" / "migrations"
+        migrations.mkdir()
+        legacy_script = migrations / "backup-legacy-deployment.sh"
+        legacy_script.write_text(
+            LEGACY_SCRIPT.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        legacy_script.chmod(0o755)
+        return backup_script, legacy_script
+
     def prepare_runtime(self, root):
         (root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
-        (root / "docker-compose.newapi.yml").write_text("services: {}\n", encoding="utf-8")
         (root / ".env").write_text(
             "\n".join(
                 [
-                    "POSTGRES_USER=sub2api",
-                    "POSTGRES_DB=sub2api",
-                    "REDIS_PASSWORD=sub2api-redis",
-                    "NEWAPI_POSTGRES_USER=newapi",
-                    "NEWAPI_POSTGRES_DB=newapi",
-                    "NEWAPI_REDIS_PASSWORD=newapi-redis",
+                    "SUB2API_POSTGRES_USER=sub2api",
+                    "SUB2API_POSTGRES_DB=sub2api",
+                    "SUB2API_REDIS_PASSWORD=sub2api-redis",
+                    "NEW_API_POSTGRES_USER=newapi",
+                    "NEW_API_POSTGRES_DB=newapi",
+                    "NEW_API_REDIS_PASSWORD=new-api-redis",
                 ]
             )
             + "\n",
             encoding="utf-8",
         )
-        for directory in ["data", "postgres_data", "redis_data", "letsencrypt"]:
+        for directory in [
+            "sub2api-data",
+            "sub2api-postgres-data",
+            "sub2api-redis-data",
+            "letsencrypt",
+        ]:
             (root / directory).mkdir()
-        (root / "data" / "config.yaml").write_text("runtime: true\n", encoding="utf-8")
+        (root / "sub2api-data" / "config.yaml").write_text(
+            "runtime: true\n", encoding="utf-8"
+        )
 
     def test_backup_covers_both_application_state_domains(self):
         text = SCRIPT.read_text(encoding="utf-8")
@@ -52,30 +70,39 @@ class BackupDeploymentTests(unittest.TestCase):
         )
         self.assertIn('deployment_dir="${1:-${script_repo_root}}"', text)
         self.assertIn("sub2api-postgres.dump", text)
-        self.assertIn("newapi-postgres.dump", text)
+        self.assertIn("new-api-postgres.dump", text)
         self.assertIn("sub2api-redis-data", text)
-        self.assertIn("redis-data", text)
+        self.assertIn("new-api-redis-data", text)
         self.assertIn("deployment-runtime.tgz", text)
         self.assertIn("SHA256SUMS", text)
         for service in ["traefik", "sub2api", "new-api"]:
             self.assertIn(f"stop_running_service {service}", text)
         self.assertLess(
-            text.index("compose exec -T redis redis-cli SAVE"),
-            text.index("stop_running_service redis"),
+            text.index('compose exec -T "$sub2api_redis_service" redis-cli SAVE'),
+            text.index('stop_running_service "$sub2api_redis_service"'),
         )
         self.assertLess(
-            text.index("stop_running_service redis"),
-            text.index("compose cp redis:/data"),
+            text.index('stop_running_service "$sub2api_redis_service"'),
+            text.index('compose cp "${sub2api_redis_service}:/data"'),
         )
         self.assertLess(
-            text.index("compose exec -T newapi-redis redis-cli"),
-            text.index("stop_running_service newapi-redis"),
+            text.index('compose exec -T "$new_api_redis_service" redis-cli'),
+            text.index('stop_running_service "$new_api_redis_service"'),
         )
         self.assertLess(
-            text.index("stop_running_service newapi-redis"),
-            text.index("compose cp newapi-redis:/data"),
+            text.index('stop_running_service "$new_api_redis_service"'),
+            text.index('compose cp "${new_api_redis_service}:/data"'),
         )
-        for legacy_term in ["cliproxyapi", "cpa-usage-keeper", "config.yaml", "auths"]:
+        for legacy_term in [
+            "cliproxyapi",
+            "cpa-usage-keeper",
+            "config.yaml",
+            "auths",
+            "docker-compose.newapi.yml",
+            "NEWAPI_",
+            "dotenv_value POSTGRES_USER)",
+            "dotenv_value REDIS_PASSWORD)",
+        ]:
             self.assertNotIn(legacy_term, text)
 
     def test_backup_package_is_complete_and_write_services_are_quiesced(self):
@@ -97,27 +124,27 @@ class BackupDeploymentTests(unittest.TestCase):
 set -euo pipefail
 printf '%s\\n' "$*" >> {calls_file}
 case "$*" in
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml ps --services --filter status=running")
-    printf '%s\\n' traefik new-api sub2api redis newapi-redis
+  "compose ps --services --filter status=running")
+    printf '%s\\n' traefik new-api sub2api sub2api-redis new-api-redis
     ;;
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml stop "*|\
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml start "*)
+  "compose stop "*|\
+  "compose start "*)
     ;;
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml exec -T postgres pg_dump "*)
+  "compose exec -T sub2api-postgres pg_dump "*)
     printf 'sub2api postgres dump\\n'
     ;;
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml exec -T newapi-postgres pg_dump "*)
+  "compose exec -T new-api-postgres pg_dump "*)
     printf 'newapi postgres dump\\n'
     ;;
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml exec -T redis redis-cli SAVE"|\
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml exec -T newapi-redis redis-cli "*)
+  "compose exec -T sub2api-redis redis-cli SAVE"|\
+  "compose exec -T new-api-redis redis-cli "*)
     ;;
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml cp redis:/data "*)
+  "compose cp sub2api-redis:/data "*)
     destination="${{@: -1}}"
     mkdir -p "$destination"
     printf 'sub2api redis\\n' > "$destination/dump.rdb"
     ;;
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml cp newapi-redis:/data "*)
+  "compose cp new-api-redis:/data "*)
     destination="${{@: -1}}"
     mkdir -p "$destination"
     printf 'newapi redis\\n' > "$destination/dump.rdb"
@@ -154,9 +181,9 @@ esac
 
             for relative_path in [
                 "sub2api-postgres.dump",
-                "newapi-postgres.dump",
+                "new-api-postgres.dump",
                 "sub2api-redis-data/dump.rdb",
-                "redis-data/dump.rdb",
+                "new-api-redis-data/dump.rdb",
                 "deployment-runtime.tgz",
                 "SHA256SUMS",
             ]:
@@ -168,11 +195,11 @@ esac
             )
             for service in ["traefik", "new-api", "sub2api"]:
                 stop_index = calls.index(
-                    f"compose -f docker-compose.yml -f docker-compose.newapi.yml stop {service}"
+                    f"compose stop {service}"
                 )
                 self.assertLess(stop_index, snapshot_index)
                 self.assertIn(
-                    f"compose -f docker-compose.yml -f docker-compose.newapi.yml start {service}",
+                    f"compose start {service}",
                     calls,
                 )
 
@@ -193,13 +220,13 @@ esac
 set -euo pipefail
 printf '%s\\n' "$*" >> {calls_file}
 case "$*" in
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml ps --services --filter status=running")
+  "compose ps --services --filter status=running")
     printf '%s\\n' new-api sub2api
     ;;
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml stop "*|\
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml start "*)
+  "compose stop "*|\
+  "compose start "*)
     ;;
-  "compose -f docker-compose.yml -f docker-compose.newapi.yml exec -T postgres pg_dump "*)
+  "compose exec -T sub2api-postgres pg_dump "*)
     echo "pg_dump failed" >&2
     exit 42
     ;;
@@ -235,6 +262,109 @@ esac
             self.assertIn("start sub2api", calls)
             self.assertNotIn("start traefik", calls)
             self.assertEqual(list(backup_root.glob("*.partial")), [])
+
+    def test_legacy_mode_adapts_the_source_compose_and_service_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            _, legacy_script = self.write_legacy_script_copy(root)
+            deployment = root / "legacy"
+            deployment.mkdir()
+            self.prepare_runtime(deployment)
+            for current_name, legacy_name in [
+                ("sub2api-data", "data"),
+                ("sub2api-postgres-data", "postgres_data"),
+                ("sub2api-redis-data", "redis_data"),
+            ]:
+                (deployment / current_name).rename(deployment / legacy_name)
+            (deployment / ".env").write_text(
+                "\n".join(
+                    [
+                        "POSTGRES_USER=sub2api",
+                        "POSTGRES_DB=sub2api",
+                        "REDIS_PASSWORD=sub2api-redis",
+                        "NEWAPI_POSTGRES_USER=newapi",
+                        "NEWAPI_POSTGRES_DB=newapi",
+                        "NEWAPI_REDIS_PASSWORD=newapi-redis",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (deployment / "docker-compose.newapi.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+if [[ "$*" == *" ps --services --filter status=running" ]]; then
+  printf '%s\\n' traefik new-api sub2api redis newapi-redis
+  exit 0
+fi
+if [[ "$*" == *" stop "* || "$*" == *" start "* ]]; then
+  exit 0
+fi
+if [[ "$*" == *" exec -T postgres pg_dump "* ]]; then
+  printf 'legacy sub2api postgres dump\\n'
+  exit 0
+fi
+if [[ "$*" == *" exec -T newapi-postgres pg_dump "* ]]; then
+  printf 'legacy newapi postgres dump\\n'
+  exit 0
+fi
+if [[ "$*" == *" redis-cli "* ]]; then
+  exit 0
+fi
+if [[ "$*" == *" cp redis:/data "* || "$*" == *" cp newapi-redis:/data "* ]]; then
+  destination="${{@: -1}}"
+  mkdir -p "$destination"
+  printf 'redis snapshot\\n' > "$destination/dump.rdb"
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(legacy_script), str(deployment)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = calls_file.read_text(encoding="utf-8")
+            self.assertIn(
+                "compose -f docker-compose.yml -f docker-compose.newapi.yml", calls
+            )
+            self.assertIn("exec -T postgres pg_dump", calls)
+            self.assertIn("exec -T redis redis-cli SAVE", calls)
+            prefix = "Backup package written to "
+            self.assertTrue(result.stdout.startswith(prefix), result.stdout)
+            package = result.stdout.strip()[len(prefix) :]
+            archive = subprocess.run(
+                ["tar", "-tzf", package],
+                text=True,
+                capture_output=True,
+                check=True,
+            ).stdout.splitlines()
+            self.assertIn("./new-api-postgres.dump", archive)
+            self.assertIn("./new-api-redis-data/dump.rdb", archive)
 
     def test_existing_backup_lock_fails_before_docker(self):
         with tempfile.TemporaryDirectory() as tmp:

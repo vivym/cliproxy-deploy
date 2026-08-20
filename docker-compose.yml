@@ -1,15 +1,14 @@
-name: sub2api
+name: new-api
 
 services:
   traefik:
     image: traefik:v3.6
-    container_name: sub2api-traefik
     restart: unless-stopped
     command:
       - "--api.dashboard=false"
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
-      - "--providers.docker.network=sub2api-proxy"
+      - "--providers.docker.network=new-api-edge"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
@@ -29,35 +28,33 @@ services:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./letsencrypt:/letsencrypt"
     networks:
-      - proxy
+      - edge
 
-  postgres:
+  sub2api-postgres:
     image: postgres:18-alpine
-    container_name: sub2api-postgres
     restart: unless-stopped
     ulimits:
       nofile:
         soft: 100000
         hard: 100000
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${SUB2API_POSTGRES_DB:?set SUB2API_POSTGRES_DB}
+      POSTGRES_USER: ${SUB2API_POSTGRES_USER:?set SUB2API_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${SUB2API_POSTGRES_PASSWORD:?set SUB2API_POSTGRES_PASSWORD}
       PGDATA: /var/lib/postgresql/data
       TZ: ${TZ:-Asia/Shanghai}
     volumes:
-      - "./postgres_data:/var/lib/postgresql/data"
+      - "./sub2api-postgres-data:/var/lib/postgresql/data"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:?set POSTGRES_USER} -d ${POSTGRES_DB:?set POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${SUB2API_POSTGRES_USER:?set SUB2API_POSTGRES_USER} -d ${SUB2API_POSTGRES_DB:?set SUB2API_POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - backend
+      - sub2api-data
 
-  redis:
+  sub2api-redis:
     image: redis:8-alpine
-    container_name: sub2api-redis
     restart: unless-stopped
     ulimits:
       nofile:
@@ -69,12 +66,12 @@ services:
         --save 60 1
         --appendonly yes
         --appendfsync everysec
-        ${REDIS_PASSWORD:+--requirepass "$REDIS_PASSWORD"}'
+        ${SUB2API_REDIS_PASSWORD:+--requirepass "$SUB2API_REDIS_PASSWORD"}'
     volumes:
-      - "./redis_data:/data"
+      - "./sub2api-redis-data:/data"
     environment:
       TZ: ${TZ:-Asia/Shanghai}
-      REDISCLI_AUTH: ${REDIS_PASSWORD:-}
+      REDISCLI_AUTH: ${SUB2API_REDIS_PASSWORD:-}
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -82,23 +79,22 @@ services:
       retries: 5
       start_period: 5s
     networks:
-      - backend
+      - sub2api-data
 
   sub2api:
     image: weishaw/sub2api:${SUB2API_IMAGE_TAG:-latest}
-    container_name: sub2api
     restart: unless-stopped
     ulimits:
       nofile:
         soft: 100000
         hard: 100000
     depends_on:
-      postgres:
+      sub2api-postgres:
         condition: service_healthy
-      redis:
+      sub2api-redis:
         condition: service_healthy
     volumes:
-      - "./data:/app/data"
+      - "./sub2api-data:/app/data"
     expose:
       - "8080"
     environment:
@@ -108,20 +104,20 @@ services:
       SERVER_MODE: ${SERVER_MODE:-release}
       RUN_MODE: ${RUN_MODE:-standard}
       SERVER_FRONTEND_URL: https://${SUB2API_ADMIN_HOST:?set SUB2API_ADMIN_HOST}
-      SERVER_TRUSTED_PROXIES: ${SUB2API_PROXY_SUBNET:-172.31.10.0/24}
-      DATABASE_HOST: postgres
+      SERVER_TRUSTED_PROXIES: ${EDGE_SUBNET:-172.31.20.0/24}
+      DATABASE_HOST: sub2api-postgres
       DATABASE_PORT: 5432
-      DATABASE_USER: ${POSTGRES_USER:?set POSTGRES_USER}
-      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
-      DATABASE_DBNAME: ${POSTGRES_DB:?set POSTGRES_DB}
+      DATABASE_USER: ${SUB2API_POSTGRES_USER:?set SUB2API_POSTGRES_USER}
+      DATABASE_PASSWORD: ${SUB2API_POSTGRES_PASSWORD:?set SUB2API_POSTGRES_PASSWORD}
+      DATABASE_DBNAME: ${SUB2API_POSTGRES_DB:?set SUB2API_POSTGRES_DB}
       DATABASE_SSLMODE: disable
       DATABASE_MAX_OPEN_CONNS: ${DATABASE_MAX_OPEN_CONNS:-50}
       DATABASE_MAX_IDLE_CONNS: ${DATABASE_MAX_IDLE_CONNS:-10}
       DATABASE_CONN_MAX_LIFETIME_MINUTES: ${DATABASE_CONN_MAX_LIFETIME_MINUTES:-30}
       DATABASE_CONN_MAX_IDLE_TIME_MINUTES: ${DATABASE_CONN_MAX_IDLE_TIME_MINUTES:-5}
-      REDIS_HOST: redis
+      REDIS_HOST: sub2api-redis
       REDIS_PORT: 6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+      REDIS_PASSWORD: ${SUB2API_REDIS_PASSWORD:?set SUB2API_REDIS_PASSWORD}
       REDIS_DB: ${REDIS_DB:-0}
       REDIS_POOL_SIZE: ${REDIS_POOL_SIZE:-1024}
       REDIS_MIN_IDLE_CONNS: ${REDIS_MIN_IDLE_CONNS:-10}
@@ -161,34 +157,112 @@ services:
       retries: 3
       start_period: 30s
     networks:
-      - proxy
-      - backend
+      - edge
+      - sub2api-data
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=sub2api-proxy"
+      - "traefik.docker.network=new-api-edge"
       - "traefik.http.services.sub2api.loadbalancer.server.port=8080"
-      - "traefik.http.routers.sub2api-api.rule=Host(`${SUB2API_HOST:?set SUB2API_HOST}`)"
-      - "traefik.http.routers.sub2api-api.entrypoints=websecure"
-      - "traefik.http.routers.sub2api-api.tls=true"
-      - "traefik.http.routers.sub2api-api.tls.certresolver=le"
-      - "traefik.http.routers.sub2api-api.service=sub2api"
-      - "traefik.http.routers.sub2api-admin.rule=Host(`${SUB2API_ADMIN_HOST:?set SUB2API_ADMIN_HOST}`)"
+      - "traefik.http.routers.sub2api-admin.rule=Host(`${SUB2API_ADMIN_HOST:?set SUB2API_ADMIN_HOST}`) && !PathPrefix(`/v1`)"
       - "traefik.http.routers.sub2api-admin.entrypoints=websecure"
       - "traefik.http.routers.sub2api-admin.tls=true"
       - "traefik.http.routers.sub2api-admin.tls.certresolver=le"
       - "traefik.http.routers.sub2api-admin.service=sub2api"
 
+  new-api-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${NEW_API_POSTGRES_DB:?set NEW_API_POSTGRES_DB}
+      POSTGRES_USER: ${NEW_API_POSTGRES_USER:?set NEW_API_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${NEW_API_POSTGRES_PASSWORD:?set NEW_API_POSTGRES_PASSWORD}
+    volumes:
+      - "new-api-postgres-data:/var/lib/postgresql/data"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NEW_API_POSTGRES_USER:?set NEW_API_POSTGRES_USER} -d ${NEW_API_POSTGRES_DB:?set NEW_API_POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - new-api-data
+
+  new-api-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${NEW_API_REDIS_PASSWORD:?set NEW_API_REDIS_PASSWORD}"]
+    volumes:
+      - "new-api-redis-data:/data"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${NEW_API_REDIS_PASSWORD:?set NEW_API_REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - new-api-data
+
+  new-api:
+    image: calciumion/new-api:${NEW_API_IMAGE_TAG:?set NEW_API_IMAGE_TAG}
+    restart: unless-stopped
+    depends_on:
+      new-api-postgres:
+        condition: service_healthy
+      new-api-redis:
+        condition: service_healthy
+      sub2api:
+        condition: service_healthy
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      SQL_DSN: postgresql://${NEW_API_POSTGRES_USER:?set NEW_API_POSTGRES_USER}:${NEW_API_POSTGRES_PASSWORD:?set NEW_API_POSTGRES_PASSWORD}@new-api-postgres:5432/${NEW_API_POSTGRES_DB:?set NEW_API_POSTGRES_DB}
+      REDIS_CONN_STRING: redis://default:${NEW_API_REDIS_PASSWORD:?set NEW_API_REDIS_PASSWORD}@new-api-redis:6379
+      SESSION_SECRET: ${NEW_API_SESSION_SECRET:?set NEW_API_SESSION_SECRET}
+      CRYPTO_SECRET: ${NEW_API_CRYPTO_SECRET:?set NEW_API_CRYPTO_SECRET}
+      MEMORY_CACHE_ENABLED: "true"
+      STREAMING_TIMEOUT: "300"
+      CHANNEL_UPDATE_FREQUENCY: "1440"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:3000/api/status >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    expose:
+      - "3000"
+    networks:
+      - edge
+      - new-api-data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=new-api-edge"
+      - "traefik.http.services.new-api.loadbalancer.server.port=3000"
+      - "traefik.http.routers.new-api.rule=Host(`${NEW_API_HOST:?set NEW_API_HOST}`)"
+      - "traefik.http.routers.new-api.entrypoints=websecure"
+      - "traefik.http.routers.new-api.tls=true"
+      - "traefik.http.routers.new-api.tls.certresolver=le"
+      - "traefik.http.routers.new-api.service=new-api"
+
 networks:
-  proxy:
-    name: sub2api-proxy
+  edge:
+    name: new-api-edge
     driver: bridge
     ipam:
       config:
-        - subnet: ${SUB2API_PROXY_SUBNET:-172.31.10.0/24}
-  backend:
-    name: sub2api-backend
+        - subnet: ${EDGE_SUBNET:-172.31.20.0/24}
+  sub2api-data:
+    name: new-api-sub2api-data
     driver: bridge
     internal: true
     ipam:
       config:
-        - subnet: ${SUB2API_BACKEND_SUBNET:-172.31.11.0/24}
+        - subnet: ${SUB2API_DATA_SUBNET:-172.31.21.0/24}
+  new-api-data:
+    name: new-api-data
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${NEW_API_DATA_SUBNET:-172.31.22.0/24}
+
+volumes:
+  new-api-postgres-data:
+    name: new-api-postgres-data
+  new-api-redis-data:
+    name: new-api-redis-data

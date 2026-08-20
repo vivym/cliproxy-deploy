@@ -8,16 +8,10 @@
 .env
 
 # Deployment runtime state
-/data/
-/postgres_data/
-/redis_data/
+/sub2api-data/
+/sub2api-postgres-data/
+/sub2api-redis-data/
 /letsencrypt/
-
-# Protect ignored runtime state during the one-time server layout migration.
-/sub2api/data/
-/sub2api/postgres_data/
-/sub2api/redis_data/
-/sub2api/letsencrypt/
 
 # Local editor and OS files
 .DS_Store
