@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,6 +18,66 @@ import (
 )
 
 const integrationSecret = "test-only-" + "not-a-real-integration-secret"
+
+func TestLoadIntegrationSecretFileAcceptsOnePrintableToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lark-integration.secret")
+	for name, contents := range map[string]string{
+		"no line ending": integrationSecret,
+		"LF":             integrationSecret + "\n",
+		"CRLF":           integrationSecret + "\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatalf("write integration secret: %v", err)
+			}
+			loaded, err := newapi.LoadIntegrationSecretFile(path)
+			if err != nil {
+				t.Fatalf("load integration secret: %v", err)
+			}
+			if loaded != integrationSecret {
+				t.Fatal("loaded integration secret does not match")
+			}
+		})
+	}
+
+	for name, contents := range map[string]string{
+		"empty":          "",
+		"too short":      strings.Repeat("a", 31),
+		"leading space":  " " + integrationSecret,
+		"trailing space": integrationSecret + " ",
+		"tab":            strings.Repeat("a", 32) + "\t",
+		"bare CR":        integrationSecret + "\r",
+		"multiple lines": integrationSecret + "\n" + strings.Repeat("b", 32),
+		"non ASCII":      strings.Repeat("a", 32) + "中",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+				t.Fatalf("write invalid integration secret: %v", err)
+			}
+			if _, err := newapi.LoadIntegrationSecretFile(path); err == nil ||
+				(contents != "" && strings.Contains(err.Error(), contents)) {
+				t.Fatalf("invalid integration secret error = %v", err)
+			}
+		})
+	}
+}
+
+func TestClientRejectsUnsafeIntegrationSecret(t *testing.T) {
+	for name, secret := range map[string]string{
+		"too short": strings.Repeat("a", 31),
+		"space":     strings.Repeat("a", 32) + " ",
+		"newline":   strings.Repeat("a", 32) + "\n",
+		"non ASCII": strings.Repeat("a", 32) + "中",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := newapi.NewClient(newapi.Config{
+				BaseURL: "http://new-api:3001", IntegrationSecret: secret,
+			}); err == nil || strings.Contains(err.Error(), secret) {
+				t.Fatalf("unsafe integration secret error = %v", err)
+			}
+		})
+	}
+}
 
 func TestClientSendsEntitlementGrantContract(t *testing.T) {
 	wantRequest := newapi.EntitlementGrantRequest{

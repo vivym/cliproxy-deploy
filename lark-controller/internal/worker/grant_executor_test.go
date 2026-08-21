@@ -451,24 +451,11 @@ func prepareReleasedGrantJob(
 	eventID string,
 ) *newapi.GrantSealer {
 	t.Helper()
-	recordApprovedEvent(t, ctx, store, eventID)
 	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
 		t.Fatalf("new grant sealer: %v", err)
 	}
-	processor, err := worker.NewShadowProcessorWithGrantSealer(
-		store,
-		&approvalFetcher{},
-		&approvalResolver{resolution: verifiedWalletResolution()},
-		"zh-CN",
-		sealer,
-	)
-	if err != nil {
-		t.Fatalf("new shadow processor: %v", err)
-	}
-	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
-		t.Fatalf("prepare held grant: processed=%t err=%v", processed, err)
-	}
+	prepareHeldGrantJob(t, ctx, store, eventID, sealer)
 	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
 		t.Fatalf("release held grant: released=%d err=%v", released, err)
 	}

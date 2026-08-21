@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,13 +10,62 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/config"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
 )
+
+func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant keyring: %v", err)
+	}
+
+	grantClient, err := prepareGrantClient(config.Config{Mode: "shadow"})
+	if err != nil || grantClient != nil {
+		t.Fatalf("shadow grant client = %v, err=%v", grantClient, err)
+	}
+	grantRuntime, err := activateGrantRuntime(ctx, "shadow", store, grantClient, keyring)
+	if err != nil || grantRuntime != nil {
+		t.Fatalf("shadow grant runtime = %v, err=%v", grantRuntime, err)
+	}
+
+	secretPath := filepath.Join(t.TempDir(), "lark-integration.secret")
+	if err := os.WriteFile(secretPath, []byte("too-short\n"), 0o600); err != nil {
+		t.Fatalf("write invalid integration secret: %v", err)
+	}
+	activeConfig := config.Config{
+		Mode: "active", NewAPIBaseURL: "http://new-api:3001", IntegrationSecretFile: secretPath,
+	}
+	if _, err := prepareGrantClient(activeConfig); err == nil {
+		t.Fatal("active grant client accepted invalid integration secret")
+	}
+
+	if err := os.WriteFile(secretPath, []byte(strings.Repeat("a", 32)+"\n"), 0o600); err != nil {
+		t.Fatalf("write valid integration secret: %v", err)
+	}
+	grantClient, err = prepareGrantClient(activeConfig)
+	if err != nil || grantClient == nil {
+		t.Fatalf("prepare active grant client: client=%v err=%v", grantClient, err)
+	}
+	grantRuntime, err = activateGrantRuntime(ctx, "active", store, grantClient, keyring)
+	if err != nil || grantRuntime == nil {
+		t.Fatalf("activate grant runtime: runtime=%v err=%v", grantRuntime, err)
+	}
+}
 
 func TestWebhookAcknowledgementBudgetIncludesHeaderReadAndInboxContention(t *testing.T) {
 	if controllerReadHeaderTimeout+controllerWriteTimeout >= 3*time.Second {

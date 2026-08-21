@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -53,22 +54,6 @@ func run() error {
 			active,
 		)
 	}
-	store, err := inbox.Open(loaded.DatabasePath)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = store.Close() }()
-	if err := store.SyncPolicySnapshot(context.Background(), policyCatalog.Snapshot()); err != nil {
-		return err
-	}
-	operationalHandler, err := observability.NewHandler(
-		loaded.Mode,
-		store,
-		loaded.ReadinessMaxQueueAge,
-	)
-	if err != nil {
-		return err
-	}
 	fetcher, err := larkapi.NewApprovalFetcher(larkapi.Config{
 		AppID: loaded.AppID, AppSecret: loaded.AppSecret,
 	})
@@ -79,10 +64,24 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if err := store.ValidateEntitlementGrantJobKeyIDs(
-		context.Background(),
-		grantKeyring.KeyIDs(),
-	); err != nil {
+	grantClient, err := prepareGrantClient(loaded)
+	if err != nil {
+		return err
+	}
+	store, err := inbox.Open(loaded.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	if err := store.SyncPolicySnapshot(context.Background(), policyCatalog.Snapshot()); err != nil {
+		return err
+	}
+	operationalHandler, err := observability.NewHandler(
+		string(loaded.Mode),
+		store,
+		loaded.ReadinessMaxQueueAge,
+	)
+	if err != nil {
 		return err
 	}
 	processor, err := worker.NewShadowProcessorWithGrantSealer(
@@ -105,18 +104,37 @@ func run() error {
 		return err
 	}
 
-	rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	go runWorker(rootContext, processor, loaded.WorkerPoll)
-
 	mux := http.NewServeMux()
 	mux.Handle("POST /integrations/lark/events", eventHandler)
 	operationalHandler.Register(mux)
 	server := newControllerHTTPServer(loaded.ListenAddress, mux)
+	listener, err := net.Listen("tcp", loaded.ListenAddress)
+	if err != nil {
+		return fmt.Errorf("listen for lark controller: %w", err)
+	}
+	defer func() { _ = listener.Close() }()
+	grantRuntime, err := activateGrantRuntime(
+		context.Background(),
+		loaded.Mode,
+		store,
+		grantClient,
+		grantKeyring,
+	)
+	if err != nil {
+		return err
+	}
+
+	rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go runWorker(rootContext, "lark event", processor, loaded.WorkerPoll)
+	if grantRuntime != nil {
+		go runWorker(rootContext, "New API grant", grantRuntime, loaded.WorkerPoll)
+	}
+
 	serveResult := make(chan error, 1)
 	go func() {
-		log.Printf("lark controller listening in shadow mode")
-		serveResult <- server.ListenAndServe()
+		log.Printf("lark controller listening in %s mode", loaded.Mode)
+		serveResult <- server.Serve(listener)
 	}()
 
 	select {
@@ -132,6 +150,58 @@ func run() error {
 	}
 }
 
+func prepareGrantClient(loaded config.Config) (worker.GrantClient, error) {
+	switch loaded.Mode {
+	case config.ModeShadow:
+		return nil, nil
+	case config.ModeActive:
+		secret, err := newapi.LoadIntegrationSecretFile(loaded.IntegrationSecretFile)
+		if err != nil {
+			return nil, err
+		}
+		return newapi.NewClient(newapi.Config{
+			BaseURL:           loaded.NewAPIBaseURL,
+			IntegrationSecret: secret,
+		})
+	default:
+		return nil, errors.New("controller mode must be shadow or active")
+	}
+}
+
+func activateGrantRuntime(
+	ctx context.Context,
+	mode config.Mode,
+	store *inbox.Store,
+	client worker.GrantClient,
+	keyring *newapi.GrantKeyring,
+) (*worker.ActiveGrantRuntime, error) {
+	if store == nil || keyring == nil {
+		return nil, errors.New("store and grant keyring are required")
+	}
+	if err := store.ValidateEntitlementGrantJobKeyIDs(ctx, keyring.KeyIDs()); err != nil {
+		return nil, err
+	}
+	switch mode {
+	case config.ModeShadow:
+		return nil, nil
+	case config.ModeActive:
+		executor, err := worker.NewGrantExecutor(store, client, keyring)
+		if err != nil {
+			return nil, err
+		}
+		runtime, err := worker.NewActiveGrantRuntime(store, executor)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := runtime.ReleaseHeldJobs(ctx); err != nil {
+			return nil, err
+		}
+		return runtime, nil
+	default:
+		return nil, errors.New("controller mode must be shadow or active")
+	}
+}
+
 func newControllerHTTPServer(address string, handler http.Handler) *http.Server {
 	return &http.Server{
 		Addr:              address,
@@ -143,7 +213,11 @@ func newControllerHTTPServer(address string, handler http.Handler) *http.Server 
 	}
 }
 
-func runWorker(ctx context.Context, processor *worker.ShadowProcessor, idlePoll time.Duration) {
+type runOnceWorker interface {
+	RunOnce(context.Context) (bool, error)
+}
+
+func runWorker(ctx context.Context, name string, processor runOnceWorker, idlePoll time.Duration) {
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
@@ -154,7 +228,7 @@ func runWorker(ctx context.Context, processor *worker.ShadowProcessor, idlePoll 
 		}
 		processed, err := processor.RunOnce(ctx)
 		if err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("shadow event processing failed")
+			log.Printf("%s processing failed", name)
 		}
 		if processed {
 			timer.Reset(0)

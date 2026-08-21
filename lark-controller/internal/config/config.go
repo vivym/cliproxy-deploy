@@ -6,8 +6,15 @@ import (
 	"time"
 )
 
+type Mode string
+
+const (
+	ModeShadow Mode = "shadow"
+	ModeActive Mode = "active"
+)
+
 type Config struct {
-	Mode                    string
+	Mode                    Mode
 	ListenAddress           string
 	DatabasePath            string
 	AppID                   string
@@ -20,6 +27,8 @@ type Config struct {
 	PolicyBundleDirectory   string
 	ApprovalBindingsFile    string
 	GrantPayloadKeyringFile string
+	NewAPIBaseURL           string
+	IntegrationSecretFile   string
 	WorkerPoll              time.Duration
 	ReadinessMaxQueueAge    time.Duration
 }
@@ -29,7 +38,7 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("environment lookup is required")
 	}
 	loaded := Config{
-		Mode:                    getenv("LARK_CONTROLLER_MODE"),
+		Mode:                    Mode(getenv("LARK_CONTROLLER_MODE")),
 		ListenAddress:           getenv("LARK_CONTROLLER_LISTEN_ADDR"),
 		DatabasePath:            getenv("LARK_CONTROLLER_DB_PATH"),
 		AppID:                   getenv("LARK_APP_ID"),
@@ -46,10 +55,10 @@ func Load(getenv func(string) string) (Config, error) {
 		ReadinessMaxQueueAge:    15 * time.Minute,
 	}
 	if loaded.Mode == "" {
-		loaded.Mode = "shadow"
+		loaded.Mode = ModeShadow
 	}
-	if loaded.Mode != "shadow" {
-		return Config{}, errors.New("this controller build supports shadow mode only")
+	if loaded.Mode != ModeShadow && loaded.Mode != ModeActive {
+		return Config{}, errors.New("LARK_CONTROLLER_MODE must be shadow or active")
 	}
 	if loaded.ListenAddress == "" {
 		loaded.ListenAddress = "0.0.0.0:8080"
@@ -82,6 +91,19 @@ func Load(getenv func(string) string) (Config, error) {
 	for name, value := range required {
 		if value == "" {
 			return Config{}, fmt.Errorf("%s is required", name)
+		}
+	}
+	if loaded.Mode == ModeActive {
+		loaded.IntegrationSecretFile = getenv("LARK_INTEGRATION_SECRET_FILE")
+		loaded.NewAPIBaseURL = getenv("NEW_API_INTERNAL_BASE_URL")
+		activeRequired := map[string]string{
+			"LARK_INTEGRATION_SECRET_FILE": loaded.IntegrationSecretFile,
+			"NEW_API_INTERNAL_BASE_URL":    loaded.NewAPIBaseURL,
+		}
+		for name, value := range activeRequired {
+			if value == "" {
+				return Config{}, fmt.Errorf("%s is required in active mode", name)
+			}
 		}
 	}
 	return loaded, nil

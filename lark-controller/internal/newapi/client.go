@@ -121,8 +121,8 @@ func NewClient(config Config) (*Client, error) {
 		(parsed.Path != "" && parsed.Path != "/") {
 		return nil, errors.New("New API integration base URL must be an HTTP origin")
 	}
-	if len(config.IntegrationSecret) < minimumSecretBytes {
-		return nil, errors.New("New API integration secret must contain at least 32 bytes")
+	if !validIntegrationSecret([]byte(config.IntegrationSecret)) {
+		return nil, errors.New("New API integration secret must be one printable ASCII token of at least 32 bytes")
 	}
 	httpClient := config.HTTPClient
 	if httpClient == nil {

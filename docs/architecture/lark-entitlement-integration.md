@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 为 shadow-only，WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow 与 active grant runtime，OAuth/在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1048,7 +1048,7 @@ New API fork 同时给 `subscription_plans` 增加 `managed_only boolean NOT NUL
 | `lark_event_inbox` | webhook 去重、规范化 event、处理状态 |
 | `approval_instances` | 回查结果摘要、schema hash、处理决策 |
 | `entitlement_command_shadows` | 脱敏 grant receipt、external ID/request hash 重放账本 |
-| `entitlement_grant_jobs` | AES-256-GCM 密封的 canonical request；当前保持 `held_shadow` |
+| `entitlement_grant_jobs` | AES-256-GCM 密封的 canonical request；shadow 写入 `held_shadow`，active gate 后转为可执行状态 |
 | `employment_checks` | 在职状态证据、连续缺失计数和 disable external ID |
 | `jobs` | retry schedule、attempt、last_error、dead-letter |
 | `controller_audit` | Controller 决策轨迹 |
@@ -1236,6 +1236,7 @@ Host(ai.x2r.store) && PathPrefix(/integrations/lark/)
 Controller 至少需要：
 
 ```text
+LARK_CONTROLLER_MODE
 LARK_APP_ID
 LARK_APP_SECRET_FILE
 LARK_VERIFICATION_TOKEN_FILE
@@ -1253,7 +1254,7 @@ NEW_API_OAUTH_CALLBACK_ALLOWLIST
 CONTROLLER_DATABASE_PATH
 ```
 
-`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。
+`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`LARK_INTEGRATION_SECRET_FILE` 保存一个不少于 32 字节的 printable、无空白 ASCII bearer token，可带一个 LF 或 CRLF 结尾；仅 active mode 读取。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。
 
 日志必须对以下字段脱敏：
 
@@ -1302,8 +1303,8 @@ pending -> processing -> succeeded
 ```
 
 `held_shadow` 的保存时间不计入 `principal_not_ready` 的 24 小时窗口；窗口从显式 release
-写入的 `activated_at` 开始。仅 active-mode startup gate 可以 release，shadow event worker
-和普通 claimant 都不能领取 held job。
+写入的 `activated_at` 开始。仅 active-mode startup/runtime gate 可以 release，shadow event
+worker 和普通 claimant 都不能领取 held job。
 
 建议重试：
 
@@ -1536,7 +1537,7 @@ MySQL/PostgreSQL migration 测试仍需要外部 DSN，仓库全量套件仍保�
 - 实现 New API adapter、metrics、health 和 audit。
 - 实现 Controller 侧每日 inbox/job/approval reconciliation 和 active principal 在职状态核验，权限故障 fail open 并告警。
 
-当前本地实现边界（shadow-only，尚未部署）：v1/v2 webhook 验证与 durable inbox、
+当前本地实现边界（shadow/active grant，尚未部署）：v1/v2 webhook 验证与 durable inbox、
 authoritative Approval v4 fetch、versioned policy/manifest 解析、固定 locale 与 exact
 display-text mapping、有限重试/dead-letter/reversal pending、重启恢复、SQLite audit
 snapshot，以及 `/healthz`、`/readyz`、`/metrics` 已实现。Controller 现在还会生成精确的
@@ -1547,18 +1548,19 @@ AES-256-GCM 密封的 canonical request；密封记录使用 `held_shadow` 状�
 `LARK_GRANT_PAYLOAD_KEYRING_FILE` 读取严格的多行 keyring；第一行只负责新 job 密封，后续行
 解密轮换前记录，loader 会清零原始文件 buffer 和临时 decoded key。启动时会在 worker 前验证
 每个非终态 grant job 的 key ID 都存在，缺失时 fail closed；succeeded/dead-letter 历史记录
-不阻止旧 key 退役。当前还实现了未接入 runtime
-的 `GrantExecutor` 核心和显式 release/claim/recovery API：它可解封请求、调用既有 adapter、
+不阻止旧 key 退役。active startup 会在配置、credential/client、SQLite、webhook server 和
+listen socket 均准备好后释放历史 held job；active grant runtime 也会在每轮 claim 前释放新产生的
+held job。已接入的 `GrantExecutor` 可解封请求、调用既有 adapter、
 保存 sanitized result、处理 response-loss replay，并按登记 code retry/dead-letter；
 `principal_not_ready` 的 24 小时从 `activated_at` 计算。active result/retry/dead-letter metrics
-及从 `activated_at` 开始的 released-job queue age 已实现，但 `cmd/lark-controller` 不构造
-executor、不调用 release。
+及从 `activated_at` 开始的 released-job queue age 已实现。shadow mode 不读取 New API URL 或
+credential、不构造 executor，也不 release。
 Controller compatibility receipt
 `166bbeb` 与 New API Gin router receipt `f2ef0d95` 已共同固定 nested error envelope、subscription
-result 和分页 active Lark principal wire contract；`cmd/lark-controller` 仍不读取 New API
-URL/credential、不构造 client，也不发送请求。principals contract 不返回 New API user ID、
-wallet、token 或 subscription 明细。Lark OAuth bridge、任何 entitlement write、就业状态
-reconciliation、Compose 接入和生产验证仍未实现。
+result 和分页 active Lark principal wire contract；active mode 现在读取专用 integration
+credential、构造 client/executor 并执行幂等 entitlement write，shadow mode 保持零 New API
+调用。principals contract 不返回 New API user ID、wallet、token 或 subscription 明细。
+Lark OAuth bridge、就业状态 reconciliation、Compose 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的
