@@ -14,13 +14,13 @@ import (
 	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthcontract"
 )
 
 const (
-	defaultOAuthBaseURL        = "https://accounts.feishu.cn"
-	defaultOpenBaseURL         = "https://open.feishu.cn"
-	registeredOAuthRedirectURI = "https://ai.x2r.store/integrations/lark/oauth/callback"
-	maxOAuthResponseBytes      = 64 * 1024
+	defaultOAuthBaseURL   = "https://accounts.feishu.cn"
+	defaultOpenBaseURL    = "https://open.feishu.cn"
+	maxOAuthResponseBytes = 64 * 1024
 )
 
 type OAuthConfig struct {
@@ -51,6 +51,7 @@ const (
 	OAuthUserInfoRejected         OAuthExchangeFailureReason = "userinfo_rejected"
 	OAuthRequestCanceled          OAuthExchangeFailureReason = "request_canceled"
 	OAuthInvalidRequest           OAuthExchangeFailureReason = "invalid_request"
+	OAuthUpstreamUnavailable      OAuthExchangeFailureReason = "upstream_unavailable"
 )
 
 var errOAuthResponseTooLarge = errors.New("Lark OAuth response exceeds size limit")
@@ -89,7 +90,7 @@ func NewOAuthExchanger(config OAuthConfig) (*OAuthExchanger, error) {
 	if config.AppID == "" || config.AppSecret == "" || config.RedirectURI == "" || config.TenantKey == "" {
 		return nil, errors.New("Lark app id, app secret, OAuth redirect URI, and tenant key are required")
 	}
-	if config.RedirectURI != registeredOAuthRedirectURI {
+	if config.RedirectURI != oauthcontract.ControllerCallbackURI {
 		return nil, errors.New("Lark OAuth redirect URI must match the registered controller callback")
 	}
 	if config.OAuthBaseURL == "" {
@@ -116,6 +117,18 @@ func NewOAuthExchanger(config OAuthConfig) (*OAuthExchanger, error) {
 			},
 		},
 	}, nil
+}
+
+func (e *OAuthExchanger) AuthorizationURL(state string) (string, error) {
+	if state == "" {
+		return "", &OAuthExchangeError{Reason: OAuthInvalidRequest}
+	}
+	query := make(url.Values)
+	query.Set("app_id", e.config.AppID)
+	query.Set("redirect_uri", e.config.RedirectURI)
+	query.Set("state", state)
+	return strings.TrimRight(e.config.OAuthBaseURL, "/") +
+		"/open-apis/authen/v1/authorize?" + query.Encode(), nil
 }
 
 func (e *OAuthExchanger) Exchange(ctx context.Context, code string) (inbox.OAuthIdentity, error) {
@@ -147,13 +160,14 @@ func (e *OAuthExchanger) Exchange(ctx context.Context, code string) (inbox.OAuth
 	defer func() { _ = tokenHTTPResponse.Body.Close() }()
 	var tokenResponse oauthTokenResponse
 	if err := decodeOAuthJSON(tokenHTTPResponse.Body, &tokenResponse); err != nil {
-		if errors.Is(err, errOAuthResponseTooLarge) {
-			return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthResponseTooLarge}
-		}
-		if tokenHTTPResponse.StatusCode != http.StatusOK {
-			return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthTokenRejected}
-		}
-		return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthInvalidResponse}
+		return inbox.OAuthIdentity{}, classifyOAuthDecodeFailure(
+			tokenHTTPResponse.StatusCode,
+			err,
+			OAuthTokenRejected,
+		)
+	}
+	if oauthUpstreamUnavailable(tokenHTTPResponse.StatusCode) {
+		return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthUpstreamUnavailable}
 	}
 	if tokenResponse.Code == 20021 {
 		return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthAuthorizationCodeInvalid}
@@ -183,13 +197,14 @@ func (e *OAuthExchanger) Exchange(ctx context.Context, code string) (inbox.OAuth
 	defer func() { _ = userInfoHTTPResponse.Body.Close() }()
 	var userInfoResponse oauthUserInfoResponse
 	if err := decodeOAuthJSON(userInfoHTTPResponse.Body, &userInfoResponse); err != nil {
-		if errors.Is(err, errOAuthResponseTooLarge) {
-			return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthResponseTooLarge}
-		}
-		if userInfoHTTPResponse.StatusCode != http.StatusOK {
-			return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthUserInfoRejected}
-		}
-		return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthInvalidResponse}
+		return inbox.OAuthIdentity{}, classifyOAuthDecodeFailure(
+			userInfoHTTPResponse.StatusCode,
+			err,
+			OAuthUserInfoRejected,
+		)
+	}
+	if oauthUpstreamUnavailable(userInfoHTTPResponse.StatusCode) {
+		return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthUpstreamUnavailable}
 	}
 	if userInfoHTTPResponse.StatusCode != http.StatusOK || userInfoResponse.Code != 0 {
 		return inbox.OAuthIdentity{}, &OAuthExchangeError{Reason: OAuthUserInfoRejected}
@@ -263,4 +278,26 @@ func validOAuthBaseURL(raw string) bool {
 	}
 	ip := net.ParseIP(hostname)
 	return ip != nil && ip.IsLoopback()
+}
+
+func oauthUpstreamUnavailable(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests ||
+		status >= http.StatusInternalServerError
+}
+
+func classifyOAuthDecodeFailure(
+	status int,
+	decodeErr error,
+	rejectedReason OAuthExchangeFailureReason,
+) *OAuthExchangeError {
+	switch {
+	case oauthUpstreamUnavailable(status):
+		return &OAuthExchangeError{Reason: OAuthUpstreamUnavailable}
+	case errors.Is(decodeErr, errOAuthResponseTooLarge):
+		return &OAuthExchangeError{Reason: OAuthResponseTooLarge}
+	case status != http.StatusOK:
+		return &OAuthExchangeError{Reason: rejectedReason}
+	default:
+		return &OAuthExchangeError{Reason: OAuthInvalidResponse}
+	}
 }

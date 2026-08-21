@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -19,6 +20,8 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/config"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthbridge"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthcontract"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
 )
 
@@ -157,5 +160,140 @@ func TestWebhookAcknowledgementBudgetIncludesHeaderReadAndInboxContention(t *tes
 	}
 	if elapsed := time.Since(started); elapsed >= 3*time.Second {
 		t.Fatalf("end-to-end acknowledgement took %s, want less than 3s", elapsed)
+	}
+}
+
+func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler, err := prepareOAuthBridge(config.Config{
+		AppID: "cli_test", AppSecret: "app-secret", TenantKey: "tenant-test",
+		BridgeClientID:               "bridge-client-id",
+		NewAPIOAuthCallbackAllowlist: []string{oauthcontract.NewAPICallbackURI},
+		OAuthRateLimitPerMinute:      30,
+	}, store)
+	if err != nil {
+		t.Fatalf("prepare OAuth bridge: %v", err)
+	}
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	query := url.Values{
+		"response_type": {"code"}, "client_id": {"bridge-client-id"},
+		"redirect_uri": {oauthcontract.NewAPICallbackURI}, "state": {"new-api-state"},
+	}
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(
+		http.MethodGet,
+		"/integrations/lark/oauth/authorize?"+query.Encode(),
+		nil,
+	))
+	location, err := url.Parse(response.Header().Get("Location"))
+	if response.Code != http.StatusFound || err != nil ||
+		location.Scheme+"://"+location.Host != "https://accounts.feishu.cn" ||
+		location.Path != "/open-apis/authen/v1/authorize" ||
+		location.Query().Get("app_id") != "cli_test" ||
+		location.Query().Get("redirect_uri") != oauthcontract.ControllerCallbackURI {
+		t.Fatalf("authorize status=%d location=%q error=%v, want fixed Lark entry point",
+			response.Code, response.Header().Get("Location"), err)
+	}
+}
+
+func TestOAuthCallbackCanCompleteBeyondWebhookWriteTimeout(t *testing.T) {
+	identity, err := inbox.NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new OAuth identity: %v", err)
+	}
+	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
+		BridgeClientID: "bridge-client-id", NewAPIRedirectURI: oauthcontract.NewAPICallbackURI,
+		CallbackTimeout: 4 * time.Second, RateLimitPerMinute: 30,
+	}, mainOAuthStore{identity: identity}, mainOAuthProvider{
+		identity: identity, delay: controllerWriteTimeout + 200*time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("new OAuth handler: %v", err)
+	}
+	mux := http.NewServeMux()
+	handler.Register(mux)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	server := newControllerHTTPServer(listener.Addr().String(), mux)
+	serveResult := make(chan error, 1)
+	go func() { serveResult <- server.Serve(listener) }()
+	t.Cleanup(func() {
+		_ = server.Close()
+		<-serveResult
+	})
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	started := time.Now()
+	response, err := client.Get("http://" + listener.Addr().String() +
+		"/integrations/lark/oauth/callback?code=lark-code&state=internal-state")
+	if err != nil {
+		t.Fatalf("request slow OAuth callback: %v", err)
+	}
+	t.Cleanup(func() { _ = response.Body.Close() })
+	if elapsed := time.Since(started); elapsed <= controllerWriteTimeout || elapsed >= 4*time.Second {
+		t.Fatalf("callback elapsed=%s, want beyond webhook timeout and within OAuth timeout", elapsed)
+	}
+	location, err := url.Parse(response.Header.Get("Location"))
+	if response.StatusCode != http.StatusFound || err != nil ||
+		location.Query().Get("code") != "opaque-login-code" ||
+		location.Query().Get("state") != "new-api-state" {
+		t.Fatalf("callback status=%d location=%q error=%v, want successful delayed redirect",
+			response.StatusCode, response.Header.Get("Location"), err)
+	}
+}
+
+type mainOAuthStore struct {
+	identity inbox.OAuthIdentity
+}
+
+func (mainOAuthStore) CreateOAuthAuthorizationState(
+	context.Context,
+	inbox.OAuthAuthorizationState,
+) (string, error) {
+	return "internal-state", nil
+}
+
+func (mainOAuthStore) ConsumeOAuthAuthorizationState(
+	context.Context,
+	string,
+) (inbox.OAuthAuthorizationState, error) {
+	return inbox.OAuthAuthorizationState{
+		NewAPIState: "new-api-state", RedirectURI: oauthcontract.NewAPICallbackURI,
+	}, nil
+}
+
+func (mainOAuthStore) CreateOAuthLoginCode(context.Context, inbox.OAuthIdentity) (string, error) {
+	return "opaque-login-code", nil
+}
+
+type mainOAuthProvider struct {
+	identity inbox.OAuthIdentity
+	delay    time.Duration
+}
+
+func (mainOAuthProvider) AuthorizationURL(string) (string, error) {
+	return "https://accounts.feishu.cn/open-apis/authen/v1/authorize", nil
+}
+
+func (p mainOAuthProvider) Exchange(ctx context.Context, _ string) (inbox.OAuthIdentity, error) {
+	timer := time.NewTimer(p.delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return inbox.OAuthIdentity{}, ctx.Err()
+	case <-timer.C:
+		return p.identity, nil
 	}
 }

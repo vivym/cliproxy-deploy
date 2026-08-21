@@ -351,6 +351,68 @@ func TestOAuthExchangerClassifiesLarkRejectionsWithoutLeakingResponse(t *testing
 	}
 }
 
+func TestOAuthExchangerClassifiesUpstreamUnavailableResponses(t *testing.T) {
+	tests := []struct {
+		name      string
+		stage     string
+		status    int
+		oversized bool
+	}{
+		{name: "token service unavailable", stage: "token", status: http.StatusServiceUnavailable},
+		{
+			name: "token service unavailable with oversized body", stage: "token",
+			status: http.StatusServiceUnavailable, oversized: true,
+		},
+		{name: "userinfo rate limited", stage: "userinfo", status: http.StatusTooManyRequests},
+		{
+			name: "userinfo rate limited with oversized body", stage: "userinfo",
+			status: http.StatusTooManyRequests, oversized: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/oauth/v3/token":
+					if test.stage == "token" {
+						response.WriteHeader(test.status)
+						if test.oversized {
+							_, _ = response.Write([]byte(strings.Repeat("x", 65*1024)))
+							return
+						}
+						writeOAuthTestJSON(t, response, map[string]any{
+							"code": 999999, "msg": "sensitive upstream outage",
+						})
+						return
+					}
+					writeOAuthTestJSON(t, response, map[string]any{
+						"code": 0, "access_token": "user-access-token",
+					})
+				case "/open-apis/authen/v1/user_info":
+					response.WriteHeader(test.status)
+					if test.oversized {
+						_, _ = response.Write([]byte(strings.Repeat("x", 65*1024)))
+						return
+					}
+					writeOAuthTestJSON(t, response, map[string]any{
+						"code": 999999, "msg": "sensitive upstream outage",
+					})
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+
+			_, err := newOAuthTestExchanger(t, server.URL, 0).
+				Exchange(context.Background(), "authorization-code-secret")
+			assertOAuthExchangeFailure(t, err, larkapi.OAuthUpstreamUnavailable)
+			if strings.Contains(err.Error(), "sensitive") || strings.Contains(err.Error(), "999999") {
+				t.Fatalf("failure leaked upstream response details: %v", err)
+			}
+		})
+	}
+}
+
 func TestOAuthExchangerRejectsIdentityThatCannotBeStored(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {

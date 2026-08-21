@@ -16,21 +16,57 @@ import (
 )
 
 const (
-	oauthCredentialBytes       = 32
-	oauthAuthorizationStateTTL = 5 * time.Minute
-	oauthLoginCodeTTL          = time.Minute
-	oauthAccessHandleTTL       = time.Minute
-	maxOAuthStateBytes         = 1024
-	maxOAuthRedirectURIBytes   = 2048
-	maxOAuthSubjectBytes       = 255
-	maxOAuthDisplayNameRunes   = 20
+	oauthCredentialBytes             = 32
+	oauthAuthorizationStateTTL       = 5 * time.Minute
+	oauthLoginCodeTTL                = time.Minute
+	oauthAccessHandleTTL             = time.Minute
+	oauthCredentialPruneInterval     = time.Minute
+	maxOAuthStateBytes               = 1024
+	maxOAuthRedirectURIBytes         = 2048
+	maxOAuthSubjectBytes             = 255
+	maxOAuthDisplayNameRunes         = 20
+	maxOutstandingOAuthStates        = 10_000
+	maxOutstandingOAuthLoginCodes    = 5_000
+	maxOutstandingOAuthAccessHandles = 5_000
 )
 
-var ErrOAuthCredentialInvalid = errors.New("OAuth credential is invalid, expired, or already consumed")
+var (
+	ErrOAuthCredentialInvalid  = errors.New("OAuth credential is invalid, expired, or already consumed")
+	ErrOAuthCredentialCapacity = errors.New("OAuth credential capacity is unavailable")
+)
+
+type oauthCredentialKind int
+
+const (
+	oauthCredentialState oauthCredentialKind = iota
+	oauthCredentialLoginCode
+	oauthCredentialAccessHandle
+	oauthCredentialKindCount
+)
+
+var oauthCredentialTables = [oauthCredentialKindCount]string{
+	"oauth_states",
+	"oauth_login_codes",
+	"oauth_access_handles",
+}
+
+var oauthCredentialLimits = [oauthCredentialKindCount]int64{
+	maxOutstandingOAuthStates,
+	maxOutstandingOAuthLoginCodes,
+	maxOutstandingOAuthAccessHandles,
+}
 
 type OAuthAuthorizationState struct {
 	NewAPIState string
 	RedirectURI string
+}
+
+func NewOAuthAuthorizationState(newAPIState, redirectURI string) (OAuthAuthorizationState, error) {
+	state := OAuthAuthorizationState{NewAPIState: newAPIState, RedirectURI: redirectURI}
+	if !validOAuthAuthorizationState(state) {
+		return OAuthAuthorizationState{}, errors.New("valid OAuth authorization state is required")
+	}
+	return state, nil
 }
 
 type OAuthIdentity struct {
@@ -62,11 +98,20 @@ func (s *Store) CreateOAuthAuthorizationState(
 	if s == nil || s.database == nil || !validOAuthAuthorizationState(state) {
 		return "", errors.New("valid OAuth authorization state is required")
 	}
+	now := s.currentTime()
+	if err := s.reserveOAuthCredential(ctx, oauthCredentialState, now); err != nil {
+		return "", err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			s.releaseOAuthCredential(oauthCredentialState)
+		}
+	}()
 	raw, digest, err := generateOAuthCredential()
 	if err != nil {
 		return "", err
 	}
-	now := s.currentTime()
 	if _, err := s.database.ExecContext(ctx, `
 INSERT INTO oauth_states (
     state_hash, new_api_state, redirect_uri, expires_at, consumed_at, created_at
@@ -79,6 +124,7 @@ INSERT INTO oauth_states (
 	); err != nil {
 		return "", fmt.Errorf("store OAuth authorization state: %w", err)
 	}
+	reserved = false
 	return raw, nil
 }
 
@@ -93,11 +139,9 @@ func (s *Store) ConsumeOAuthAuthorizationState(
 	now := s.currentTime()
 	var state OAuthAuthorizationState
 	err := s.database.QueryRowContext(ctx, `
-UPDATE oauth_states
-SET consumed_at = ?
+DELETE FROM oauth_states
 WHERE state_hash = ? AND consumed_at = '' AND expires_at > ?
 RETURNING new_api_state, redirect_uri`,
-		now.Format(time.RFC3339Nano),
 		digest[:],
 		now.UnixNano(),
 	).Scan(&state.NewAPIState, &state.RedirectURI)
@@ -107,6 +151,7 @@ RETURNING new_api_state, redirect_uri`,
 	if err != nil {
 		return OAuthAuthorizationState{}, fmt.Errorf("consume OAuth authorization state: %w", err)
 	}
+	s.releaseOAuthCredential(oauthCredentialState)
 	return state, nil
 }
 
@@ -114,11 +159,20 @@ func (s *Store) CreateOAuthLoginCode(ctx context.Context, identity OAuthIdentity
 	if s == nil || s.database == nil || !validOAuthIdentity(identity) {
 		return "", errors.New("valid OAuth identity is required")
 	}
+	now := s.currentTime()
+	if err := s.reserveOAuthCredential(ctx, oauthCredentialLoginCode, now); err != nil {
+		return "", err
+	}
+	reserved := true
+	defer func() {
+		if reserved {
+			s.releaseOAuthCredential(oauthCredentialLoginCode)
+		}
+	}()
 	raw, digest, err := generateOAuthCredential()
 	if err != nil {
 		return "", err
 	}
-	now := s.currentTime()
 	if _, err := s.database.ExecContext(ctx, `
 INSERT INTO oauth_login_codes (
     code_hash, subject, username, display_name, expires_at, consumed_at, created_at
@@ -132,6 +186,7 @@ INSERT INTO oauth_login_codes (
 	); err != nil {
 		return "", fmt.Errorf("store OAuth login code: %w", err)
 	}
+	reserved = false
 	return raw, nil
 }
 
@@ -144,20 +199,27 @@ func (s *Store) ExchangeOAuthLoginCode(ctx context.Context, raw string) (string,
 	if err != nil {
 		return "", err
 	}
+	now := s.currentTime()
+	if err := s.reserveOAuthCredential(ctx, oauthCredentialAccessHandle, now); err != nil {
+		return "", err
+	}
+	reservedAccessHandle := true
+	defer func() {
+		if reservedAccessHandle {
+			s.releaseOAuthCredential(oauthCredentialAccessHandle)
+		}
+	}()
 	tx, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("begin OAuth login code exchange: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	now := s.currentTime()
 	formattedNow := now.Format(time.RFC3339Nano)
 	var identity OAuthIdentity
 	err = tx.QueryRowContext(ctx, `
-UPDATE oauth_login_codes
-SET consumed_at = ?
+DELETE FROM oauth_login_codes
 WHERE code_hash = ? AND consumed_at = '' AND expires_at > ?
 	RETURNING subject, username, display_name`,
-		formattedNow,
 		loginDigest[:],
 		now.UnixNano(),
 	).Scan(&identity.Subject, &identity.Username, &identity.Name)
@@ -183,6 +245,8 @@ INSERT INTO oauth_access_handles (
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit OAuth login code exchange: %w", err)
 	}
+	reservedAccessHandle = false
+	s.releaseOAuthCredential(oauthCredentialLoginCode)
 	return accessHandle, nil
 }
 
@@ -194,11 +258,9 @@ func (s *Store) ConsumeOAuthAccessHandle(ctx context.Context, raw string) (OAuth
 	now := s.currentTime()
 	var identity OAuthIdentity
 	err := s.database.QueryRowContext(ctx, `
-UPDATE oauth_access_handles
-SET consumed_at = ?
+DELETE FROM oauth_access_handles
 WHERE handle_hash = ? AND consumed_at = '' AND expires_at > ?
 RETURNING subject, username, display_name`,
-		now.Format(time.RFC3339Nano),
 		digest[:],
 		now.UnixNano(),
 	).Scan(&identity.Subject, &identity.Username, &identity.Name)
@@ -208,6 +270,7 @@ RETURNING subject, username, display_name`,
 	if err != nil {
 		return OAuthIdentity{}, fmt.Errorf("consume OAuth access handle: %w", err)
 	}
+	s.releaseOAuthCredential(oauthCredentialAccessHandle)
 	return identity, nil
 }
 
@@ -216,6 +279,76 @@ func (s *Store) currentTime() time.Time {
 		return time.Now().UTC()
 	}
 	return s.now().UTC()
+}
+
+func (s *Store) initializeOAuthCredentialRetention(ctx context.Context) error {
+	now := s.currentTime()
+	for kind, table := range oauthCredentialTables {
+		if _, err := s.database.ExecContext(
+			ctx,
+			"DELETE FROM "+table+" WHERE expires_at <= ?",
+			now.UnixNano(),
+		); err != nil {
+			return fmt.Errorf("initialize OAuth credential retention: %w", err)
+		}
+		if err := s.database.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table).
+			Scan(&s.oauthCounts[kind]); err != nil {
+			return fmt.Errorf("count OAuth credentials: %w", err)
+		}
+	}
+	s.oauthLastPrune = now
+	return nil
+}
+
+func (s *Store) reserveOAuthCredential(
+	ctx context.Context,
+	kind oauthCredentialKind,
+	now time.Time,
+) error {
+	if err := s.pruneExpiredOAuthCredentials(ctx, now); err != nil {
+		return err
+	}
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	if s.oauthCounts[kind] >= oauthCredentialLimits[kind] {
+		return ErrOAuthCredentialCapacity
+	}
+	s.oauthCounts[kind]++
+	return nil
+}
+
+func (s *Store) releaseOAuthCredential(kind oauthCredentialKind) {
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	if s.oauthCounts[kind] > 0 {
+		s.oauthCounts[kind]--
+	}
+}
+
+func (s *Store) pruneExpiredOAuthCredentials(ctx context.Context, now time.Time) error {
+	s.oauthMu.Lock()
+	defer s.oauthMu.Unlock()
+	if !s.oauthLastPrune.IsZero() && !now.Before(s.oauthLastPrune) &&
+		now.Sub(s.oauthLastPrune) < oauthCredentialPruneInterval {
+		return nil
+	}
+	for kind, table := range oauthCredentialTables {
+		result, err := s.database.ExecContext(
+			ctx,
+			"DELETE FROM "+table+" WHERE expires_at <= ?",
+			now.UnixNano(),
+		)
+		if err != nil {
+			return fmt.Errorf("prune expired OAuth credentials: %w", err)
+		}
+		deleted, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("count pruned OAuth credentials: %w", err)
+		}
+		s.oauthCounts[kind] -= min(s.oauthCounts[kind], deleted)
+	}
+	s.oauthLastPrune = now
+	return nil
 }
 
 func generateOAuthCredential() (string, [sha256.Size]byte, error) {

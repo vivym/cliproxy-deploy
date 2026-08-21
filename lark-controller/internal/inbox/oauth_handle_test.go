@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,7 +20,7 @@ func TestOAuthAuthorizationStateIsBoundSingleUseAndExpires(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	now := time.Date(2026, time.August, 21, 9, 0, 0, 0, time.UTC)
+	now := time.Now().UTC().Truncate(time.Second)
 	store.now = func() time.Time { return now }
 
 	rawState, err := store.CreateOAuthAuthorizationState(ctx, OAuthAuthorizationState{
@@ -152,6 +153,145 @@ func TestOAuthLoginCodeAndAccessHandleAreAtomicSingleUse(t *testing.T) {
 	now = now.Add(oauthAccessHandleTTL + time.Nanosecond)
 	if _, err := store.ConsumeOAuthAccessHandle(ctx, accessHandle); !errors.Is(err, ErrOAuthCredentialInvalid) {
 		t.Fatalf("expired OAuth access handle error = %v", err)
+	}
+}
+
+func TestOAuthCredentialCreationPrunesConsumedAndExpiredRows(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Date(2026, time.August, 21, 9, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return now }
+	identity, err := NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new OAuth identity: %v", err)
+	}
+
+	consumedState, err := store.CreateOAuthAuthorizationState(ctx, OAuthAuthorizationState{
+		NewAPIState: "consumed-state", RedirectURI: "https://ai.x2r.store/oauth/lark",
+	})
+	if err != nil {
+		t.Fatalf("create consumed state: %v", err)
+	}
+	if _, err := store.ConsumeOAuthAuthorizationState(ctx, consumedState); err != nil {
+		t.Fatalf("consume state: %v", err)
+	}
+	if _, err := store.CreateOAuthAuthorizationState(ctx, OAuthAuthorizationState{
+		NewAPIState: "expiring-state", RedirectURI: "https://ai.x2r.store/oauth/lark",
+	}); err != nil {
+		t.Fatalf("create expiring state: %v", err)
+	}
+	loginCode, err := store.CreateOAuthLoginCode(ctx, identity)
+	if err != nil {
+		t.Fatalf("create login code: %v", err)
+	}
+	accessHandle, err := store.ExchangeOAuthLoginCode(ctx, loginCode)
+	if err != nil {
+		t.Fatalf("exchange login code: %v", err)
+	}
+	if _, err := store.ConsumeOAuthAccessHandle(ctx, accessHandle); err != nil {
+		t.Fatalf("consume access handle: %v", err)
+	}
+
+	now = now.Add(oauthAuthorizationStateTTL + time.Nanosecond)
+	if _, err := store.CreateOAuthAuthorizationState(ctx, OAuthAuthorizationState{
+		NewAPIState: "retained-state", RedirectURI: "https://ai.x2r.store/oauth/lark",
+	}); err != nil {
+		t.Fatalf("create state after retention window: %v", err)
+	}
+	for table, want := range map[string]int{
+		"oauth_states": 1, "oauth_login_codes": 0, "oauth_access_handles": 0,
+	} {
+		var count int
+		if err := store.database.QueryRow("SELECT COUNT(*) FROM " + table).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		if count != want {
+			t.Fatalf("%s rows=%d, want %d after credential pruning", table, count, want)
+		}
+	}
+}
+
+func TestOAuthCredentialCapacityKeepsCredentialStagesIndependent(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	identity, err := NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new OAuth identity: %v", err)
+	}
+
+	store.oauthMu.Lock()
+	store.oauthCounts[oauthCredentialState] = maxOutstandingOAuthStates
+	store.oauthMu.Unlock()
+	if _, err := store.CreateOAuthAuthorizationState(ctx, OAuthAuthorizationState{
+		NewAPIState: "new-api-state", RedirectURI: "https://ai.x2r.store/oauth/lark",
+	}); !errors.Is(err, ErrOAuthCredentialCapacity) {
+		t.Fatalf("state capacity error=%v, want ErrOAuthCredentialCapacity", err)
+	}
+	loginCode, err := store.CreateOAuthLoginCode(ctx, identity)
+	if err != nil {
+		t.Fatalf("state capacity blocked downstream login code: %v", err)
+	}
+
+	store.oauthMu.Lock()
+	store.oauthCounts[oauthCredentialAccessHandle] = maxOutstandingOAuthAccessHandles
+	store.oauthMu.Unlock()
+	if _, err := store.ExchangeOAuthLoginCode(ctx, loginCode); !errors.Is(err, ErrOAuthCredentialCapacity) {
+		t.Fatalf("access-handle capacity error=%v, want ErrOAuthCredentialCapacity", err)
+	}
+	store.oauthMu.Lock()
+	store.oauthCounts[oauthCredentialAccessHandle] = 0
+	store.oauthMu.Unlock()
+	if _, err := store.ExchangeOAuthLoginCode(ctx, loginCode); err != nil {
+		t.Fatalf("capacity rejection consumed login code: %v", err)
+	}
+}
+
+func TestOAuthExpiryPruningUsesEachExpiryIndex(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	indexes := map[string]string{
+		"oauth_states":         "idx_oauth_states_expiry",
+		"oauth_login_codes":    "idx_oauth_login_codes_expiry",
+		"oauth_access_handles": "idx_oauth_access_handles_expiry",
+	}
+	for table, index := range indexes {
+		rows, err := store.database.Query(
+			"EXPLAIN QUERY PLAN DELETE FROM "+table+" WHERE expires_at <= ?",
+			time.Now().UnixNano(),
+		)
+		if err != nil {
+			t.Fatalf("explain %s expiry pruning: %v", table, err)
+		}
+		var details []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				_ = rows.Close()
+				t.Fatalf("scan %s query plan: %v", table, err)
+			}
+			details = append(details, detail)
+		}
+		if err := rows.Close(); err != nil {
+			t.Fatalf("close %s query plan: %v", table, err)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("iterate %s query plan: %v", table, err)
+		}
+		if !strings.Contains(strings.Join(details, " "), index) {
+			t.Fatalf("%s expiry plan=%q, want index %s", table, details, index)
+		}
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -72,8 +73,11 @@ const (
 )
 
 type Store struct {
-	database *sql.DB
-	now      func() time.Time
+	database       *sql.DB
+	now            func() time.Time
+	oauthMu        sync.Mutex
+	oauthCounts    [oauthCredentialKindCount]int64
+	oauthLastPrune time.Time
 }
 
 var ErrEventPayloadMismatch = errors.New("event id payload mismatch")
@@ -129,6 +133,10 @@ func Open(path string) (*Store, error) {
 	database.SetMaxOpenConns(1)
 	store := &Store{database: database, now: time.Now}
 	if err := store.migrate(context.Background()); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	if err := store.initializeOAuthCredentialRetention(context.Background()); err != nil {
 		_ = database.Close()
 		return nil, err
 	}

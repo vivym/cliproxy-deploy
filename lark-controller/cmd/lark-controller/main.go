@@ -16,6 +16,8 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/larkapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthbridge"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthcontract"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/observability"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
@@ -103,9 +105,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	oauthHandler, err := prepareOAuthBridge(loaded, store)
+	if err != nil {
+		return err
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /integrations/lark/events", eventHandler)
+	oauthHandler.Register(mux)
 	operationalHandler.Register(mux)
 	server := newControllerHTTPServer(loaded.ListenAddress, mux)
 	listener, err := net.Listen("tcp", loaded.ListenAddress)
@@ -148,6 +155,29 @@ func run() error {
 		}
 		return err
 	}
+}
+
+func prepareOAuthBridge(loaded config.Config, store *inbox.Store) (*oauthbridge.Handler, error) {
+	if store == nil {
+		return nil, errors.New("OAuth credential store is required")
+	}
+	if len(loaded.NewAPIOAuthCallbackAllowlist) != 1 {
+		return nil, errors.New("exactly one New API OAuth callback is required")
+	}
+	exchanger, err := larkapi.NewOAuthExchanger(larkapi.OAuthConfig{
+		AppID: loaded.AppID, AppSecret: loaded.AppSecret,
+		RedirectURI: oauthcontract.ControllerCallbackURI,
+		TenantKey:   loaded.TenantKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return oauthbridge.NewHandler(oauthbridge.Config{
+		BridgeClientID:     loaded.BridgeClientID,
+		NewAPIRedirectURI:  loaded.NewAPIOAuthCallbackAllowlist[0],
+		RateLimitPerMinute: loaded.OAuthRateLimitPerMinute,
+		TrustedProxyCIDRs:  loaded.OAuthTrustedProxyCIDRs,
+	}, store, exchanger)
 }
 
 func prepareGrantClient(loaded config.Config) (worker.GrantClient, error) {

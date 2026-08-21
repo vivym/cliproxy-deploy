@@ -25,7 +25,10 @@ The controller supports a locally verified `shadow` mode and an explicit
   payload mismatches without replacing the first shadow ledger entry;
 - persists 256-bit OAuth state, login-code, and access-handle credentials only
   by SHA-256 digest, with atomic single-use consumption and fixed five-minute
-  or 60-second expiry windows;
+  or 60-second expiry windows; consumption atomically deletes the row, while
+  indexed expiry pruning is amortized to at most once per minute and each
+  credential stage has an independent hard row limit (10,000 states, 5,000
+  login codes, and 5,000 access handles);
 - exchanges Lark OAuth v3 authorization codes with the required JSON contract,
   immediately reads userinfo with the user bearer token, and returns only the
   normalized `tenant_key:open_id` identity, deterministic username, and a
@@ -36,6 +39,16 @@ The controller supports a locally verified `shadow` mode and an explicit
 - requires the registered Controller callback, permits only HTTPS upstream
   origins (plus loopback HTTP for tests), and refuses redirects so credentials
   cannot be replayed to another endpoint;
+- exposes the public OAuth authorize/callback bridge with exact New API client
+  and callback validation, exact-GET semantics, single-use state consumption,
+  redacted authorization-error mapping, a bounded callback context, and a
+  callback-only write-deadline extension that preserves the webhook
+  acknowledgement budget;
+- applies separate per-client fixed-window limits to OAuth authorize and
+  callback, caps state issuance at 20 per client per five minutes and 500
+  globally per minute, and groups IPv6 clients by `/64`; forwarded client
+  addresses are used only when the immediate peer belongs to an explicitly
+  configured trusted proxy CIDR;
 - classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
   six-step jittered retry schedule before durable dead-lettering;
 - recovers interrupted jobs with their attempt counters after restart;
@@ -66,6 +79,8 @@ LARK_ACTIVE_POLICY_VERSION=...
 LARK_POLICY_BUNDLE_DIR=/policies
 LARK_APPROVAL_BINDINGS_FILE=/policies/approval-bindings.json
 LARK_GRANT_PAYLOAD_KEYRING_FILE=/run/secrets/lark_grant_payload_keyring
+NEW_API_BRIDGE_CLIENT_ID=...
+NEW_API_OAUTH_CALLBACK_ALLOWLIST=https://ai.x2r.store/oauth/lark
 ```
 
 Active mode additionally requires:
@@ -101,7 +116,21 @@ Optional variables:
 LARK_CONTROLLER_LISTEN_ADDR=0.0.0.0:8080
 LARK_APPROVAL_LOCALE=zh-CN
 LARK_READINESS_MAX_QUEUE_AGE=15m
+LARK_OAUTH_RATE_LIMIT_PER_MINUTE=30
+LARK_OAUTH_TRUSTED_PROXY_CIDRS=172.31.20.0/24
 ```
+
+The configured OAuth rate limit is applied independently to authorize and
+callback for each resolved client address. Authorize state issuance has
+additional hard limits of 20 states per resolved client per five minutes and
+500 states globally per minute. IPv4 clients are keyed by address and IPv6
+clients by masked `/64`. A rejected admission or failed state write rolls back
+any reserved issuance capacity, and `Retry-After` reflects the limiter window
+that rejected the request. `X-Forwarded-For` is ignored unless the direct peer
+is covered by `LARK_OAUTH_TRUSTED_PROXY_CIDRS`; configure only the exact proxy
+network that reaches the controller. The initial callback allowlist is
+intentionally a single fixed URL and rejects additional or prefix-matching
+entries.
 
 Approval fetches retry after `5s, 15s, 1m, 5m, 15m, 1h`, with deterministic
 20 percent jitter. A valid Lark `Retry-After` takes precedence and is capped at
@@ -202,9 +231,9 @@ go build ./cmd/lark-controller
 ```
 
 This slice does not add the service to Docker Compose and must not be deployed.
-Active grant execution and the durable opaque OAuth credential store are
-implemented locally, as is the outbound Lark token/userinfo adapter. The OAuth
-authorize/callback/token/userinfo HTTP handlers, base-subscription dispatch,
-employment reconciliation, Compose wiring, operational runbooks, and
-production validation remain follow-up work. Do not enable active mode in
-production before those gates are complete.
+Active grant execution, the durable opaque OAuth credential store, the
+outbound Lark token/userinfo adapter, and the public OAuth authorize/callback
+handlers are implemented locally. The internal token/userinfo HTTP handlers,
+base-subscription dispatch, employment reconciliation, Compose wiring,
+operational runbooks, and production validation remain follow-up work. Do not
+enable active mode in production before those gates are complete.
