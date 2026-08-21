@@ -13,6 +13,7 @@ type OperationalSnapshot struct {
 	InboxStates              map[ProcessingState]int64
 	JobStates                map[string]int64
 	ApprovalFetches          map[string]int64
+	NewAPIGrants             map[string]int64
 	DeadLetters              map[string]int64
 	PolicyValidationFailures int64
 	OldestActiveJobAge       time.Duration
@@ -31,6 +32,7 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, e
 		InboxStates:       make(map[ProcessingState]int64),
 		JobStates:         make(map[string]int64),
 		ApprovalFetches:   make(map[string]int64),
+		NewAPIGrants:      make(map[string]int64),
 		DeadLetters:       make(map[string]int64),
 	}
 	rows, err := tx.QueryContext(ctx, `
@@ -105,6 +107,25 @@ WHERE action = 'approval_fetch' GROUP BY outcome`)
 		snapshot.ApprovalFetches[result] = count
 	}
 	if err := closeRows(rows, "approval fetch metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT outcome, COUNT(*) FROM controller_audit
+WHERE action = 'new_api_grant' GROUP BY outcome`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query New API grant metrics: %w", err)
+	}
+	for rows.Next() {
+		var result string
+		var count int64
+		if err := rows.Scan(&result, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan New API grant metrics: %w", err)
+		}
+		snapshot.NewAPIGrants[result] = count
+	}
+	if err := closeRows(rows, "New API grant metrics"); err != nil {
 		return OperationalSnapshot{}, err
 	}
 

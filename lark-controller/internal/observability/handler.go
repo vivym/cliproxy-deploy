@@ -83,6 +83,8 @@ func (h *Handler) metrics(response http.ResponseWriter, request *http.Request) {
 		boundedCounts(snapshot.JobStates, allowedJobStates))
 	writeCounterMap(&output, "lark_approval_fetch_total", "result",
 		boundedCounts(snapshot.ApprovalFetches, allowedFetchResults))
+	writeCounterMap(&output, "lark_new_api_grant_total", "result",
+		boundedCounts(snapshot.NewAPIGrants, allowedNewAPIGrantResults))
 	writeScalar(&output, "lark_policy_validation_failure_total", "counter",
 		float64(snapshot.PolicyValidationFailures))
 	writeCounterMap(&output, "lark_controller_dead_letter_total", "reason",
@@ -169,10 +171,11 @@ var (
 		"approval.task.status_changed_v4",
 		"approval_instance",
 	)
-	allowedInboxStates       = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter")
-	allowedJobStates         = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "dead_letter")
-	allowedFetchResults      = labels("success", "retryable_error", "terminal_error")
-	allowedDeadLetterReasons = labels(
+	allowedInboxStates        = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter")
+	allowedJobStates          = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "dead_letter")
+	allowedFetchResults       = labels("success", "retryable_error", "terminal_error")
+	allowedNewAPIGrantResults = labels("shadow_planned", "shadow_replayed")
+	allowedDeadLetterReasons  = labels(
 		"dead_letter_unknown_status",
 		"dead_letter_unsupported_event_type",
 		"dead_letter_policy_validation_failed",
@@ -183,6 +186,8 @@ var (
 		"transport_error",
 		"invalid_response",
 		"unclassified_error",
+		"invalid_command_plan",
+		"external_id_payload_mismatch",
 		"retry_exhausted_rate_limited",
 		"retry_exhausted_server_error",
 		"retry_exhausted_timeout",

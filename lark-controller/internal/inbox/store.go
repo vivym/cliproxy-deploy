@@ -57,6 +57,7 @@ const (
 	DecisionOutcomeDeadLetterUnsupportedEventType DecisionOutcome = "dead_letter_unsupported_event_type"
 	DecisionOutcomeDeadLetterPolicyValidation     DecisionOutcome = "dead_letter_policy_validation_failed"
 	DecisionOutcomeDeadLetterApprovalFetch        DecisionOutcome = "dead_letter_approval_fetch_failed"
+	DecisionOutcomeDeadLetterCommandPlanning      DecisionOutcome = "dead_letter_command_planning_failed"
 )
 
 type jobStatus string
@@ -83,27 +84,28 @@ type Job struct {
 }
 
 type Decision struct {
-	EventKey          string
-	ApprovalCode      string
-	InstanceCode      string
-	EventStatus       string
-	AuthorityStatus   string
-	Outcome           DecisionOutcome
-	PolicyVersion     string
-	ApprovalKind      policy.ApprovalKind
-	SchemaFingerprint string
-	BusinessCode      string
-	Locale            string
-	CatalogSHA256     string
-	QuotaDelta        int64
-	MonthlyQuota      int64
-	LevelRank         int
-	FailureReason     string
-	OpenIDHash        string
-	FormSHA256        string
-	StartTime         string
-	Reverted          bool
-	CreatedAt         time.Time
+	EventKey           string
+	ApprovalCode       string
+	InstanceCode       string
+	EventStatus        string
+	AuthorityStatus    string
+	Outcome            DecisionOutcome
+	PolicyVersion      string
+	ApprovalKind       policy.ApprovalKind
+	SchemaFingerprint  string
+	BusinessCode       string
+	Locale             string
+	CatalogSHA256      string
+	QuotaDelta         int64
+	MonthlyQuota       int64
+	LevelRank          int
+	FailureReason      string
+	OpenIDHash         string
+	FormSHA256         string
+	StartTime          string
+	Reverted           bool
+	CreatedAt          time.Time
+	EntitlementCommand *EntitlementCommandShadow
 }
 
 func Open(path string) (*Store, error) {
@@ -195,6 +197,23 @@ CREATE TABLE IF NOT EXISTS controller_audit (
     outcome TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS entitlement_command_shadows (
+    event_key TEXT PRIMARY KEY REFERENCES lark_event_inbox(event_key) ON DELETE CASCADE,
+    external_id TEXT NOT NULL,
+    request_sha256 TEXT NOT NULL,
+    subject_sha256 TEXT NOT NULL,
+    source TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    catalog_sha256 TEXT NOT NULL,
+    grant_type TEXT NOT NULL,
+    business_code TEXT NOT NULL,
+    quota_delta INTEGER NOT NULL DEFAULT 0,
+    monthly_quota INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entitlement_command_shadows_external_id
+    ON entitlement_command_shadows(external_id);
 CREATE TABLE IF NOT EXISTS policy_versions (
     policy_version TEXT PRIMARY KEY,
     catalog_sha256 TEXT NOT NULL UNIQUE,
@@ -576,6 +595,20 @@ INSERT INTO approval_instances (
 	); err != nil {
 		return fmt.Errorf("store approval decision: %w", err)
 	}
+	commandOutcome := ""
+	if decision.EntitlementCommand != nil {
+		commandOutcome, err = insertEntitlementCommandShadow(
+			ctx,
+			tx,
+			decision.EventKey,
+			decision.Outcome,
+			*decision.EntitlementCommand,
+			createdAt,
+		)
+		if err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
 		"INSERT INTO controller_audit (event_key, action, outcome, created_at) VALUES (?, 'shadow_evaluate', ?, ?)",
 		decision.EventKey, decision.Outcome, createdAt,
@@ -597,6 +630,14 @@ INSERT INTO approval_instances (
 			decision.EventKey, fetchResult, createdAt,
 		); err != nil {
 			return fmt.Errorf("store approval fetch audit: %w", err)
+		}
+	}
+	if decision.EntitlementCommand != nil {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO controller_audit (event_key, action, outcome, created_at) VALUES (?, 'new_api_grant', ?, ?)",
+			decision.EventKey, commandOutcome, createdAt,
+		); err != nil {
+			return fmt.Errorf("store New API grant shadow audit: %w", err)
 		}
 	}
 	if _, err := tx.ExecContext(ctx,
@@ -628,7 +669,8 @@ func terminalStatesForOutcome(outcome DecisionOutcome) (jobStatus, ProcessingSta
 	case DecisionOutcomeDeadLetterUnknownStatus,
 		DecisionOutcomeDeadLetterUnsupportedEventType,
 		DecisionOutcomeDeadLetterPolicyValidation,
-		DecisionOutcomeDeadLetterApprovalFetch:
+		DecisionOutcomeDeadLetterApprovalFetch,
+		DecisionOutcomeDeadLetterCommandPlanning:
 		return jobStatusDeadLetter, ProcessingStateDeadLetter, nil
 	default:
 		return "", "", fmt.Errorf("unknown shadow decision outcome %q", outcome)

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 )
 
@@ -221,9 +222,39 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 			decision.QuotaDelta = resolved.QuotaDelta
 			decision.MonthlyQuota = resolved.MonthlyQuota
 			decision.LevelRank = resolved.LevelRank
+			_, receipt, planErr := newapi.PlanApprovalGrant(newapi.ApprovalGrantInput{
+				TenantKey: job.Event.TenantKey, OpenID: instance.OpenID,
+				PolicyVersion: resolved.PolicyVersion, ApprovalKind: string(resolved.ApprovalKind),
+				BusinessCode: resolved.BusinessCode, QuotaDelta: resolved.QuotaDelta,
+				MonthlyQuota: resolved.MonthlyQuota, ApprovalCode: instance.ApprovalCode,
+				InstanceCode: instance.InstanceCode, StartTimeMilliseconds: instance.StartTime,
+				SchemaFingerprint: resolved.SchemaFingerprint, Locale: p.locale,
+				CatalogSHA256: resolved.CatalogSHA256,
+			})
+			if planErr != nil {
+				decision.Outcome = inbox.DecisionOutcomeDeadLetterCommandPlanning
+				decision.FailureReason = "invalid_command_plan"
+			} else {
+				decision.EntitlementCommand = &inbox.EntitlementCommandShadow{
+					ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
+					SubjectSHA256: receipt.SubjectSHA256, Source: "lark_approval",
+					PolicyVersion: receipt.PolicyVersion, CatalogSHA256: receipt.CatalogSHA256,
+					GrantType: receipt.GrantType, BusinessCode: receipt.BusinessCode,
+					QuotaDelta: receipt.QuotaDelta, MonthlyQuota: receipt.MonthlyQuota,
+				}
+			}
 		}
 	}
 	if err := p.store.CompleteDecision(ctx, job, decision); err != nil {
+		if errors.Is(err, inbox.ErrEntitlementCommandPayloadMismatch) {
+			decision.Outcome = inbox.DecisionOutcomeDeadLetterCommandPlanning
+			decision.FailureReason = "external_id_payload_mismatch"
+			decision.EntitlementCommand = nil
+			if completeErr := p.store.CompleteDecision(ctx, job, decision); completeErr != nil {
+				return true, fmt.Errorf("dead-letter conflicting entitlement command: %w", completeErr)
+			}
+			return true, nil
+		}
 		return true, err
 	}
 	return true, nil

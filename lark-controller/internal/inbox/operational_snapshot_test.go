@@ -108,6 +108,43 @@ func TestOperationalSnapshotMeasuresRetryReadyAgeFromEligibility(t *testing.T) {
 	}
 }
 
+func TestOperationalSnapshotReportsNewAPIGrantShadows(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	event := operationalEvent("evt-command", "APPROVED")
+	if _, err := store.Record(ctx, event); err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	job, found, err := store.ClaimNext(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim job: found=%t err=%v", found, err)
+	}
+	if err := store.CompleteDecision(ctx, job, inbox.Decision{
+		EventKey: event.Key, ApprovalCode: event.ApprovalCode,
+		InstanceCode: event.InstanceCode, EventStatus: event.Status,
+		AuthorityStatus: "APPROVED", Outcome: inbox.DecisionOutcomeShadowAuthorityVerified,
+		EntitlementCommand: &inbox.EntitlementCommandShadow{
+			ExternalID:    "lark:wallet-topup:instance-evt-command",
+			RequestSHA256: "request-sha", SubjectSHA256: "subject-sha",
+			Source: "lark_approval", PolicyVersion: "employee-v1", CatalogSHA256: "catalog-sha",
+			GrantType: "wallet_quota", BusinessCode: "topup_5", QuotaDelta: 2_500_000,
+		},
+	}); err != nil {
+		t.Fatalf("complete command shadow: %v", err)
+	}
+	snapshot, err := store.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("read operational snapshot: %v", err)
+	}
+	if snapshot.NewAPIGrants["shadow_planned"] != 1 {
+		t.Fatalf("unexpected New API grant counters: %v", snapshot.NewAPIGrants)
+	}
+}
+
 func TestOpenRecoversProcessingJobAndInboxStateTogether(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")

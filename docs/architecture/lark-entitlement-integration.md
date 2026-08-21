@@ -1489,8 +1489,14 @@ New API 检查：
 当前本地实现边界（shadow-only，尚未部署）：v1/v2 webhook 验证与 durable inbox、
 authoritative Approval v4 fetch、versioned policy/manifest 解析、固定 locale 与 exact
 display-text mapping、有限重试/dead-letter/reversal pending、重启恢复、SQLite audit
-snapshot，以及 `/healthz`、`/readyz`、`/metrics` 已实现。Lark OAuth bridge、New API
-adapter、任何 entitlement write、就业状态 reconciliation、Compose 接入和生产验证均未实现。
+snapshot，以及 `/healthz`、`/readyz`、`/metrics` 已实现。Controller 现在还会生成精确的
+New API grant canonical request，并在同一 SQLite 事务只保存 external ID、policy/business
+字段、request hash 和 subject hash；同 payload 的 external ID 重放记为 `shadow_replayed`，
+不同 payload 进入 `external_id_payload_mismatch` dead-letter。HTTP adapter 的 grant 与分页
+active Lark principal contract 已用本地测试服务器验证，但 `cmd/lark-controller` 不读取 New API
+URL/credential、不构造 client，也不发送请求。principals contract 不返回 New API user ID、
+wallet、token 或 subscription 明细。Lark OAuth bridge、任何 entitlement write、就业状态
+reconciliation、Compose 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的

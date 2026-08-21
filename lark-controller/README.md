@@ -15,14 +15,19 @@ The current tracer slice is deliberately shadow-only. It:
   from operator-mounted strict JSON files;
 - resolves `radioV2` values by exact display text and persists only sanitized
   shadow evidence;
+- plans the exact New API entitlement-grant contract and atomically stores only
+  its external ID, policy fields, business values, and request/subject hashes;
+- records same-payload external-ID reuse as `shadow_replayed` and dead-letters
+  payload mismatches without replacing the first shadow ledger entry;
 - classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
   six-step jittered retry schedule before durable dead-lettering;
 - recovers interrupted jobs with their attempt counters after restart;
 - exposes liveness, readiness, and bounded-label Prometheus metrics for inbox,
-  jobs, approval fetches, policy failures, dead letters, and queue age;
+  jobs, approval fetches, New API shadow grants, policy failures, dead letters,
+  and queue age;
 - stores only normalized event data, requester/form hashes, and shadow
   decisions; and
-- has no New API entitlement client or grant execution path.
+- does not configure, construct, or call the included New API HTTP client.
 
 Required environment variables:
 
@@ -66,6 +71,16 @@ GET /metrics  Prometheus text format with bounded label values
 stalled. A future `retry_wait` job does not fail readiness merely because Lark
 asked the controller to wait. Dead letters remain visible in metrics but do not
 disable webhook ingestion.
+
+`internal/newapi` implements the versioned HTTP contracts for entitlement
+grants and paginated active-Lark-principal enumeration. The grant adapter uses
+only the dedicated integration bearer credential, validates bounded responses,
+and classifies response loss as retryable because the external ID is
+idempotent. The principal response intentionally contains no New API user ID,
+wallet balance, token, or subscription details. This module is contract-tested
+with local HTTP servers but is not wired into `cmd/lark-controller`; shadow
+mode has no New API URL or credential setting and performs no New API network
+request.
 
 The policy directory has no built-in defaults. Operators must mount one or
 more files named `*.policy.json`; every file uses `format_version: 1` and
@@ -123,5 +138,6 @@ go build ./cmd/lark-controller
 ```
 
 This slice does not add the service to Docker Compose and must not be deployed.
-OAuth, employment reconciliation, and the New API adapter remain follow-up WP3
-slices. There is still no entitlement mutation path.
+OAuth, employment reconciliation, New API runtime wiring/retry, and all
+entitlement mutation remain follow-up WP3 slices. There is still no active
+entitlement path.

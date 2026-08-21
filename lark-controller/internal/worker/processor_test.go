@@ -2,6 +2,7 @@ package worker_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -19,15 +20,19 @@ type approvalFetcher struct {
 }
 
 type approvalResolver struct {
-	calls      int
-	request    policy.ApprovalRequest
-	resolution policy.ApprovalResolution
-	err        error
+	calls       int
+	request     policy.ApprovalRequest
+	resolution  policy.ApprovalResolution
+	resolutions []policy.ApprovalResolution
+	err         error
 }
 
 func (r *approvalResolver) ResolveApproval(request policy.ApprovalRequest) (policy.ApprovalResolution, error) {
 	r.calls++
 	r.request = request
+	if r.calls <= len(r.resolutions) {
+		return r.resolutions[r.calls-1], r.err
+	}
 	return r.resolution, r.err
 }
 
@@ -317,7 +322,7 @@ func TestShadowProcessorFailsClosedAcrossEventStatusMatrix(t *testing.T) {
 			}
 			fetcher := &approvalFetcher{instance: worker.ApprovalInstance{
 				ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-" + test.status,
-				Status: "APPROVED", OpenID: "ou_requester", FormJSON: `[]`,
+				Status: "APPROVED", OpenID: "ou_requester", StartTime: "1787270300000", FormJSON: `[]`,
 			}}
 			resolver := &approvalResolver{resolution: verifiedWalletResolution()}
 			processor, err := worker.NewShadowProcessor(store, fetcher, resolver, "zh-CN")
@@ -501,6 +506,120 @@ func TestShadowProcessorPersistsResolvedPolicyEvidence(t *testing.T) {
 		decision.BusinessCode != "topup_5" || decision.Locale != "zh-CN" ||
 		decision.CatalogSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
 		t.Fatalf("unexpected policy evidence: %+v", decision)
+	}
+	command, err := store.GetEntitlementCommandShadow(ctx, "lark:v2:evt-policy")
+	if err != nil {
+		t.Fatalf("get entitlement command shadow: %v", err)
+	}
+	if command.ExternalID != "lark:wallet-topup:instance-policy" ||
+		command.Source != "lark_approval" || command.PolicyVersion != "employee-v1" ||
+		command.GrantType != "wallet_quota" || command.BusinessCode != "topup_5" ||
+		command.QuotaDelta != 2_500_000 || command.MonthlyQuota != 0 ||
+		command.SubjectSHA256 != "51b4284131693f52e5701a9aa003814e2290e41df7a1825b17c9f3a553434afa" ||
+		command.RequestSHA256 == "" || command.Outcome != "shadow_planned" {
+		t.Fatalf("unexpected entitlement command shadow: %+v", command)
+	}
+	if command.SubjectSHA256 == "tenant-test:ou_requester" || command.SubjectSHA256 == "ou_requester" {
+		t.Fatalf("entitlement command retained raw subject: %+v", command)
+	}
+}
+
+func TestShadowProcessorReplaysSameEntitlementCommandAcrossDistinctEvents(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, eventID := range []string{"evt-first", "evt-recovery"} {
+		_, err := store.Record(ctx, inbox.Event{
+			Key: "lark:v2:" + eventID, SchemaVersion: "2.0", EventID: eventID,
+			EventType: "approval.instance.status_changed_v4", AppID: "cli_test", TenantKey: "tenant-test",
+			ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-shared", Status: "APPROVED",
+			PayloadJSON: `{"status":"APPROVED"}`,
+		})
+		if err != nil {
+			t.Fatalf("record %s: %v", eventID, err)
+		}
+	}
+	processor, err := worker.NewShadowProcessor(
+		store,
+		&approvalFetcher{},
+		&approvalResolver{resolution: verifiedWalletResolution()},
+		"zh-CN",
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	for range 2 {
+		if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+			t.Fatalf("process command replay: processed=%t err=%v", processed, err)
+		}
+	}
+	first, err := store.GetEntitlementCommandShadow(ctx, "lark:v2:evt-first")
+	if err != nil {
+		t.Fatalf("get first command: %v", err)
+	}
+	replay, err := store.GetEntitlementCommandShadow(ctx, "lark:v2:evt-recovery")
+	if err != nil {
+		t.Fatalf("get replayed command: %v", err)
+	}
+	if first.Outcome != "shadow_planned" || replay.Outcome != "shadow_replayed" ||
+		first.ExternalID != replay.ExternalID || first.RequestSHA256 != replay.RequestSHA256 {
+		t.Fatalf("unexpected command replay: first=%+v replay=%+v", first, replay)
+	}
+}
+
+func TestShadowProcessorDeadLettersExternalIDPayloadMismatch(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	for _, eventID := range []string{"evt-original", "evt-conflict"} {
+		_, err := store.Record(ctx, inbox.Event{
+			Key: "lark:v2:" + eventID, SchemaVersion: "2.0", EventID: eventID,
+			EventType: "approval.instance.status_changed_v4", AppID: "cli_test", TenantKey: "tenant-test",
+			ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-conflict", Status: "APPROVED",
+			PayloadJSON: `{"status":"APPROVED"}`,
+		})
+		if err != nil {
+			t.Fatalf("record %s: %v", eventID, err)
+		}
+	}
+	conflictingResolution := verifiedWalletResolution()
+	conflictingResolution.BusinessCode = "topup_10"
+	conflictingResolution.QuotaDelta = 5_000_000
+	processor, err := worker.NewShadowProcessor(
+		store,
+		&approvalFetcher{},
+		&approvalResolver{resolutions: []policy.ApprovalResolution{
+			verifiedWalletResolution(), conflictingResolution,
+		}},
+		"zh-CN",
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	for range 2 {
+		if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+			t.Fatalf("process command conflict: processed=%t err=%v", processed, err)
+		}
+	}
+	decision, err := store.GetDecision(ctx, "lark:v2:evt-conflict")
+	if err != nil {
+		t.Fatalf("get conflict decision: %v", err)
+	}
+	if decision.Outcome != inbox.DecisionOutcomeDeadLetterCommandPlanning ||
+		decision.FailureReason != "external_id_payload_mismatch" {
+		t.Fatalf("unexpected conflict decision: %+v", decision)
+	}
+	if _, err := store.GetEntitlementCommandShadow(ctx, "lark:v2:evt-conflict"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("conflicting command shadow error = %v, want no row", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || processed {
+		t.Fatalf("conflicting command was reclaimed: processed=%t err=%v", processed, err)
 	}
 }
 
