@@ -227,6 +227,16 @@ CREATE TABLE IF NOT EXISTS entitlement_grant_jobs (
     attempts INTEGER NOT NULL DEFAULT 0,
     next_attempt_at TEXT NOT NULL,
     last_error TEXT NOT NULL DEFAULT '',
+    activated_at TEXT NOT NULL DEFAULT '',
+    response_status TEXT NOT NULL DEFAULT '',
+    response_user_id INTEGER NOT NULL DEFAULT 0,
+    result_grant_type TEXT NOT NULL DEFAULT '',
+    result_quota_delta INTEGER NOT NULL DEFAULT 0,
+    result_level_code TEXT NOT NULL DEFAULT '',
+    result_subscription_id INTEGER NOT NULL DEFAULT 0,
+    result_assignment_version INTEGER NOT NULL DEFAULT 0,
+    result_transition TEXT NOT NULL DEFAULT '',
+    completed_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -258,6 +268,8 @@ WHERE status = 'processing';
 UPDATE lark_event_inbox SET processing_state = 'pending'
 WHERE processing_state = 'processing'
   AND event_key IN (SELECT event_key FROM jobs WHERE status = 'pending');
+UPDATE entitlement_grant_jobs SET status = 'pending', updated_at = next_attempt_at
+WHERE status = 'processing';
 `
 	if _, err := s.database.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate inbox: %w", err)
@@ -266,6 +278,9 @@ WHERE processing_state = 'processing'
 		return err
 	}
 	if err := s.ensurePolicyVersionColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureEntitlementGrantJobColumns(ctx); err != nil {
 		return err
 	}
 	if err := s.reclassifyLegacyApprovalDecisions(ctx); err != nil {
@@ -322,6 +337,50 @@ func (s *Store) ensurePolicyVersionColumns(ctx context.Context) error {
 	return nil
 }
 
+func (s *Store) ensureEntitlementGrantJobColumns(ctx context.Context) error {
+	required := []struct {
+		name string
+		ddl  string
+	}{
+		{"response_status", "ALTER TABLE entitlement_grant_jobs ADD COLUMN response_status TEXT NOT NULL DEFAULT ''"},
+		{"activated_at", "ALTER TABLE entitlement_grant_jobs ADD COLUMN activated_at TEXT NOT NULL DEFAULT ''"},
+		{"response_user_id", "ALTER TABLE entitlement_grant_jobs ADD COLUMN response_user_id INTEGER NOT NULL DEFAULT 0"},
+		{"result_grant_type", "ALTER TABLE entitlement_grant_jobs ADD COLUMN result_grant_type TEXT NOT NULL DEFAULT ''"},
+		{"result_quota_delta", "ALTER TABLE entitlement_grant_jobs ADD COLUMN result_quota_delta INTEGER NOT NULL DEFAULT 0"},
+		{"result_level_code", "ALTER TABLE entitlement_grant_jobs ADD COLUMN result_level_code TEXT NOT NULL DEFAULT ''"},
+		{"result_subscription_id", "ALTER TABLE entitlement_grant_jobs ADD COLUMN result_subscription_id INTEGER NOT NULL DEFAULT 0"},
+		{"result_assignment_version", "ALTER TABLE entitlement_grant_jobs ADD COLUMN result_assignment_version INTEGER NOT NULL DEFAULT 0"},
+		{"result_transition", "ALTER TABLE entitlement_grant_jobs ADD COLUMN result_transition TEXT NOT NULL DEFAULT ''"},
+		{"completed_at", "ALTER TABLE entitlement_grant_jobs ADD COLUMN completed_at TEXT NOT NULL DEFAULT ''"},
+	}
+	columns, err := s.tableColumns(ctx, "entitlement_grant_jobs")
+	if err != nil {
+		return err
+	}
+	for _, column := range required {
+		if _, exists := columns[column.name]; exists {
+			continue
+		}
+		if _, err := s.database.ExecContext(ctx, column.ddl); err != nil {
+			return fmt.Errorf("add entitlement grant job column %q: %w", column.name, err)
+		}
+	}
+	var missingActivation int64
+	if err := s.database.QueryRowContext(ctx, `
+SELECT COUNT(*) FROM entitlement_grant_jobs
+WHERE status IN (?, ?, ?) AND activated_at = ''`,
+		EntitlementGrantJobStatusPending,
+		EntitlementGrantJobStatusProcessing,
+		EntitlementGrantJobStatusRetryWait,
+	).Scan(&missingActivation); err != nil {
+		return fmt.Errorf("validate entitlement grant job activation: %w", err)
+	}
+	if missingActivation != 0 {
+		return errors.New("active entitlement grant jobs require activated_at")
+	}
+	return nil
+}
+
 func (s *Store) reclassifyLegacyApprovalDecisions(ctx context.Context) error {
 	tx, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -366,6 +425,8 @@ func (s *Store) tableColumns(ctx context.Context, table string) (map[string]stru
 		query = "PRAGMA table_info(approval_instances)"
 	case "policy_versions":
 		query = "PRAGMA table_info(policy_versions)"
+	case "entitlement_grant_jobs":
+		query = "PRAGMA table_info(entitlement_grant_jobs)"
 	default:
 		return nil, errors.New("unsupported schema inspection table")
 	}
@@ -533,7 +594,7 @@ SELECT j.id, j.attempts, i.event_key, i.schema_version, i.event_id, i.event_type
        i.duplicate_count, i.received_at, i.last_seen_at
 FROM jobs j
 JOIN lark_event_inbox i ON i.event_key = j.event_key
-WHERE j.status IN (?, ?) AND j.next_attempt_at <= ?
+WHERE j.status IN (?, ?) AND julianday(j.next_attempt_at) <= julianday(?)
 ORDER BY j.id
 LIMIT 1`
 	var job Job

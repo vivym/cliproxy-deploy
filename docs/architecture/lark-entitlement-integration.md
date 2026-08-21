@@ -1294,11 +1294,16 @@ New API production debug 必须保持关闭。
 Controller job 状态：
 
 ```text
+held_shadow --explicit active release--> pending
 pending -> processing -> succeeded
                     -> retry_wait -> processing
                     -> dead_letter
                     -> reversal_pending
 ```
+
+`held_shadow` 的保存时间不计入 `principal_not_ready` 的 24 小时窗口；窗口从显式 release
+写入的 `activated_at` 开始。仅 active-mode startup gate 可以 release，shadow event worker
+和普通 claimant 都不能领取 held job。
 
 建议重试：
 
@@ -1541,7 +1546,13 @@ AES-256-GCM 密封的 canonical request；密封记录使用 `held_shadow` 状�
 `shadow_replayed`，不同 payload 进入 `external_id_payload_mismatch` dead-letter。密钥通过
 `LARK_GRANT_PAYLOAD_KEY_FILE` 读取一行 64 字符小写 hex，当前只支持单 key，active claimant
 切片必须先补 keyring/rotation 方案；启动时若已有 held job 的 key ID 与当前 key 不同，必须在
-worker 启动前 fail closed，防止形成无法由单 key 解密的混合账本。Controller compatibility receipt
+worker 启动前 fail closed，防止形成无法由单 key 解密的混合账本。当前还实现了未接入 runtime
+的 `GrantExecutor` 核心和显式 release/claim/recovery API：它可解封请求、调用既有 adapter、
+保存 sanitized result、处理 response-loss replay，并按登记 code retry/dead-letter；
+`principal_not_ready` 的 24 小时从 `activated_at` 计算。active result/retry/dead-letter metrics
+及从 `activated_at` 开始的 released-job queue age 已实现，但 `cmd/lark-controller` 不构造
+executor、不调用 release。
+Controller compatibility receipt
 `166bbeb` 与 New API Gin router receipt `f2ef0d95` 已共同固定 nested error envelope、subscription
 result 和分页 active Lark principal wire contract；`cmd/lark-controller` 仍不读取 New API
 URL/credential、不构造 client，也不发送请求。principals contract 不返回 New API user ID、

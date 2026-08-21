@@ -159,6 +159,33 @@ func TestOperationalSnapshotReportsNewAPIGrantShadows(t *testing.T) {
 	}
 }
 
+func TestOperationalSnapshotStartsReleasedGrantAgeAtActivation(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordHeldGrantJob(t, ctx, store, "evt-released-age")
+	time.Sleep(300 * time.Millisecond)
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+		t.Fatalf("release held grant: released=%d err=%v", released, err)
+	}
+
+	snapshot, err := store.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("read released grant snapshot: %v", err)
+	}
+	if snapshot.OldestActiveJobAge <= 0 || snapshot.OldestActiveJobAge >= 200*time.Millisecond ||
+		snapshot.OldestReadyJobAge <= 0 || snapshot.OldestReadyJobAge >= 200*time.Millisecond {
+		t.Fatalf(
+			"released grant ages include held time: active=%s ready=%s",
+			snapshot.OldestActiveJobAge,
+			snapshot.OldestReadyJobAge,
+		)
+	}
+}
+
 func TestOpenRecoversProcessingJobAndInboxStateTogether(t *testing.T) {
 	ctx := context.Background()
 	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")

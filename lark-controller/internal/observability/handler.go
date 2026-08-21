@@ -83,6 +83,11 @@ func (h *Handler) metrics(response http.ResponseWriter, request *http.Request) {
 		boundedCounts(snapshot.JobStates, allowedJobStates))
 	writeGaugeMap(&output, "lark_new_api_grant_jobs", "state",
 		boundedCounts(snapshot.EntitlementGrantJobStates, allowedEntitlementGrantJobStates))
+	writeEntitlementGrantResults(&output, snapshot.EntitlementGrantResults)
+	writeCounterMap(&output, "entitlement_grant_retry_total", "reason",
+		boundedCounts(snapshot.EntitlementGrantRetries, allowedEntitlementGrantFailureReasons))
+	writeCounterMap(&output, "entitlement_dead_letter_total", "reason",
+		boundedCounts(snapshot.EntitlementGrantDeadLetters, allowedEntitlementGrantFailureReasons))
 	writeCounterMap(&output, "lark_approval_fetch_total", "result",
 		boundedCounts(snapshot.ApprovalFetches, allowedFetchResults))
 	writeCounterMap(&output, "lark_new_api_grant_total", "result",
@@ -134,6 +139,47 @@ func writeScalar(output *strings.Builder, name, metricType string, value float64
 		name, metricType, name, strconv.FormatFloat(value, 'f', -1, 64))
 }
 
+func writeEntitlementGrantResults(
+	output *strings.Builder,
+	values map[inbox.EntitlementGrantResultKey]int64,
+) {
+	type result struct {
+		grantType string
+		status    string
+		count     int64
+	}
+	bounded := make(map[inbox.EntitlementGrantResultKey]int64)
+	for key, count := range values {
+		if _, ok := allowedEntitlementGrantTypes[key.GrantType]; !ok {
+			key.GrantType = "other"
+		}
+		if _, ok := allowedEntitlementGrantStatuses[key.Status]; !ok {
+			key.Status = "other"
+		}
+		bounded[key] += count
+	}
+	results := make([]result, 0, len(bounded))
+	for key, count := range bounded {
+		results = append(results, result{grantType: key.GrantType, status: key.Status, count: count})
+	}
+	sort.Slice(results, func(left, right int) bool {
+		if results[left].grantType == results[right].grantType {
+			return results[left].status < results[right].status
+		}
+		return results[left].grantType < results[right].grantType
+	})
+	output.WriteString("# TYPE entitlement_grant_total counter\n")
+	for _, value := range results {
+		fmt.Fprintf(
+			output,
+			"entitlement_grant_total{status=\"%s\",type=\"%s\"} %d\n",
+			escapeLabel(value.status),
+			escapeLabel(value.grantType),
+			value.count,
+		)
+	}
+}
+
 func escapeLabel(value string) string {
 	value = strings.ReplaceAll(value, `\`, `\\`)
 	value = strings.ReplaceAll(value, "\n", `\n`)
@@ -167,18 +213,37 @@ func labels(values ...string) map[string]struct{} {
 	return result
 }
 
+func entitlementGrantFailureReasonLabels() map[string]struct{} {
+	reasons := inbox.EntitlementGrantFailureReasons()
+	result := make(map[string]struct{}, len(reasons))
+	for _, reason := range reasons {
+		result[string(reason)] = struct{}{}
+	}
+	return result
+}
+
 var (
 	allowedEventTypes = labels(
 		"approval.instance.status_changed_v4",
 		"approval.task.status_changed_v4",
 		"approval_instance",
 	)
-	allowedInboxStates               = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter")
-	allowedJobStates                 = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "dead_letter")
-	allowedEntitlementGrantJobStates = labels("held_shadow")
-	allowedFetchResults              = labels("success", "retryable_error", "terminal_error")
-	allowedNewAPIGrantResults        = labels("shadow_planned", "shadow_replayed")
-	allowedDeadLetterReasons         = labels(
+	allowedInboxStates                    = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter")
+	allowedJobStates                      = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "dead_letter")
+	allowedEntitlementGrantJobStates      = labels("held_shadow", "pending", "processing", "retry_wait", "succeeded", "dead_letter")
+	allowedEntitlementGrantTypes          = labels("wallet_quota", "subscription_level")
+	allowedEntitlementGrantStatuses       = labels("applied", "replayed", "noop", "ignored_stale")
+	allowedEntitlementGrantFailureReasons = entitlementGrantFailureReasonLabels()
+	allowedFetchResults                   = labels("success", "retryable_error", "terminal_error")
+	allowedNewAPIGrantResults             = labels(
+		"shadow_planned",
+		"shadow_replayed",
+		"applied",
+		"replayed",
+		"noop",
+		"ignored_stale",
+	)
+	allowedDeadLetterReasons = labels(
 		"dead_letter_unknown_status",
 		"dead_letter_unsupported_event_type",
 		"dead_letter_policy_validation_failed",

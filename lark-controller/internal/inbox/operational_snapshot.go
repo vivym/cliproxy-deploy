@@ -8,17 +8,25 @@ import (
 )
 
 type OperationalSnapshot struct {
-	WebhookReceived           map[string]int64
-	WebhookDuplicates         map[string]int64
-	InboxStates               map[ProcessingState]int64
-	JobStates                 map[string]int64
-	EntitlementGrantJobStates map[string]int64
-	ApprovalFetches           map[string]int64
-	NewAPIGrants              map[string]int64
-	DeadLetters               map[string]int64
-	PolicyValidationFailures  int64
-	OldestActiveJobAge        time.Duration
-	OldestReadyJobAge         time.Duration
+	WebhookReceived             map[string]int64
+	WebhookDuplicates           map[string]int64
+	InboxStates                 map[ProcessingState]int64
+	JobStates                   map[string]int64
+	EntitlementGrantJobStates   map[string]int64
+	EntitlementGrantResults     map[EntitlementGrantResultKey]int64
+	EntitlementGrantRetries     map[string]int64
+	EntitlementGrantDeadLetters map[string]int64
+	ApprovalFetches             map[string]int64
+	NewAPIGrants                map[string]int64
+	DeadLetters                 map[string]int64
+	PolicyValidationFailures    int64
+	OldestActiveJobAge          time.Duration
+	OldestReadyJobAge           time.Duration
+}
+
+type EntitlementGrantResultKey struct {
+	GrantType string
+	Status    string
 }
 
 func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, error) {
@@ -28,14 +36,17 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, e
 	}
 	defer func() { _ = tx.Rollback() }()
 	snapshot := OperationalSnapshot{
-		WebhookReceived:           make(map[string]int64),
-		WebhookDuplicates:         make(map[string]int64),
-		InboxStates:               make(map[ProcessingState]int64),
-		JobStates:                 make(map[string]int64),
-		EntitlementGrantJobStates: make(map[string]int64),
-		ApprovalFetches:           make(map[string]int64),
-		NewAPIGrants:              make(map[string]int64),
-		DeadLetters:               make(map[string]int64),
+		WebhookReceived:             make(map[string]int64),
+		WebhookDuplicates:           make(map[string]int64),
+		InboxStates:                 make(map[ProcessingState]int64),
+		JobStates:                   make(map[string]int64),
+		EntitlementGrantJobStates:   make(map[string]int64),
+		EntitlementGrantResults:     make(map[EntitlementGrantResultKey]int64),
+		EntitlementGrantRetries:     make(map[string]int64),
+		EntitlementGrantDeadLetters: make(map[string]int64),
+		ApprovalFetches:             make(map[string]int64),
+		NewAPIGrants:                make(map[string]int64),
+		DeadLetters:                 make(map[string]int64),
 	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT event_type, COUNT(*) + COALESCE(SUM(duplicate_count), 0), COALESCE(SUM(duplicate_count), 0)
@@ -112,6 +123,65 @@ SELECT status, COUNT(*) FROM entitlement_grant_jobs GROUP BY status`)
 	}
 
 	rows, err = tx.QueryContext(ctx, `
+SELECT result_grant_type, response_status, COUNT(*)
+FROM entitlement_grant_jobs
+WHERE status = 'succeeded'
+GROUP BY result_grant_type, response_status`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query entitlement grant result metrics: %w", err)
+	}
+	for rows.Next() {
+		var key EntitlementGrantResultKey
+		var count int64
+		if err := rows.Scan(&key.GrantType, &key.Status, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan entitlement grant result metrics: %w", err)
+		}
+		snapshot.EntitlementGrantResults[key] = count
+	}
+	if err := closeRows(rows, "entitlement grant result metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT outcome, COUNT(*) FROM controller_audit
+WHERE action = 'entitlement_grant_retry' GROUP BY outcome`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query entitlement grant retry metrics: %w", err)
+	}
+	for rows.Next() {
+		var reason string
+		var count int64
+		if err := rows.Scan(&reason, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan entitlement grant retry metrics: %w", err)
+		}
+		snapshot.EntitlementGrantRetries[reason] = count
+	}
+	if err := closeRows(rows, "entitlement grant retry metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT outcome, COUNT(*) FROM controller_audit
+WHERE action = 'entitlement_grant_dead_letter' GROUP BY outcome`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query entitlement grant dead-letter metrics: %w", err)
+	}
+	for rows.Next() {
+		var reason string
+		var count int64
+		if err := rows.Scan(&reason, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan entitlement grant dead-letter metrics: %w", err)
+		}
+		snapshot.EntitlementGrantDeadLetters[reason] = count
+	}
+	if err := closeRows(rows, "entitlement grant dead-letter metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
 SELECT outcome, COUNT(*) FROM controller_audit
 WHERE action = 'approval_fetch' GROUP BY outcome`)
 	if err != nil {
@@ -183,6 +253,16 @@ SELECT COUNT(*) FROM approval_instances WHERE outcome = ?`,
 	if err != nil {
 		return OperationalSnapshot{}, err
 	}
+	oldestActiveGrantAge, err := oldestEntitlementGrantJobAge(ctx, tx, now, false)
+	if err != nil {
+		return OperationalSnapshot{}, err
+	}
+	snapshot.OldestActiveJobAge = max(snapshot.OldestActiveJobAge, oldestActiveGrantAge)
+	oldestReadyGrantAge, err := oldestEntitlementGrantJobAge(ctx, tx, now, true)
+	if err != nil {
+		return OperationalSnapshot{}, err
+	}
+	snapshot.OldestReadyJobAge = max(snapshot.OldestReadyJobAge, oldestReadyGrantAge)
 	if err := tx.Commit(); err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("commit operational snapshot: %w", err)
 	}
@@ -211,7 +291,7 @@ SELECT MIN(` + timestampExpression + `) FROM jobs
 WHERE status IN ('pending', 'processing', 'retry_wait')`
 	args := []any{}
 	if readyOnly {
-		query += ` AND (status != 'retry_wait' OR next_attempt_at <= ?)`
+		query += ` AND (status != 'retry_wait' OR julianday(next_attempt_at) <= julianday(?))`
 		args = append(args, now.Format(time.RFC3339Nano))
 	}
 	var oldest sql.NullString
@@ -224,6 +304,41 @@ WHERE status IN ('pending', 'processing', 'retry_wait')`
 	createdAt, err := time.Parse(time.RFC3339Nano, oldest.String)
 	if err != nil {
 		return 0, fmt.Errorf("parse oldest job age: %w", err)
+	}
+	if createdAt.After(now) {
+		return 0, nil
+	}
+	return now.Sub(createdAt), nil
+}
+
+func oldestEntitlementGrantJobAge(
+	ctx context.Context,
+	tx *sql.Tx,
+	now time.Time,
+	readyOnly bool,
+) (time.Duration, error) {
+	timestampExpression := "activated_at"
+	if readyOnly {
+		timestampExpression = "CASE WHEN status = 'retry_wait' THEN next_attempt_at ELSE activated_at END"
+	}
+	query := `
+SELECT MIN(` + timestampExpression + `) FROM entitlement_grant_jobs
+WHERE status IN ('pending', 'processing', 'retry_wait')`
+	args := []any{}
+	if readyOnly {
+		query += ` AND (status != 'retry_wait' OR julianday(next_attempt_at) <= julianday(?))`
+		args = append(args, now.Format(time.RFC3339Nano))
+	}
+	var oldest sql.NullString
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&oldest); err != nil {
+		return 0, fmt.Errorf("query oldest entitlement grant job age: %w", err)
+	}
+	if !oldest.Valid {
+		return 0, nil
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, oldest.String)
+	if err != nil {
+		return 0, fmt.Errorf("parse oldest entitlement grant job age: %w", err)
 	}
 	if createdAt.After(now) {
 		return 0, nil

@@ -3,9 +3,11 @@ package inbox_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
@@ -121,4 +123,480 @@ func TestEmptyStoreAcceptsInitialGrantPayloadKey(t *testing.T) {
 	); err != nil {
 		t.Fatalf("validate initial grant payload key: %v", err)
 	}
+}
+
+func TestOpenMigratesLegacyEntitlementGrantJobSchema(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")
+	createLegacyEntitlementGrantJobDatabase(
+		t,
+		databasePath,
+		inbox.EntitlementGrantJobStatusHeldShadow,
+	)
+
+	store, err := inbox.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open and migrate store: %v", err)
+	}
+	job, err := store.GetEntitlementGrantJob(ctx, "lark:wallet-topup:instance-legacy-grant")
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("get migrated grant job: %v", err)
+	}
+	if job.Status != inbox.EntitlementGrantJobStatusHeldShadow || job.Receipt != nil ||
+		!job.ActivatedAt.IsZero() || !job.CompletedAt.IsZero() {
+		_ = store.Close()
+		t.Fatalf("unexpected migrated grant job: %+v", job)
+	}
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+		_ = store.Close()
+		t.Fatalf("release migrated grant job: released=%d err=%v", released, err)
+	}
+	claimed, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found || claimed.ActivatedAt.IsZero() {
+		_ = store.Close()
+		t.Fatalf("claim migrated grant job: found=%t job=%+v err=%v", found, claimed, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close migrated store: %v", err)
+	}
+
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("reopen migrated database: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	grantColumns := tableColumnNames(t, database, "entitlement_grant_jobs")
+	jobColumns := tableColumnNames(t, database, "jobs")
+	for _, column := range []string{"activated_at", "response_status", "completed_at"} {
+		if _, ok := grantColumns[column]; !ok {
+			t.Fatalf("migrated entitlement_grant_jobs is missing %q", column)
+		}
+		if _, ok := jobColumns[column]; ok {
+			t.Fatalf("generic jobs unexpectedly contains grant column %q", column)
+		}
+	}
+}
+
+func TestOpenRejectsLegacyActiveEntitlementGrantJobWithoutActivation(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")
+	createLegacyEntitlementGrantJobDatabase(
+		t,
+		databasePath,
+		inbox.EntitlementGrantJobStatusPending,
+	)
+
+	store, err := inbox.Open(databasePath)
+	if err == nil {
+		_ = store.Close()
+		t.Fatal("opened active legacy grant job without activated_at")
+	}
+	if strings.Contains(err.Error(), "lark:wallet-topup:instance-legacy-grant") {
+		t.Fatalf("migration error leaked external ID: %v", err)
+	}
+}
+
+func createLegacyEntitlementGrantJobDatabase(
+	t *testing.T,
+	databasePath string,
+	status inbox.EntitlementGrantJobStatus,
+) {
+	t.Helper()
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open legacy database: %v", err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE entitlement_grant_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id TEXT NOT NULL UNIQUE,
+    request_sha256 TEXT NOT NULL,
+    subject_sha256 TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    nonce BLOB NOT NULL,
+    ciphertext BLOB NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+INSERT INTO entitlement_grant_jobs (
+    external_id, request_sha256, subject_sha256, key_id, nonce, ciphertext,
+    status, attempts, next_attempt_at, last_error, created_at, updated_at
+) VALUES (?, ?, ?, ?, zeroblob(12), zeroblob(32), ?, 0, ?, '', ?, ?)`,
+		"lark:wallet-topup:instance-legacy-grant",
+		strings.Repeat("a", 64),
+		strings.Repeat("b", 64),
+		strings.Repeat("c", 64),
+		status,
+		"2026-08-20T00:00:00Z",
+		"2026-08-20T00:00:00Z",
+		"2026-08-20T00:00:00Z",
+	)
+	if err != nil {
+		_ = database.Close()
+		t.Fatalf("create legacy grant job table: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+}
+
+func TestHeldGrantJobsRequireExplicitReleaseBeforeClaim(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	externalID := recordHeldGrantJob(t, ctx, store, "evt-release-grant")
+	if _, found, err := store.ClaimNextEntitlementGrantJob(ctx); err != nil || found {
+		t.Fatalf("claim held job: found=%t err=%v", found, err)
+	}
+	released, err := store.ReleaseHeldEntitlementGrantJobs(ctx)
+	if err != nil || released != 1 {
+		t.Fatalf("release held jobs: released=%d err=%v", released, err)
+	}
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 0 {
+		t.Fatalf("repeat release: released=%d err=%v", released, err)
+	}
+	job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim released job: found=%t err=%v", found, err)
+	}
+	if job.ExternalID != externalID || job.Status != inbox.EntitlementGrantJobStatusProcessing ||
+		job.Attempts != 1 || job.ActivatedAt.IsZero() {
+		t.Fatalf("unexpected claimed grant job: %+v", job)
+	}
+	if _, found, err := store.ClaimNextEntitlementGrantJob(ctx); err != nil || found {
+		t.Fatalf("claim processing job twice: found=%t err=%v", found, err)
+	}
+}
+
+func TestOpenRecoversProcessingEntitlementGrantJob(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")
+	store, err := inbox.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	externalID := recordHeldGrantJob(t, ctx, store, "evt-recover-grant")
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+		t.Fatalf("release held job: released=%d err=%v", released, err)
+	}
+	first, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found || first.Attempts != 1 {
+		t.Fatalf("first claim: found=%t job=%+v err=%v", found, first, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+
+	store, err = inbox.Open(databasePath)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recovered, err := store.GetEntitlementGrantJob(ctx, externalID)
+	if err != nil {
+		t.Fatalf("get recovered grant job: %v", err)
+	}
+	if recovered.Status != inbox.EntitlementGrantJobStatusPending || recovered.Attempts != 1 {
+		t.Fatalf("unexpected recovered grant job: %+v", recovered)
+	}
+	second, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found || second.Attempts != 2 {
+		t.Fatalf("recovered claim: found=%t job=%+v err=%v", found, second, err)
+	}
+}
+
+func TestCompleteEntitlementGrantJobPersistsSanitizedReceipt(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	externalID := recordHeldGrantJob(t, ctx, store, "evt-complete-grant")
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+		t.Fatalf("release held job: released=%d err=%v", released, err)
+	}
+	job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim grant job: found=%t err=%v", found, err)
+	}
+	receipt := inbox.EntitlementGrantReceipt{
+		ExternalID: externalID, Status: "applied", UserID: 42,
+		GrantType: "wallet_quota", QuotaDelta: 2_500_000,
+	}
+	if err := store.CompleteEntitlementGrantJob(ctx, job, receipt); err != nil {
+		t.Fatalf("complete grant job: %v", err)
+	}
+	stored, err := store.GetEntitlementGrantJob(ctx, externalID)
+	if err != nil {
+		t.Fatalf("get completed grant job: %v", err)
+	}
+	if stored.Status != inbox.EntitlementGrantJobStatusSucceeded || stored.Receipt == nil ||
+		*stored.Receipt != receipt || stored.LastError != "" || stored.CompletedAt.IsZero() {
+		t.Fatalf("unexpected completed grant job: %+v", stored)
+	}
+	if _, found, err := store.ClaimNextEntitlementGrantJob(ctx); err != nil || found {
+		t.Fatalf("claim completed grant job: found=%t err=%v", found, err)
+	}
+	snapshot, err := store.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("read completed grant metrics: %v", err)
+	}
+	if snapshot.NewAPIGrants["applied"] != 1 {
+		t.Fatalf("unexpected New API grant metrics: %v", snapshot.NewAPIGrants)
+	}
+	resultKey := inbox.EntitlementGrantResultKey{GrantType: "wallet_quota", Status: "applied"}
+	if snapshot.EntitlementGrantResults[resultKey] != 1 {
+		t.Fatalf("unexpected entitlement grant results: %v", snapshot.EntitlementGrantResults)
+	}
+}
+
+func TestRetryEntitlementGrantJobWaitsUntilEligible(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	externalID := recordHeldGrantJob(t, ctx, store, "evt-retry-grant")
+	if _, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil {
+		t.Fatalf("release held job: %v", err)
+	}
+	job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim grant job: found=%t err=%v", found, err)
+	}
+	if err := store.RetryEntitlementGrantJob(
+		ctx,
+		job,
+		inbox.EntitlementGrantFailureTemporarilyUnavailable,
+		50*time.Millisecond,
+	); err != nil {
+		t.Fatalf("retry grant job: %v", err)
+	}
+	stored, err := store.GetEntitlementGrantJob(ctx, externalID)
+	if err != nil {
+		t.Fatalf("get retrying grant job: %v", err)
+	}
+	if stored.Status != inbox.EntitlementGrantJobStatusRetryWait ||
+		stored.LastError != string(inbox.EntitlementGrantFailureTemporarilyUnavailable) {
+		t.Fatalf("unexpected retrying grant job: %+v", stored)
+	}
+	snapshot, err := store.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("read retrying grant metrics: %v", err)
+	}
+	if snapshot.EntitlementGrantRetries[string(inbox.EntitlementGrantFailureTemporarilyUnavailable)] != 1 ||
+		snapshot.OldestReadyJobAge != 0 {
+		t.Fatalf("unexpected retrying grant metrics: %+v", snapshot)
+	}
+	if _, found, err := store.ClaimNextEntitlementGrantJob(ctx); err != nil || found {
+		t.Fatalf("claim grant before retry eligibility: found=%t err=%v", found, err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	retry, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found || retry.Attempts != 2 {
+		t.Fatalf("claim eligible grant retry: found=%t job=%+v err=%v", found, retry, err)
+	}
+}
+
+func TestDeadLetterEntitlementGrantJobStoresOnlyKnownReason(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	externalID := recordHeldGrantJob(t, ctx, store, "evt-dead-grant")
+	if _, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil {
+		t.Fatalf("release held job: %v", err)
+	}
+	job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim grant job: found=%t err=%v", found, err)
+	}
+	if err := store.DeadLetterEntitlementGrantJob(
+		ctx,
+		job,
+		inbox.EntitlementGrantFailureIntegrationUnauthorized,
+	); err != nil {
+		t.Fatalf("dead-letter grant job: %v", err)
+	}
+	stored, err := store.GetEntitlementGrantJob(ctx, externalID)
+	if err != nil {
+		t.Fatalf("get dead grant job: %v", err)
+	}
+	if stored.Status != inbox.EntitlementGrantJobStatusDeadLetter ||
+		stored.LastError != string(inbox.EntitlementGrantFailureIntegrationUnauthorized) ||
+		stored.Receipt != nil || stored.CompletedAt.IsZero() {
+		t.Fatalf("unexpected dead grant job: %+v", stored)
+	}
+	snapshot, err := store.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("read dead grant metrics: %v", err)
+	}
+	if snapshot.EntitlementGrantDeadLetters[string(inbox.EntitlementGrantFailureIntegrationUnauthorized)] != 1 {
+		t.Fatalf("unexpected dead grant metrics: %+v", snapshot)
+	}
+	if err := store.DeadLetterEntitlementGrantJob(
+		ctx,
+		job,
+		"sensitive upstream message",
+	); err == nil {
+		t.Fatal("accepted unclassified persistent failure reason")
+	}
+}
+
+func TestEntitlementGrantFailureCatalogIsClosedAndCarriesRetryPolicy(t *testing.T) {
+	type metadata struct {
+		retryable bool
+		exhausted inbox.EntitlementGrantFailureReason
+	}
+	expected := map[inbox.EntitlementGrantFailureReason]metadata{
+		inbox.EntitlementGrantFailureInvalidRequest:                {},
+		inbox.EntitlementGrantFailureIntegrationUnauthorized:       {},
+		inbox.EntitlementGrantFailurePrincipalNotReady:             {true, inbox.EntitlementGrantFailureRetryExhaustedPrincipal},
+		inbox.EntitlementGrantFailurePrincipalDisabled:             {},
+		inbox.EntitlementGrantFailureUnmanagedSubscriptionConflict: {},
+		inbox.EntitlementGrantFailurePolicyVersionMismatch:         {},
+		inbox.EntitlementGrantFailureApprovalBindingMismatch:       {},
+		inbox.EntitlementGrantFailureTemporarilyUnavailable:        {true, inbox.EntitlementGrantFailureRetryExhaustedUnavailable},
+		inbox.EntitlementGrantFailureExternalIDPayloadMismatch:     {},
+		inbox.EntitlementGrantFailureUnknownPackage:                {},
+		inbox.EntitlementGrantFailureUnknownLevel:                  {},
+		inbox.EntitlementGrantFailureQuotaOutOfRange:               {},
+		inbox.EntitlementGrantFailureTimeout:                       {true, inbox.EntitlementGrantFailureRetryExhaustedTimeout},
+		inbox.EntitlementGrantFailureTransport:                     {true, inbox.EntitlementGrantFailureRetryExhaustedTransport},
+		inbox.EntitlementGrantFailureInvalidResponse:               {},
+		inbox.EntitlementGrantFailureInvalidSealedPayload:          {},
+		inbox.EntitlementGrantFailureUnclassified:                  {},
+		inbox.EntitlementGrantFailureRetryExhaustedPrincipal:       {},
+		inbox.EntitlementGrantFailureRetryExhaustedUnavailable:     {},
+		inbox.EntitlementGrantFailureRetryExhaustedTimeout:         {},
+		inbox.EntitlementGrantFailureRetryExhaustedTransport:       {},
+	}
+	reasons := inbox.EntitlementGrantFailureReasons()
+	if len(reasons) != len(expected) {
+		t.Fatalf("failure catalog has %d reasons, want %d: %v", len(reasons), len(expected), reasons)
+	}
+	seen := make(map[inbox.EntitlementGrantFailureReason]struct{}, len(reasons))
+	for _, reason := range reasons {
+		want, ok := expected[reason]
+		if !ok {
+			t.Fatalf("failure catalog contains unexpected reason %q", reason)
+		}
+		if _, duplicate := seen[reason]; duplicate {
+			t.Fatalf("failure catalog repeats reason %q", reason)
+		}
+		seen[reason] = struct{}{}
+		if parsed := inbox.ParseEntitlementGrantFailureReason(string(reason)); parsed != reason {
+			t.Fatalf("parse %q = %q", reason, parsed)
+		}
+		if retryable := inbox.IsRetryableEntitlementGrantFailure(reason); retryable != want.retryable {
+			t.Fatalf("retryable %q = %t, want %t", reason, retryable, want.retryable)
+		}
+		if want.retryable {
+			if exhausted := inbox.ExhaustedEntitlementGrantFailure(reason); exhausted != want.exhausted {
+				t.Fatalf("exhausted %q = %q, want %q", reason, exhausted, want.exhausted)
+			}
+		}
+	}
+	if parsed := inbox.ParseEntitlementGrantFailureReason("sensitive upstream detail"); parsed != inbox.EntitlementGrantFailureUnclassified {
+		t.Fatalf("unknown failure parsed as %q", parsed)
+	}
+}
+
+func recordHeldGrantJob(
+	t *testing.T,
+	ctx context.Context,
+	store *inbox.Store,
+	eventID string,
+) string {
+	t.Helper()
+	event := operationalEvent(eventID, "APPROVED")
+	if _, err := store.Record(ctx, event); err != nil {
+		t.Fatalf("record held grant event: %v", err)
+	}
+	job, found, err := store.ClaimNext(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim held grant event: found=%t err=%v", found, err)
+	}
+	request, receipt, err := newapi.PlanApprovalGrant(newapi.ApprovalGrantInput{
+		TenantKey: event.TenantKey, OpenID: "ou-requester", PolicyVersion: "employee-v1",
+		ApprovalKind: "wallet_topup", BusinessCode: "topup_5", QuotaDelta: 2_500_000,
+		ApprovalCode: event.ApprovalCode, InstanceCode: event.InstanceCode,
+		StartTimeMilliseconds: "1787303900000", SchemaFingerprint: "sha256:abc",
+		Locale: "zh-CN", CatalogSHA256: "sha256:catalog",
+	})
+	if err != nil {
+		t.Fatalf("plan held grant: %v", err)
+	}
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new held grant sealer: %v", err)
+	}
+	sealed, err := sealer.Seal(request)
+	if err != nil {
+		t.Fatalf("seal held grant: %v", err)
+	}
+	if err := store.CompleteDecision(ctx, job, inbox.Decision{
+		EventKey: event.Key, ApprovalCode: event.ApprovalCode,
+		InstanceCode: event.InstanceCode, EventStatus: event.Status,
+		AuthorityStatus: "APPROVED", Outcome: inbox.DecisionOutcomeShadowAuthorityVerified,
+		EntitlementCommand: &inbox.EntitlementCommandShadow{
+			ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
+			SubjectSHA256: receipt.SubjectSHA256, Source: "lark_approval",
+			PolicyVersion: receipt.PolicyVersion, CatalogSHA256: receipt.CatalogSHA256,
+			GrantType: receipt.GrantType, BusinessCode: receipt.BusinessCode,
+			QuotaDelta: receipt.QuotaDelta,
+		},
+		EntitlementGrantJob: &inbox.EntitlementGrantJobDraft{
+			ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
+			SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,
+			Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+		},
+	}); err != nil {
+		t.Fatalf("complete held grant decision: %v", err)
+	}
+	return sealed.ExternalID
+}
+
+func tableColumnNames(t *testing.T, database *sql.DB, table string) map[string]struct{} {
+	t.Helper()
+	rows, err := database.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("inspect %s columns: %v", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	columns := make(map[string]struct{})
+	for rows.Next() {
+		var columnID int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(
+			&columnID,
+			&name,
+			&columnType,
+			&notNull,
+			&defaultValue,
+			&primaryKey,
+		); err != nil {
+			t.Fatalf("scan %s column: %v", table, err)
+		}
+		columns[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate %s columns: %v", table, err)
+	}
+	return columns
 }
