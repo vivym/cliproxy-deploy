@@ -37,6 +37,7 @@ type Config struct {
 	NewAPIBaseURL                string
 	IntegrationSecretFile        string
 	BridgeClientID               string
+	BridgeClientSecretFile       string
 	NewAPIOAuthCallbackAllowlist []string
 	OAuthRateLimitPerMinute      int
 	OAuthTrustedProxyCIDRs       []netip.Prefix
@@ -63,6 +64,7 @@ func Load(getenv func(string) string) (Config, error) {
 		ApprovalBindingsFile:    getenv("LARK_APPROVAL_BINDINGS_FILE"),
 		GrantPayloadKeyringFile: getenv("LARK_GRANT_PAYLOAD_KEYRING_FILE"),
 		BridgeClientID:          getenv("NEW_API_BRIDGE_CLIENT_ID"),
+		BridgeClientSecretFile:  getenv("NEW_API_BRIDGE_CLIENT_SECRET_FILE"),
 		WorkerPoll:              time.Second,
 		ReadinessMaxQueueAge:    15 * time.Minute,
 		OAuthRateLimitPerMinute: defaultOAuthRateLimitPerMinute,
@@ -107,18 +109,19 @@ func Load(getenv func(string) string) (Config, error) {
 		loaded.ReadinessMaxQueueAge = threshold
 	}
 	required := map[string]string{
-		"LARK_CONTROLLER_DB_PATH":          loaded.DatabasePath,
-		"LARK_APP_ID":                      loaded.AppID,
-		"LARK_APP_SECRET":                  loaded.AppSecret,
-		"LARK_VERIFICATION_TOKEN":          loaded.VerificationToken,
-		"LARK_EVENT_ENCRYPT_KEY":           loaded.EventEncryptKey,
-		"LARK_TENANT_KEY":                  loaded.TenantKey,
-		"LARK_ACTIVE_POLICY_VERSION":       loaded.ActivePolicyVersion,
-		"LARK_POLICY_BUNDLE_DIR":           loaded.PolicyBundleDirectory,
-		"LARK_APPROVAL_BINDINGS_FILE":      loaded.ApprovalBindingsFile,
-		"LARK_GRANT_PAYLOAD_KEYRING_FILE":  loaded.GrantPayloadKeyringFile,
-		"NEW_API_BRIDGE_CLIENT_ID":         loaded.BridgeClientID,
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST": strings.Join(loaded.NewAPIOAuthCallbackAllowlist, ","),
+		"LARK_CONTROLLER_DB_PATH":           loaded.DatabasePath,
+		"LARK_APP_ID":                       loaded.AppID,
+		"LARK_APP_SECRET":                   loaded.AppSecret,
+		"LARK_VERIFICATION_TOKEN":           loaded.VerificationToken,
+		"LARK_EVENT_ENCRYPT_KEY":            loaded.EventEncryptKey,
+		"LARK_TENANT_KEY":                   loaded.TenantKey,
+		"LARK_ACTIVE_POLICY_VERSION":        loaded.ActivePolicyVersion,
+		"LARK_POLICY_BUNDLE_DIR":            loaded.PolicyBundleDirectory,
+		"LARK_APPROVAL_BINDINGS_FILE":       loaded.ApprovalBindingsFile,
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   loaded.GrantPayloadKeyringFile,
+		"NEW_API_BRIDGE_CLIENT_ID":          loaded.BridgeClientID,
+		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": loaded.BridgeClientSecretFile,
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  strings.Join(loaded.NewAPIOAuthCallbackAllowlist, ","),
 	}
 	for name, value := range required {
 		if value == "" {

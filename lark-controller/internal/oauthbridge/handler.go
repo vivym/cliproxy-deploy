@@ -28,6 +28,7 @@ const (
 
 type Config struct {
 	BridgeClientID     string
+	BridgeClientSecret string
 	NewAPIRedirectURI  string
 	RateLimitPerMinute int
 	TrustedProxyCIDRs  []netip.Prefix
@@ -38,6 +39,8 @@ type Store interface {
 	CreateOAuthAuthorizationState(context.Context, inbox.OAuthAuthorizationState) (string, error)
 	ConsumeOAuthAuthorizationState(context.Context, string) (inbox.OAuthAuthorizationState, error)
 	CreateOAuthLoginCode(context.Context, inbox.OAuthIdentity) (string, error)
+	ExchangeOAuthLoginCode(context.Context, string) (string, error)
+	ConsumeOAuthAccessHandle(context.Context, string) (inbox.OAuthIdentity, error)
 }
 
 type OAuthProvider interface {
@@ -53,11 +56,14 @@ type Handler struct {
 	stateLimiter       *clientRateLimiter
 	globalStateLimiter *fixedWindowRateLimiter
 	callbackLimiter    *clientRateLimiter
+	tokenLimiter       *clientRateLimiter
+	userInfoLimiter    *clientRateLimiter
 }
 
 func NewHandler(config Config, store Store, provider OAuthProvider) (*Handler, error) {
-	if config.BridgeClientID == "" || config.NewAPIRedirectURI == "" {
-		return nil, errors.New("OAuth bridge client id and New API redirect URI are required")
+	if config.BridgeClientID == "" || !validBridgeClientSecret(config.BridgeClientSecret) ||
+		config.NewAPIRedirectURI == "" {
+		return nil, errors.New("OAuth bridge client credentials and New API redirect URI are required")
 	}
 	if config.NewAPIRedirectURI != oauthcontract.NewAPICallbackURI {
 		return nil, errors.New("New API redirect URI must match the registered callback")
@@ -91,12 +97,16 @@ func NewHandler(config Config, store Store, provider OAuthProvider) (*Handler, e
 		stateLimiter:       newClientRateLimiter(maxClientStatesPerTTL, 5*time.Minute, trustedProxyCIDRs),
 		globalStateLimiter: newFixedWindowRateLimiter(maxGlobalStatesPerMinute, time.Minute),
 		callbackLimiter:    newClientRateLimiter(config.RateLimitPerMinute, time.Minute, trustedProxyCIDRs),
+		tokenLimiter:       newClientRateLimiter(config.RateLimitPerMinute, time.Minute, trustedProxyCIDRs),
+		userInfoLimiter:    newClientRateLimiter(config.RateLimitPerMinute, time.Minute, trustedProxyCIDRs),
 	}, nil
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /integrations/lark/oauth/authorize", h.authorize)
 	mux.HandleFunc("GET /integrations/lark/oauth/callback", h.callback)
+	mux.HandleFunc("/internal/oauth/token", h.token)
+	mux.HandleFunc("/internal/oauth/userinfo", h.userInfo)
 }
 
 func (h *Handler) authorize(response http.ResponseWriter, request *http.Request) {

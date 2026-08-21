@@ -164,6 +164,10 @@ func prepareOAuthBridge(loaded config.Config, store *inbox.Store) (*oauthbridge.
 	if len(loaded.NewAPIOAuthCallbackAllowlist) != 1 {
 		return nil, errors.New("exactly one New API OAuth callback is required")
 	}
+	bridgeClientSecret, err := oauthbridge.LoadClientSecretFile(loaded.BridgeClientSecretFile)
+	if err != nil {
+		return nil, err
+	}
 	exchanger, err := larkapi.NewOAuthExchanger(larkapi.OAuthConfig{
 		AppID: loaded.AppID, AppSecret: loaded.AppSecret,
 		RedirectURI: oauthcontract.ControllerCallbackURI,
@@ -174,6 +178,7 @@ func prepareOAuthBridge(loaded config.Config, store *inbox.Store) (*oauthbridge.
 	}
 	return oauthbridge.NewHandler(oauthbridge.Config{
 		BridgeClientID:     loaded.BridgeClientID,
+		BridgeClientSecret: bridgeClientSecret,
 		NewAPIRedirectURI:  loaded.NewAPIOAuthCallbackAllowlist[0],
 		RateLimitPerMinute: loaded.OAuthRateLimitPerMinute,
 		TrustedProxyCIDRs:  loaded.OAuthTrustedProxyCIDRs,

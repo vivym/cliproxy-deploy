@@ -169,9 +169,15 @@ func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	bridgeSecretPath := filepath.Join(t.TempDir(), "bridge-client-secret")
+	bridgeSecret := strings.Repeat("b", 32)
+	if err := os.WriteFile(bridgeSecretPath, []byte(bridgeSecret+"\n"), 0o600); err != nil {
+		t.Fatalf("write bridge client secret: %v", err)
+	}
 	handler, err := prepareOAuthBridge(config.Config{
 		AppID: "cli_test", AppSecret: "app-secret", TenantKey: "tenant-test",
 		BridgeClientID:               "bridge-client-id",
+		BridgeClientSecretFile:       bridgeSecretPath,
 		NewAPIOAuthCallbackAllowlist: []string{oauthcontract.NewAPICallbackURI},
 		OAuthRateLimitPerMinute:      30,
 	}, store)
@@ -199,6 +205,31 @@ func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
 		t.Fatalf("authorize status=%d location=%q error=%v, want fixed Lark entry point",
 			response.Code, response.Header().Get("Location"), err)
 	}
+	identity, err := inbox.NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new identity: %v", err)
+	}
+	loginCode, err := store.CreateOAuthLoginCode(context.Background(), identity)
+	if err != nil {
+		t.Fatalf("create login code: %v", err)
+	}
+	form := url.Values{
+		"grant_type": {"authorization_code"}, "code": {loginCode},
+		"redirect_uri": {oauthcontract.NewAPICallbackURI}, "client_id": {"bridge-client-id"},
+		"client_secret": {bridgeSecret},
+	}
+	tokenResponse := httptest.NewRecorder()
+	tokenRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/internal/oauth/token",
+		strings.NewReader(form.Encode()),
+	)
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(tokenResponse, tokenRequest)
+	if tokenResponse.Code != http.StatusOK {
+		t.Fatalf("internal token status=%d body=%s, want loaded bridge secret",
+			tokenResponse.Code, tokenResponse.Body.String())
+	}
 }
 
 func TestOAuthCallbackCanCompleteBeyondWebhookWriteTimeout(t *testing.T) {
@@ -207,8 +238,9 @@ func TestOAuthCallbackCanCompleteBeyondWebhookWriteTimeout(t *testing.T) {
 		t.Fatalf("new OAuth identity: %v", err)
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
-		BridgeClientID: "bridge-client-id", NewAPIRedirectURI: oauthcontract.NewAPICallbackURI,
-		CallbackTimeout: 4 * time.Second, RateLimitPerMinute: 30,
+		BridgeClientID: "bridge-client-id", BridgeClientSecret: strings.Repeat("b", 32),
+		NewAPIRedirectURI: oauthcontract.NewAPICallbackURI,
+		CallbackTimeout:   4 * time.Second, RateLimitPerMinute: 30,
 	}, mainOAuthStore{identity: identity}, mainOAuthProvider{
 		identity: identity, delay: controllerWriteTimeout + 200*time.Millisecond,
 	})
@@ -276,6 +308,17 @@ func (mainOAuthStore) ConsumeOAuthAuthorizationState(
 
 func (mainOAuthStore) CreateOAuthLoginCode(context.Context, inbox.OAuthIdentity) (string, error) {
 	return "opaque-login-code", nil
+}
+
+func (mainOAuthStore) ExchangeOAuthLoginCode(context.Context, string) (string, error) {
+	return "opaque-access-handle", nil
+}
+
+func (s mainOAuthStore) ConsumeOAuthAccessHandle(
+	context.Context,
+	string,
+) (inbox.OAuthIdentity, error) {
+	return s.identity, nil
 }
 
 type mainOAuthProvider struct {

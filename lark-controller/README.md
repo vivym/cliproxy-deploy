@@ -44,11 +44,15 @@ The controller supports a locally verified `shadow` mode and an explicit
   redacted authorization-error mapping, a bounded callback context, and a
   callback-only write-deadline extension that preserves the webhook
   acknowledgement budget;
+- exposes internal token/userinfo endpoints that authenticate the fixed New API
+  bridge client, atomically exchange the 60-second login code for a second
+  60-second opaque bearer handle, consume that handle once, and return only
+  `sub`, `username`, and `name`;
 - applies separate per-client fixed-window limits to OAuth authorize and
-  callback, caps state issuance at 20 per client per five minutes and 500
-  globally per minute, and groups IPv6 clients by `/64`; forwarded client
-  addresses are used only when the immediate peer belongs to an explicitly
-  configured trusted proxy CIDR;
+  callback, token, and userinfo, caps state issuance at 20 per client per five
+  minutes and 500 globally per minute, and groups IPv6 clients by `/64`;
+  forwarded client addresses are used only when the immediate peer belongs to
+  an explicitly configured trusted proxy CIDR;
 - classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
   six-step jittered retry schedule before durable dead-lettering;
 - recovers interrupted jobs with their attempt counters after restart;
@@ -80,6 +84,7 @@ LARK_POLICY_BUNDLE_DIR=/policies
 LARK_APPROVAL_BINDINGS_FILE=/policies/approval-bindings.json
 LARK_GRANT_PAYLOAD_KEYRING_FILE=/run/secrets/lark_grant_payload_keyring
 NEW_API_BRIDGE_CLIENT_ID=...
+NEW_API_BRIDGE_CLIENT_SECRET_FILE=/run/secrets/new_api_bridge_client_secret
 NEW_API_OAUTH_CALLBACK_ALLOWLIST=https://ai.x2r.store/oauth/lark
 ```
 
@@ -94,6 +99,11 @@ LARK_INTEGRATION_SECRET_FILE=/run/secrets/lark_integration_secret
 The integration secret file contains one printable, non-whitespace ASCII token
 of at least 32 bytes, with an optional LF or CRLF ending. It is a dedicated
 narrow-scope integration credential, not a New API administrator token.
+
+The bridge client secret file contains one printable, non-whitespace ASCII
+token between 32 and 4096 bytes, with an optional LF or CRLF ending. Configure
+that same token as the Lark Custom OAuth provider client secret in New API; do
+not use the Lark App Secret or the New API integration credential.
 
 The grant payload keyring file contains one or more 64-character lowercase hex
 lines, with an optional final line ending. Use LF or CRLF consistently; mixed
@@ -120,17 +130,27 @@ LARK_OAUTH_RATE_LIMIT_PER_MINUTE=30
 LARK_OAUTH_TRUSTED_PROXY_CIDRS=172.31.20.0/24
 ```
 
-The configured OAuth rate limit is applied independently to authorize and
-callback for each resolved client address. Authorize state issuance has
-additional hard limits of 20 states per resolved client per five minutes and
-500 states globally per minute. IPv4 clients are keyed by address and IPv6
-clients by masked `/64`. A rejected admission or failed state write rolls back
-any reserved issuance capacity, and `Retry-After` reflects the limiter window
-that rejected the request. `X-Forwarded-For` is ignored unless the direct peer
-is covered by `LARK_OAUTH_TRUSTED_PROXY_CIDRS`; configure only the exact proxy
-network that reaches the controller. The initial callback allowlist is
-intentionally a single fixed URL and rejects additional or prefix-matching
-entries.
+The configured OAuth rate limit is applied independently to authorize,
+callback, token, and userinfo for each resolved client address. Authorize state
+issuance has additional hard limits of 20 states per resolved client per five
+minutes and 500 states globally per minute. IPv4 clients are keyed by address
+and IPv6 clients by masked `/64`. A rejected admission or failed state write
+rolls back any reserved issuance capacity, and `Retry-After` reflects the
+limiter window that rejected the request. `X-Forwarded-For` is ignored unless
+the direct peer is covered by `LARK_OAUTH_TRUSTED_PROXY_CIDRS`; configure only
+the exact proxy network that reaches the controller. The initial callback
+allowlist is intentionally a single fixed URL and rejects additional or
+prefix-matching entries.
+
+The internal token endpoint accepts only `POST` with an at-most-16-KiB
+`application/x-www-form-urlencoded` body containing exactly one non-empty
+`grant_type`, `code`, `redirect_uri`, `client_id`, and `client_secret`. Configure
+New API Custom OAuth `auth_style` as params (`1`). A successful exchange returns
+only `access_token`, `token_type: Bearer`, and `expires_in: 60`. The internal
+userinfo endpoint accepts only exact `GET` with one bearer authorization header
+and no query, then returns only `sub`, `username`, and `name`. Both endpoints
+reject `HEAD` before limiting or credential consumption and always send
+`Cache-Control: no-store`.
 
 Approval fetches retry after `5s, 15s, 1m, 5m, 15m, 1h`, with deterministic
 20 percent jitter. A valid Lark `Retry-After` takes precedence and is capped at
@@ -233,7 +253,7 @@ go build ./cmd/lark-controller
 This slice does not add the service to Docker Compose and must not be deployed.
 Active grant execution, the durable opaque OAuth credential store, the
 outbound Lark token/userinfo adapter, and the public OAuth authorize/callback
-handlers are implemented locally. The internal token/userinfo HTTP handlers,
-base-subscription dispatch, employment reconciliation, Compose wiring,
+handlers and internal token/userinfo handlers are implemented locally.
+Base-subscription dispatch, employment reconciliation, Compose wiring,
 operational runbooks, and production validation remain follow-up work. Do not
 enable active mode in production before those gates are complete.

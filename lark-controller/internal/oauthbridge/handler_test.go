@@ -61,7 +61,8 @@ func TestBrowserCanCompleteLarkAuthorizationAndReceiveOpaqueLoginCode(t *testing
 		t.Fatalf("new OAuth exchanger: %v", err)
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
-		BridgeClientID: "bridge-client-id", NewAPIRedirectURI: testNewAPICallback,
+		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
+		NewAPIRedirectURI: testNewAPICallback,
 	}, store, exchanger)
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
@@ -144,7 +145,8 @@ func TestAuthorizeFailsClosedOnInvalidBridgeRequest(t *testing.T) {
 		t.Fatalf("new OAuth exchanger: %v", err)
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
-		BridgeClientID: "bridge-client-id", NewAPIRedirectURI: testNewAPICallback,
+		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
+		NewAPIRedirectURI: testNewAPICallback,
 	}, store, exchanger)
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
@@ -215,7 +217,8 @@ func TestCallbackConsumesStateAndRedactsLarkAuthorizationDenial(t *testing.T) {
 		t.Fatalf("new OAuth exchanger: %v", err)
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
-		BridgeClientID: "bridge-client-id", NewAPIRedirectURI: testNewAPICallback,
+		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
+		NewAPIRedirectURI: testNewAPICallback,
 	}, store, exchanger)
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
@@ -329,7 +332,8 @@ func TestOAuthEndpointsRejectHEADWithoutSideEffects(t *testing.T) {
 	}}
 	provider := &bridgeTestProvider{identity: bridgeTestIdentity(t)}
 	handler := newBridgeTestHandler(t, oauthbridge.Config{
-		BridgeClientID: "bridge-client-id", NewAPIRedirectURI: testNewAPICallback,
+		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
+		NewAPIRedirectURI: testNewAPICallback,
 	}, store, provider)
 	paths := []string{
 		"/integrations/lark/oauth/authorize?response_type=code&client_id=bridge-client-id" +
@@ -364,7 +368,8 @@ func TestCallbackDistinguishesUnavailableStateStoreFromInvalidState(t *testing.T
 		t.Fatalf("new OAuth exchanger: %v", err)
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
-		BridgeClientID: "bridge-client-id", NewAPIRedirectURI: testNewAPICallback,
+		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
+		NewAPIRedirectURI: testNewAPICallback,
 	}, store, exchanger)
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
@@ -436,7 +441,8 @@ func TestCallbackRejectsAmbiguousOrOversizedCodeBeforeLarkExchange(t *testing.T)
 		t.Fatalf("new OAuth exchanger: %v", err)
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
-		BridgeClientID: "bridge-client-id", NewAPIRedirectURI: testNewAPICallback,
+		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
+		NewAPIRedirectURI: testNewAPICallback,
 	}, store, exchanger)
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
@@ -517,7 +523,8 @@ func TestCallbackMapsLarkUpstreamFailureToRedactedRetryableError(t *testing.T) {
 		t.Fatalf("new OAuth exchanger: %v", err)
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
-		BridgeClientID: "bridge-client-id", NewAPIRedirectURI: testNewAPICallback,
+		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
+		NewAPIRedirectURI: testNewAPICallback,
 	}, store, exchanger)
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
@@ -891,6 +898,7 @@ func writeBridgeTestJSON(t *testing.T, response http.ResponseWriter, value any) 
 
 type bridgeTestStore struct {
 	state                inbox.OAuthAuthorizationState
+	identity             inbox.OAuthIdentity
 	consumeErr           error
 	createStateErr       error
 	loginCode            string
@@ -925,6 +933,17 @@ func (s *bridgeTestStore) CreateOAuthLoginCode(context.Context, inbox.OAuthIdent
 		return "opaque-login-code", nil
 	}
 	return s.loginCode, nil
+}
+
+func (s *bridgeTestStore) ExchangeOAuthLoginCode(context.Context, string) (string, error) {
+	return "opaque-access-handle", nil
+}
+
+func (s *bridgeTestStore) ConsumeOAuthAccessHandle(
+	context.Context,
+	string,
+) (inbox.OAuthIdentity, error) {
+	return s.identity, nil
 }
 
 type bridgeTestProvider struct {
@@ -965,6 +984,9 @@ func newBridgeTestHandler(
 	provider oauthbridge.OAuthProvider,
 ) http.Handler {
 	t.Helper()
+	if config.BridgeClientSecret == "" {
+		config.BridgeClientSecret = testBridgeClientSecret
+	}
 	handler, err := oauthbridge.NewHandler(config, store, provider)
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)

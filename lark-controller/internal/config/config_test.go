@@ -10,19 +10,20 @@ import (
 
 func TestLoadRequiresCommonSecretsAndDefaultsToShadowMode(t *testing.T) {
 	values := map[string]string{
-		"LARK_CONTROLLER_MODE":             "shadow",
-		"LARK_CONTROLLER_DB_PATH":          "/data/controller.sqlite",
-		"LARK_APP_ID":                      "cli_test",
-		"LARK_APP_SECRET":                  "app-secret",
-		"LARK_VERIFICATION_TOKEN":          "verification-token",
-		"LARK_EVENT_ENCRYPT_KEY":           "event-encryption-key",
-		"LARK_TENANT_KEY":                  "tenant-test",
-		"LARK_ACTIVE_POLICY_VERSION":       "employee-v1",
-		"LARK_POLICY_BUNDLE_DIR":           "/policies",
-		"LARK_APPROVAL_BINDINGS_FILE":      "/policies/approval-bindings.json",
-		"LARK_GRANT_PAYLOAD_KEYRING_FILE":  "/run/secrets/lark_grant_payload_keyring",
-		"NEW_API_BRIDGE_CLIENT_ID":         "bridge-client-id",
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST": "https://ai.x2r.store/oauth/lark",
+		"LARK_CONTROLLER_MODE":              "shadow",
+		"LARK_CONTROLLER_DB_PATH":           "/data/controller.sqlite",
+		"LARK_APP_ID":                       "cli_test",
+		"LARK_APP_SECRET":                   "app-secret",
+		"LARK_VERIFICATION_TOKEN":           "verification-token",
+		"LARK_EVENT_ENCRYPT_KEY":            "event-encryption-key",
+		"LARK_TENANT_KEY":                   "tenant-test",
+		"LARK_ACTIVE_POLICY_VERSION":        "employee-v1",
+		"LARK_POLICY_BUNDLE_DIR":            "/policies",
+		"LARK_APPROVAL_BINDINGS_FILE":       "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   "/run/secrets/lark_grant_payload_keyring",
+		"NEW_API_BRIDGE_CLIENT_ID":          "bridge-client-id",
+		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "/run/secrets/new_api_bridge_client_secret",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -36,6 +37,7 @@ func TestLoadRequiresCommonSecretsAndDefaultsToShadowMode(t *testing.T) {
 	}
 	if loaded.OAuthRateLimitPerMinute != 30 || len(loaded.OAuthTrustedProxyCIDRs) != 0 ||
 		loaded.BridgeClientID != "bridge-client-id" ||
+		loaded.BridgeClientSecretFile != "/run/secrets/new_api_bridge_client_secret" ||
 		len(loaded.NewAPIOAuthCallbackAllowlist) != 1 ||
 		loaded.NewAPIOAuthCallbackAllowlist[0] != "https://ai.x2r.store/oauth/lark" {
 		t.Fatalf("unexpected OAuth config defaults: %+v", loaded)
@@ -62,21 +64,22 @@ func TestLoadRequiresCommonSecretsAndDefaultsToShadowMode(t *testing.T) {
 
 func TestLoadRequiresNewAPIConfigOnlyInActiveMode(t *testing.T) {
 	values := map[string]string{
-		"LARK_CONTROLLER_MODE":             "active",
-		"LARK_CONTROLLER_DB_PATH":          "/data/controller.sqlite",
-		"LARK_APP_ID":                      "cli_test",
-		"LARK_APP_SECRET":                  "app-secret",
-		"LARK_VERIFICATION_TOKEN":          "verification-token",
-		"LARK_EVENT_ENCRYPT_KEY":           "event-encryption-key",
-		"LARK_TENANT_KEY":                  "tenant-test",
-		"LARK_ACTIVE_POLICY_VERSION":       "employee-v1",
-		"LARK_POLICY_BUNDLE_DIR":           "/policies",
-		"LARK_APPROVAL_BINDINGS_FILE":      "/policies/approval-bindings.json",
-		"LARK_GRANT_PAYLOAD_KEYRING_FILE":  "/run/secrets/lark_grant_payload_keyring",
-		"LARK_INTEGRATION_SECRET_FILE":     "/run/secrets/lark_integration_secret",
-		"NEW_API_INTERNAL_BASE_URL":        "http://new-api:3001",
-		"NEW_API_BRIDGE_CLIENT_ID":         "bridge-client-id",
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST": "https://ai.x2r.store/oauth/lark",
+		"LARK_CONTROLLER_MODE":              "active",
+		"LARK_CONTROLLER_DB_PATH":           "/data/controller.sqlite",
+		"LARK_APP_ID":                       "cli_test",
+		"LARK_APP_SECRET":                   "app-secret",
+		"LARK_VERIFICATION_TOKEN":           "verification-token",
+		"LARK_EVENT_ENCRYPT_KEY":            "event-encryption-key",
+		"LARK_TENANT_KEY":                   "tenant-test",
+		"LARK_ACTIVE_POLICY_VERSION":        "employee-v1",
+		"LARK_POLICY_BUNDLE_DIR":            "/policies",
+		"LARK_APPROVAL_BINDINGS_FILE":       "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   "/run/secrets/lark_grant_payload_keyring",
+		"LARK_INTEGRATION_SECRET_FILE":      "/run/secrets/lark_integration_secret",
+		"NEW_API_INTERNAL_BASE_URL":         "http://new-api:3001",
+		"NEW_API_BRIDGE_CLIENT_ID":          "bridge-client-id",
+		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "/run/secrets/new_api_bridge_client_secret",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -116,19 +119,20 @@ func TestLoadRequiresNewAPIConfigOnlyInActiveMode(t *testing.T) {
 
 func TestLoadValidatesReadinessQueueAge(t *testing.T) {
 	values := map[string]string{
-		"LARK_CONTROLLER_DB_PATH":          "/data/controller.sqlite",
-		"LARK_APP_ID":                      "cli_test",
-		"LARK_APP_SECRET":                  "app-secret",
-		"LARK_VERIFICATION_TOKEN":          "verification-token",
-		"LARK_EVENT_ENCRYPT_KEY":           "event-encryption-key",
-		"LARK_TENANT_KEY":                  "tenant-test",
-		"LARK_ACTIVE_POLICY_VERSION":       "employee-v1",
-		"LARK_POLICY_BUNDLE_DIR":           "/policies",
-		"LARK_APPROVAL_BINDINGS_FILE":      "/policies/approval-bindings.json",
-		"LARK_GRANT_PAYLOAD_KEYRING_FILE":  "/run/secrets/lark_grant_payload_keyring",
-		"LARK_READINESS_MAX_QUEUE_AGE":     "20m",
-		"NEW_API_BRIDGE_CLIENT_ID":         "bridge-client-id",
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST": "https://ai.x2r.store/oauth/lark",
+		"LARK_CONTROLLER_DB_PATH":           "/data/controller.sqlite",
+		"LARK_APP_ID":                       "cli_test",
+		"LARK_APP_SECRET":                   "app-secret",
+		"LARK_VERIFICATION_TOKEN":           "verification-token",
+		"LARK_EVENT_ENCRYPT_KEY":            "event-encryption-key",
+		"LARK_TENANT_KEY":                   "tenant-test",
+		"LARK_ACTIVE_POLICY_VERSION":        "employee-v1",
+		"LARK_POLICY_BUNDLE_DIR":            "/policies",
+		"LARK_APPROVAL_BINDINGS_FILE":       "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   "/run/secrets/lark_grant_payload_keyring",
+		"LARK_READINESS_MAX_QUEUE_AGE":      "20m",
+		"NEW_API_BRIDGE_CLIENT_ID":          "bridge-client-id",
+		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "/run/secrets/new_api_bridge_client_secret",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -146,20 +150,21 @@ func TestLoadValidatesReadinessQueueAge(t *testing.T) {
 
 func TestLoadValidatesOAuthBridgeConfiguration(t *testing.T) {
 	values := map[string]string{
-		"LARK_CONTROLLER_DB_PATH":          "/data/controller.sqlite",
-		"LARK_APP_ID":                      "cli_test",
-		"LARK_APP_SECRET":                  "app-secret",
-		"LARK_VERIFICATION_TOKEN":          "verification-token",
-		"LARK_EVENT_ENCRYPT_KEY":           "event-encryption-key",
-		"LARK_TENANT_KEY":                  "tenant-test",
-		"LARK_ACTIVE_POLICY_VERSION":       "employee-v1",
-		"LARK_POLICY_BUNDLE_DIR":           "/policies",
-		"LARK_APPROVAL_BINDINGS_FILE":      "/policies/approval-bindings.json",
-		"LARK_GRANT_PAYLOAD_KEYRING_FILE":  "/run/secrets/lark_grant_payload_keyring",
-		"NEW_API_BRIDGE_CLIENT_ID":         "bridge-client-id",
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST": "https://ai.x2r.store/oauth/lark",
-		"LARK_OAUTH_RATE_LIMIT_PER_MINUTE": "45",
-		"LARK_OAUTH_TRUSTED_PROXY_CIDRS":   "172.31.20.0/24,10.0.0.0/8",
+		"LARK_CONTROLLER_DB_PATH":           "/data/controller.sqlite",
+		"LARK_APP_ID":                       "cli_test",
+		"LARK_APP_SECRET":                   "app-secret",
+		"LARK_VERIFICATION_TOKEN":           "verification-token",
+		"LARK_EVENT_ENCRYPT_KEY":            "event-encryption-key",
+		"LARK_TENANT_KEY":                   "tenant-test",
+		"LARK_ACTIVE_POLICY_VERSION":        "employee-v1",
+		"LARK_POLICY_BUNDLE_DIR":            "/policies",
+		"LARK_APPROVAL_BINDINGS_FILE":       "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   "/run/secrets/lark_grant_payload_keyring",
+		"NEW_API_BRIDGE_CLIENT_ID":          "bridge-client-id",
+		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "/run/secrets/new_api_bridge_client_secret",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark",
+		"LARK_OAUTH_RATE_LIMIT_PER_MINUTE":  "45",
+		"LARK_OAUTH_TRUSTED_PROXY_CIDRS":    "172.31.20.0/24,10.0.0.0/8",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -172,10 +177,11 @@ func TestLoadValidatesOAuthBridgeConfiguration(t *testing.T) {
 	}
 
 	invalid := map[string]string{
-		"NEW_API_BRIDGE_CLIENT_ID":         "",
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST": "https://ai.x2r.store/oauth/lark/attacker",
-		"LARK_OAUTH_RATE_LIMIT_PER_MINUTE": "0",
-		"LARK_OAUTH_TRUSTED_PROXY_CIDRS":   "172.31.20.1/24",
+		"NEW_API_BRIDGE_CLIENT_ID":          "",
+		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark/attacker",
+		"LARK_OAUTH_RATE_LIMIT_PER_MINUTE":  "0",
+		"LARK_OAUTH_TRUSTED_PROXY_CIDRS":    "172.31.20.1/24",
 	}
 	for name, value := range invalid {
 		t.Run(name, func(t *testing.T) {

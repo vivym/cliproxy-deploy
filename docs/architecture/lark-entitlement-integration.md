@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、opaque OAuth credential store、Lark token/userinfo adapter 与公开 authorize/callback，内部 token/userinfo handlers 和在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback 与内部 token/userinfo handlers，基础订阅投递和在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -323,6 +323,7 @@ slug: lark
 authorization_endpoint: https://ai.x2r.store/integrations/lark/oauth/authorize
 token_endpoint: http://lark-quota-controller:8080/internal/oauth/token
 userinfo_endpoint: http://lark-quota-controller:8080/internal/oauth/userinfo
+auth_style: 1
 user_id_field: sub
 username_field: username
 display_name_field: name
@@ -336,6 +337,38 @@ Controller 允许的 New API 回调初始只有：
 ```text
 https://ai.x2r.store/oauth/lark
 ```
+
+内部 token endpoint 只接受 exact `POST`、不超过 16 KiB 的
+`application/x-www-form-urlencoded` body，且 body 必须恰好各含一个非空
+`grant_type=authorization_code`、`code`、固定 `redirect_uri`、`client_id` 和
+`client_secret`；不接受 Basic Auth、query 参数、未知字段或重复字段。client credential 使用
+constant-time comparison，并在任何 login code 消费前校验。成功响应只包含：
+
+```json
+{
+  "access_token": "<60-second-single-use-opaque-handle>",
+  "token_type": "Bearer",
+  "expires_in": 60
+}
+```
+
+内部 userinfo endpoint 只接受 exact `GET`、一个 `Authorization: Bearer <handle>` header，
+且不接受 query 参数。成功时原子消费 handle，并只返回：
+
+```json
+{
+  "sub": "<tenant_key>:<open_id>",
+  "username": "<deterministic-lark-username>",
+  "name": "<display-name-up-to-20-code-points>"
+}
+```
+
+两个内部 endpoint 的 `HEAD` 和其他错误方法都在限流、数据库访问和 credential 消费前返回
+`405`。token 的稳定错误为 `invalid_request`、`invalid_client`、`unsupported_grant_type`、
+`invalid_grant`、`rate_limited` 和 `temporarily_unavailable`；userinfo 使用
+`invalid_request`、`invalid_token`、`rate_limited` 和 `temporarily_unavailable`，其中
+`invalid_token` 返回 `WWW-Authenticate: Bearer error="invalid_token"`。所有响应均为
+`no-store`，错误不包含 secret、handle、identity 或底层数据库文本。
 
 ### OAuth 流程
 
@@ -366,7 +399,7 @@ Controller 不持久化 Lark `user_access_token` 或 `refresh_token`。登录只
 - 数据库只存 SHA-256 hash，不存明文 handle。
 - `state`、login code 和 access handle 都是单次使用。
 - 默认 TTL 60 秒，OAuth state 默认 TTL 5 分钟。
-- 消费使用原子 `UPDATE ... WHERE consumed_at IS NULL AND expires_at > now`。
+- 消费使用带 expiry 条件的原子 `DELETE ... RETURNING`。
 - 不写 access log query string。
 - 所有 OAuth 错误只返回稳定错误码，不回显 Lark token response。
 
@@ -1256,7 +1289,7 @@ LARK_OAUTH_TRUSTED_PROXY_CIDRS
 CONTROLLER_DATABASE_PATH
 ```
 
-`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`LARK_INTEGRATION_SECRET_FILE` 保存一个不少于 32 字节的 printable、无空白 ASCII bearer token，可带一个 LF 或 CRLF 结尾；仅 active mode 读取。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。OAuth authorize 和 callback 使用两个独立的 per-client 一分钟固定窗口，`LARK_OAUTH_RATE_LIMIT_PER_MINUTE` 默认 30；authorize 另有每个 resolved client 每 5 分钟最多签发 20 个 state、全局每分钟最多签发 500 个 state 的固定硬限制。IPv4 client key 使用单个地址，IPv6 client key 统一按 masked `/64` 归组。被后续门禁拒绝或 state 持久化失败时必须回滚已预留的签发计数和空 map entry；`429 Retry-After` 必须反映实际拒绝请求的一分钟或五分钟窗口。只有直接对端位于显式 `LARK_OAUTH_TRUSTED_PROXY_CIDRS` 时才解析 `X-Forwarded-For`，该配置必须只包含实际 Controller 前置代理网段。
+`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`LARK_INTEGRATION_SECRET_FILE` 保存一个不少于 32 字节的 printable、无空白 ASCII bearer token，可带一个 LF 或 CRLF 结尾；仅 active mode 读取。`NEW_API_BRIDGE_CLIENT_SECRET_FILE` 保存一个 32 至 4096 字节的 printable、无空白 ASCII client secret，可带一个 LF 或 CRLF 结尾；shadow/active 均在 startup gate 读取，明文不能放入环境变量、日志或 SQLite。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。OAuth authorize、callback、token 和 userinfo 使用四个独立的 per-client 一分钟固定窗口，`LARK_OAUTH_RATE_LIMIT_PER_MINUTE` 默认 30；authorize 另有每个 resolved client 每 5 分钟最多签发 20 个 state、全局每分钟最多签发 500 个 state 的固定硬限制。IPv4 client key 使用单个地址，IPv6 client key 统一按 masked `/64` 归组。被后续门禁拒绝或 state 持久化失败时必须回滚已预留的签发计数和空 map entry；`429 Retry-After` 必须反映实际拒绝请求的一分钟或五分钟窗口。只有直接对端位于显式 `LARK_OAUTH_TRUSTED_PROXY_CIDRS` 时才解析 `X-Forwarded-For`，该配置必须只包含实际 Controller 前置代理网段。
 
 日志必须对以下字段脱敏：
 
@@ -1585,9 +1618,12 @@ Controller callback 和 HTTPS upstream origin（测试可使用 loopback HTTP）
 body）、transport 和 timeout 同样映射为 `temporarily_unavailable`，其他上游终态失败映射为
 `server_error`。两个 public endpoint 使用独立 per-client 限流；IPv6 client 按 masked `/64`
 归组，authorize state 签发另受每 client 每 5 分钟 20 个和全局每分钟 500 个硬限制。callback
-使用 10 秒总 context，并只为自身扩展 response write deadline，不改变 webhook 的 3 秒 ACK 预算。内部
-token/userinfo HTTP handlers、登录后的基础订阅 job、就业状态 reconciliation、Compose 接入和
-生产验证仍未实现。
+使用 10 秒总 context，并只为自身扩展 response write deadline，不改变 webhook 的 3 秒 ACK 预算。
+内部 token handler 已按 New API Generic OAuth 的 params auth contract 校验固定 client、grant type 和
+redirect URI，再原子地把 60 秒 login code 换成第二个 60 秒 opaque Bearer handle；userinfo handler
+原子消费该 handle，只返回 `sub/username/name`，不返回 email。两个内部 endpoint exact method、独立
+per-client 限流、稳定错误和 `no-store` 响应均已实现，bridge client secret 只从必需的 secret file
+读取。登录后的基础订阅 job、就业状态 reconciliation、Compose 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的
