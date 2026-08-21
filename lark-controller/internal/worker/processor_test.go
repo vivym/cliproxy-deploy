@@ -2,16 +2,31 @@ package worker_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/worker"
 )
 
 type approvalFetcher struct {
 	calls    int
 	instance worker.ApprovalInstance
+}
+
+type approvalResolver struct {
+	calls      int
+	request    policy.ApprovalRequest
+	resolution policy.ApprovalResolution
+	err        error
+}
+
+func (r *approvalResolver) ResolveApproval(request policy.ApprovalRequest) (policy.ApprovalResolution, error) {
+	r.calls++
+	r.request = request
+	return r.resolution, r.err
 }
 
 func (f *approvalFetcher) Fetch(_ context.Context, instanceCode, locale string) (worker.ApprovalInstance, error) {
@@ -66,7 +81,8 @@ func TestShadowProcessorFailsClosedAcrossEventStatusMatrix(t *testing.T) {
 				ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-" + test.status,
 				Status: "APPROVED", OpenID: "ou_requester", FormJSON: `[]`,
 			}}
-			processor, err := worker.NewShadowProcessor(store, fetcher, "zh-CN")
+			resolver := &approvalResolver{resolution: verifiedWalletResolution()}
+			processor, err := worker.NewShadowProcessor(store, fetcher, resolver, "zh-CN")
 			if err != nil {
 				t.Fatalf("new processor: %v", err)
 			}
@@ -108,7 +124,8 @@ func TestShadowProcessorRejectsUnsupportedEventTypeBeforeFetch(t *testing.T) {
 		t.Fatalf("record event: %v", err)
 	}
 	fetcher := &approvalFetcher{}
-	processor, err := worker.NewShadowProcessor(store, fetcher, "zh-CN")
+	resolver := &approvalResolver{resolution: verifiedWalletResolution()}
+	processor, err := worker.NewShadowProcessor(store, fetcher, resolver, "zh-CN")
 	if err != nil {
 		t.Fatalf("new processor: %v", err)
 	}
@@ -145,7 +162,8 @@ func TestShadowProcessorFetchesApprovedInstanceOnceAndPersistsSanitizedDecision(
 	}
 
 	fetcher := &approvalFetcher{}
-	processor, err := worker.NewShadowProcessor(store, fetcher, "zh-CN")
+	resolver := &approvalResolver{resolution: verifiedWalletResolution()}
+	processor, err := worker.NewShadowProcessor(store, fetcher, resolver, "zh-CN")
 	if err != nil {
 		t.Fatalf("new processor: %v", err)
 	}
@@ -181,7 +199,7 @@ func TestShadowProcessorFetchesApprovedInstanceOnceAndPersistsSanitizedDecision(
 		t.Fatalf("reopen store: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	processor, err = worker.NewShadowProcessor(store, fetcher, "zh-CN")
+	processor, err = worker.NewShadowProcessor(store, fetcher, resolver, "zh-CN")
 	if err != nil {
 		t.Fatalf("new restarted processor: %v", err)
 	}
@@ -194,5 +212,106 @@ func TestShadowProcessorFetchesApprovedInstanceOnceAndPersistsSanitizedDecision(
 	}
 	if fetcher.calls != 1 {
 		t.Fatalf("approval fetch calls after restart = %d, want 1", fetcher.calls)
+	}
+}
+
+func TestShadowProcessorPersistsResolvedPolicyEvidence(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	_, err = store.Record(ctx, inbox.Event{
+		Key: "lark:v2:evt-policy", SchemaVersion: "2.0", EventID: "evt-policy",
+		EventType: "approval.instance.status_changed_v4", AppID: "cli_test", TenantKey: "tenant-test",
+		ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-policy", Status: "APPROVED",
+		PayloadJSON: `{"approval_code":"approval-wallet-v1","instance_code":"instance-policy","status":"APPROVED"}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	fetcher := &approvalFetcher{instance: worker.ApprovalInstance{
+		ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-policy",
+		Status: "APPROVED", OpenID: "ou_requester", StartTime: "1787270300000",
+		FormJSON: `[{"custom_id":"wallet_package","type":"radioV2","value":"Small"}]`,
+	}}
+	resolver := &approvalResolver{resolution: policy.ApprovalResolution{
+		PolicyVersion: "employee-v1", ApprovalKind: policy.ApprovalKindWalletTopUp,
+		BusinessCode: "topup_5", QuotaDelta: 2500000,
+		SchemaFingerprint: walletFingerprintForWorkerTest,
+		CatalogSHA256:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}}
+	processor, err := worker.NewShadowProcessor(store, fetcher, resolver, "zh-CN")
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if _, err := processor.RunOnce(ctx); err != nil {
+		t.Fatalf("process event: %v", err)
+	}
+	if resolver.calls != 1 || resolver.request.ApprovalCode != "approval-wallet-v1" ||
+		resolver.request.Locale != "zh-CN" || resolver.request.StartTime != "1787270300000" {
+		t.Fatalf("unexpected resolver call: calls=%d request=%+v", resolver.calls, resolver.request)
+	}
+	decision, err := store.GetDecision(ctx, "lark:v2:evt-policy")
+	if err != nil {
+		t.Fatalf("get decision: %v", err)
+	}
+	if decision.Outcome != inbox.DecisionOutcomeShadowAuthorityVerified ||
+		decision.PolicyVersion != "employee-v1" || decision.ApprovalKind != "wallet_topup" ||
+		decision.SchemaFingerprint != walletFingerprintForWorkerTest ||
+		decision.BusinessCode != "topup_5" || decision.Locale != "zh-CN" ||
+		decision.CatalogSHA256 != "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("unexpected policy evidence: %+v", decision)
+	}
+}
+
+func TestShadowProcessorDeadLettersPolicyValidationFailure(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	_, err = store.Record(ctx, inbox.Event{
+		Key: "lark:v2:evt-policy-drift", SchemaVersion: "2.0", EventID: "evt-policy-drift",
+		EventType: "approval.instance.status_changed_v4", AppID: "cli_test", TenantKey: "tenant-test",
+		ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-policy-drift", Status: "APPROVED",
+		PayloadJSON: `{"status":"APPROVED"}`,
+	})
+	if err != nil {
+		t.Fatalf("record event: %v", err)
+	}
+	fetcher := &approvalFetcher{instance: worker.ApprovalInstance{
+		ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-policy-drift",
+		Status: "APPROVED", OpenID: "ou_requester", StartTime: "1787270300000",
+		FormJSON: `[{"custom_id":"wallet_package","type":"radioV2","value":"Unknown"}]`,
+	}}
+	resolver := &approvalResolver{err: errors.New("unknown display text contains sensitive form details")}
+	processor, err := worker.NewShadowProcessor(store, fetcher, resolver, "zh-CN")
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if _, err := processor.RunOnce(ctx); err != nil {
+		t.Fatalf("process event: %v", err)
+	}
+	decision, err := store.GetDecision(ctx, "lark:v2:evt-policy-drift")
+	if err != nil {
+		t.Fatalf("get decision: %v", err)
+	}
+	if decision.Outcome != inbox.DecisionOutcomeDeadLetterPolicyValidation ||
+		decision.PolicyVersion != "" || decision.BusinessCode != "" {
+		t.Fatalf("unexpected policy rejection decision: %+v", decision)
+	}
+}
+
+const walletFingerprintForWorkerTest = "sha256:2878401247d5cde57a96e03424e944773b21399dc3a68a9508016c2c5adea48b"
+
+func verifiedWalletResolution() policy.ApprovalResolution {
+	return policy.ApprovalResolution{
+		PolicyVersion: "employee-v1", ApprovalKind: policy.ApprovalKindWalletTopUp,
+		BusinessCode: "topup_5", QuotaDelta: 2500000,
+		SchemaFingerprint: walletFingerprintForWorkerTest,
+		CatalogSHA256:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}
 }

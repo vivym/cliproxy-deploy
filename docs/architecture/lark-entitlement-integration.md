@@ -192,7 +192,7 @@ lark:base:<tenant_key>:<open_id>:<policy_version>
 2. 在 New API 一个事务中插入 policy、level、wallet package 和新 approval binding，初始不可接受业务写入。
 3. Controller 与 New API 分别加载同一 bundle，校验文件 hash、数据库 catalog hash、plan snapshot 和 schema fingerprint 完全一致。
 4. 短暂停止新的 OAuth 完成/base job 派发并 drain 已创建的 base job；关闭旧审批定义的新发起入口并记录 `accept_instance_started_before`，再让旧 policy 进入 draining、新 policy 与新审批定义同时激活，随后恢复 OAuth。未曾应用的旧 base job 只能在确认 principal 仍无 assignment 后，以新 active version 和新 external ID 重新生成。
-5. 旧定义所有在途实例终结且超过追溯窗口后，policy 才进入 retired；历史 grant replay 永久不依赖 active 状态。
+5. 旧定义所有在途实例终结且超过追溯窗口后，policy 才进入 retired；Controller bundle 用显式 RFC3339 `retire_after` 记录该窗口终点，并在切换时拒绝未来时间或仍有本地未终结 job 的版本；历史 grant replay 永久不依赖 active 状态。
 
 任一步校验失败都不得激活新版本。已产生 grant 后不能回写旧目录来“回滚”，只能停止新写入并发布 correction 或后续版本。
 
@@ -553,6 +553,8 @@ GET /open-apis/approval/v4/instances/:instance_code
 5. schema、locale 或选项不匹配时 fail closed 并 dead-letter，不退回按控件名称或顺序解析。
 
 `schema_fingerprint` 是不可变 definition manifest 的 SHA-256，不包含申请人填写的值。manifest 使用确定性 JSON 编码，至少包含 approval kind、locale，以及按 `custom_id` 排序的控件类型、required 标志和有序 option display-text/code mapping；发布工具、Controller 和 New API 使用同一 canonicalization 测试向量。Controller 逐项验证实例结构后才把绑定 fingerprint 写入 evidence，New API 再用 `approval_code + fingerprint + locale` 复核 policy version 和 approval kind。
+
+首版权益选择控件固定为 `wallet_package` 和 `target_level`。成本中心等辅助 `radioV2` 同样按 manifest exact match 校验，但只有对应审批 kind 的权益选择控件能产生 `package_code` 或 `level_code`。
 
 如果后续使用 Lark external option，则可以让外部 option ID 直接等于业务 code；切换前仍需发布新 approval code 和 schema binding，不能改变历史实例解析规则。
 

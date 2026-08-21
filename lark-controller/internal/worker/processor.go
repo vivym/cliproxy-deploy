@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 )
 
 type ApprovalInstance struct {
@@ -24,17 +25,27 @@ type ApprovalFetcher interface {
 	Fetch(context.Context, string, string) (ApprovalInstance, error)
 }
 
-type ShadowProcessor struct {
-	store   *inbox.Store
-	fetcher ApprovalFetcher
-	locale  string
+type ApprovalResolver interface {
+	ResolveApproval(policy.ApprovalRequest) (policy.ApprovalResolution, error)
 }
 
-func NewShadowProcessor(store *inbox.Store, fetcher ApprovalFetcher, locale string) (*ShadowProcessor, error) {
-	if store == nil || fetcher == nil || locale == "" {
-		return nil, errors.New("store, approval fetcher, and locale are required")
+type ShadowProcessor struct {
+	store    *inbox.Store
+	fetcher  ApprovalFetcher
+	resolver ApprovalResolver
+	locale   string
+}
+
+func NewShadowProcessor(
+	store *inbox.Store,
+	fetcher ApprovalFetcher,
+	resolver ApprovalResolver,
+	locale string,
+) (*ShadowProcessor, error) {
+	if store == nil || fetcher == nil || resolver == nil || locale == "" {
+		return nil, errors.New("store, approval fetcher, approval resolver, and locale are required")
 	}
-	return &ShadowProcessor{store: store, fetcher: fetcher, locale: locale}, nil
+	return &ShadowProcessor{store: store, fetcher: fetcher, resolver: resolver, locale: locale}, nil
 }
 
 func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
@@ -74,6 +85,26 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 			AuthorityStatus: instance.Status, Outcome: inbox.DecisionOutcomeShadowAuthorityRejected,
 			OpenIDHash: HashEvidence(instance.OpenID), FormSHA256: HashEvidence(instance.FormJSON),
 			StartTime: instance.StartTime, Reverted: instance.Reverted,
+		}
+	} else {
+		resolved, resolveErr := p.resolver.ResolveApproval(policy.ApprovalRequest{
+			ApprovalCode: instance.ApprovalCode,
+			Locale:       p.locale,
+			StartTime:    instance.StartTime,
+			FormJSON:     instance.FormJSON,
+		})
+		if resolveErr != nil {
+			decision.Outcome = inbox.DecisionOutcomeDeadLetterPolicyValidation
+		} else {
+			decision.PolicyVersion = resolved.PolicyVersion
+			decision.ApprovalKind = resolved.ApprovalKind
+			decision.SchemaFingerprint = resolved.SchemaFingerprint
+			decision.BusinessCode = resolved.BusinessCode
+			decision.Locale = p.locale
+			decision.CatalogSHA256 = resolved.CatalogSHA256
+			decision.QuotaDelta = resolved.QuotaDelta
+			decision.MonthlyQuota = resolved.MonthlyQuota
+			decision.LevelRank = resolved.LevelRank
 		}
 	}
 	if err := p.store.CompleteDecision(ctx, job, decision); err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/config"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/larkapi"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/worker"
 )
@@ -36,18 +38,35 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	policyCatalog, err := policy.LoadDirectory(
+		loaded.PolicyBundleDirectory,
+		loaded.ApprovalBindingsFile,
+	)
+	if err != nil {
+		return err
+	}
+	if active := policyCatalog.ActivePolicyVersion(); active != loaded.ActivePolicyVersion {
+		return fmt.Errorf(
+			"configured active policy %q does not match loaded active policy %q",
+			loaded.ActivePolicyVersion,
+			active,
+		)
+	}
 	store, err := inbox.Open(loaded.DatabasePath)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = store.Close() }()
+	if err := store.SyncPolicySnapshot(context.Background(), policyCatalog.Snapshot()); err != nil {
+		return err
+	}
 	fetcher, err := larkapi.NewApprovalFetcher(larkapi.Config{
 		AppID: loaded.AppID, AppSecret: loaded.AppSecret,
 	})
 	if err != nil {
 		return err
 	}
-	processor, err := worker.NewShadowProcessor(store, fetcher, loaded.Locale)
+	processor, err := worker.NewShadowProcessor(store, fetcher, policyCatalog, loaded.Locale)
 	if err != nil {
 		return err
 	}

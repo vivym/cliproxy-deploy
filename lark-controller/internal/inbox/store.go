@@ -11,6 +11,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 )
 
 const sqliteBusyTimeout = 500 * time.Millisecond
@@ -46,11 +48,13 @@ type DecisionOutcome string
 
 const (
 	DecisionOutcomeShadowAuthorityVerified        DecisionOutcome = "shadow_authority_verified"
+	DecisionOutcomeShadowLegacyUnresolved         DecisionOutcome = "shadow_authority_verified_legacy_unresolved"
 	DecisionOutcomeShadowAuthorityRejected        DecisionOutcome = "shadow_authority_rejected"
 	DecisionOutcomeShadowIgnoredNonApproved       DecisionOutcome = "shadow_ignored_non_approved"
 	DecisionOutcomeReversalPending                DecisionOutcome = "reversal_pending"
 	DecisionOutcomeDeadLetterUnknownStatus        DecisionOutcome = "dead_letter_unknown_status"
 	DecisionOutcomeDeadLetterUnsupportedEventType DecisionOutcome = "dead_letter_unsupported_event_type"
+	DecisionOutcomeDeadLetterPolicyValidation     DecisionOutcome = "dead_letter_policy_validation_failed"
 )
 
 type jobStatus string
@@ -76,17 +80,26 @@ type Job struct {
 }
 
 type Decision struct {
-	EventKey        string
-	ApprovalCode    string
-	InstanceCode    string
-	EventStatus     string
-	AuthorityStatus string
-	Outcome         DecisionOutcome
-	OpenIDHash      string
-	FormSHA256      string
-	StartTime       string
-	Reverted        bool
-	CreatedAt       time.Time
+	EventKey          string
+	ApprovalCode      string
+	InstanceCode      string
+	EventStatus       string
+	AuthorityStatus   string
+	Outcome           DecisionOutcome
+	PolicyVersion     string
+	ApprovalKind      policy.ApprovalKind
+	SchemaFingerprint string
+	BusinessCode      string
+	Locale            string
+	CatalogSHA256     string
+	QuotaDelta        int64
+	MonthlyQuota      int64
+	LevelRank         int
+	OpenIDHash        string
+	FormSHA256        string
+	StartTime         string
+	Reverted          bool
+	CreatedAt         time.Time
 }
 
 func Open(path string) (*Store, error) {
@@ -155,6 +168,15 @@ CREATE TABLE IF NOT EXISTS approval_instances (
     event_status TEXT NOT NULL,
     authority_status TEXT NOT NULL,
     outcome TEXT NOT NULL,
+    policy_version TEXT NOT NULL DEFAULT '',
+    approval_kind TEXT NOT NULL DEFAULT '',
+    schema_fingerprint TEXT NOT NULL DEFAULT '',
+    business_code TEXT NOT NULL DEFAULT '',
+    locale TEXT NOT NULL DEFAULT '',
+    catalog_sha256 TEXT NOT NULL DEFAULT '',
+    quota_delta INTEGER NOT NULL DEFAULT 0,
+    monthly_quota INTEGER NOT NULL DEFAULT 0,
+    level_rank INTEGER NOT NULL DEFAULT 0,
     open_id_hash TEXT NOT NULL DEFAULT '',
     form_sha256 TEXT NOT NULL DEFAULT '',
     start_time TEXT NOT NULL DEFAULT '',
@@ -168,13 +190,161 @@ CREATE TABLE IF NOT EXISTS controller_audit (
     outcome TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS policy_versions (
+    policy_version TEXT PRIMARY KEY,
+    catalog_sha256 TEXT NOT NULL UNIQUE,
+    source_sha256 TEXT NOT NULL,
+    state TEXT NOT NULL,
+    retire_after TEXT NOT NULL DEFAULT '',
+    catalog_json TEXT NOT NULL,
+    loaded_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS approval_policy_bindings (
+    approval_code TEXT NOT NULL,
+    schema_fingerprint TEXT NOT NULL,
+    locale TEXT NOT NULL,
+    policy_version TEXT NOT NULL REFERENCES policy_versions(policy_version),
+    approval_kind TEXT NOT NULL,
+    definition_manifest_sha256 TEXT NOT NULL,
+    definition_manifest_json TEXT NOT NULL,
+    accept_instance_started_before TEXT NOT NULL DEFAULT '',
+    loaded_at TEXT NOT NULL,
+    PRIMARY KEY (approval_code, schema_fingerprint, locale)
+);
 UPDATE jobs SET status = 'pending', updated_at = next_attempt_at
 WHERE status = 'processing';
 `
 	if _, err := s.database.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate inbox: %w", err)
 	}
+	if err := s.ensureApprovalDecisionColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.ensurePolicyVersionColumns(ctx); err != nil {
+		return err
+	}
+	if err := s.reclassifyLegacyApprovalDecisions(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureApprovalDecisionColumns(ctx context.Context) error {
+	required := []struct {
+		name string
+		ddl  string
+	}{
+		{"policy_version", "ALTER TABLE approval_instances ADD COLUMN policy_version TEXT NOT NULL DEFAULT ''"},
+		{"approval_kind", "ALTER TABLE approval_instances ADD COLUMN approval_kind TEXT NOT NULL DEFAULT ''"},
+		{"schema_fingerprint", "ALTER TABLE approval_instances ADD COLUMN schema_fingerprint TEXT NOT NULL DEFAULT ''"},
+		{"business_code", "ALTER TABLE approval_instances ADD COLUMN business_code TEXT NOT NULL DEFAULT ''"},
+		{"locale", "ALTER TABLE approval_instances ADD COLUMN locale TEXT NOT NULL DEFAULT ''"},
+		{"catalog_sha256", "ALTER TABLE approval_instances ADD COLUMN catalog_sha256 TEXT NOT NULL DEFAULT ''"},
+		{"quota_delta", "ALTER TABLE approval_instances ADD COLUMN quota_delta INTEGER NOT NULL DEFAULT 0"},
+		{"monthly_quota", "ALTER TABLE approval_instances ADD COLUMN monthly_quota INTEGER NOT NULL DEFAULT 0"},
+		{"level_rank", "ALTER TABLE approval_instances ADD COLUMN level_rank INTEGER NOT NULL DEFAULT 0"},
+	}
+	columns, err := s.tableColumns(ctx, "approval_instances")
+	if err != nil {
+		return err
+	}
+	for _, column := range required {
+		if _, exists := columns[column.name]; exists {
+			continue
+		}
+		if _, err := s.database.ExecContext(ctx, column.ddl); err != nil {
+			return fmt.Errorf("add approval decision column %q: %w", column.name, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensurePolicyVersionColumns(ctx context.Context) error {
+	columns, err := s.tableColumns(ctx, "policy_versions")
+	if err != nil {
+		return err
+	}
+	if _, exists := columns["retire_after"]; exists {
+		return nil
+	}
+	if _, err := s.database.ExecContext(
+		ctx,
+		"ALTER TABLE policy_versions ADD COLUMN retire_after TEXT NOT NULL DEFAULT ''",
+	); err != nil {
+		return fmt.Errorf("add policy version column %q: %w", "retire_after", err)
+	}
+	return nil
+}
+
+func (s *Store) reclassifyLegacyApprovalDecisions(ctx context.Context) error {
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin legacy approval reclassification: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `
+UPDATE approval_instances
+SET outcome = ?
+WHERE outcome = ? AND policy_version = ''`,
+		DecisionOutcomeShadowLegacyUnresolved,
+		DecisionOutcomeShadowAuthorityVerified,
+	)
+	if err != nil {
+		return fmt.Errorf("reclassify legacy approval decisions: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `
+UPDATE controller_audit
+SET outcome = ?
+WHERE outcome = ? AND event_key IN (
+    SELECT event_key
+    FROM approval_instances
+    WHERE outcome = ? AND policy_version = ''
+)`,
+		DecisionOutcomeShadowLegacyUnresolved,
+		DecisionOutcomeShadowAuthorityVerified,
+		DecisionOutcomeShadowLegacyUnresolved,
+	)
+	if err != nil {
+		return fmt.Errorf("reclassify legacy controller audit: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit legacy approval reclassification: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) tableColumns(ctx context.Context, table string) (map[string]struct{}, error) {
+	var query string
+	switch table {
+	case "approval_instances":
+		query = "PRAGMA table_info(approval_instances)"
+	case "policy_versions":
+		query = "PRAGMA table_info(policy_versions)"
+	default:
+		return nil, errors.New("unsupported schema inspection table")
+	}
+	rows, err := s.database.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	columns := make(map[string]struct{})
+	for rows.Next() {
+		var columnID int
+		var name string
+		var columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&columnID, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return nil, fmt.Errorf("scan %s column: %w", table, err)
+		}
+		columns[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate %s columns: %w", table, err)
+	}
+	return columns, nil
 }
 
 func (s *Store) Record(ctx context.Context, event Event) (bool, error) {
@@ -380,11 +550,16 @@ func (s *Store) CompleteDecision(ctx context.Context, job Job, decision Decision
 	const insertDecision = `
 INSERT INTO approval_instances (
     event_key, approval_code, instance_code, event_status, authority_status,
-    outcome, open_id_hash, form_sha256, start_time, reverted, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	 outcome, policy_version, approval_kind, schema_fingerprint, business_code,
+	 locale, catalog_sha256, quota_delta, monthly_quota, level_rank,
+	 open_id_hash, form_sha256, start_time, reverted, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if _, err := tx.ExecContext(ctx, insertDecision,
 		decision.EventKey, decision.ApprovalCode, decision.InstanceCode,
 		decision.EventStatus, decision.AuthorityStatus, decision.Outcome,
+		decision.PolicyVersion, decision.ApprovalKind, decision.SchemaFingerprint,
+		decision.BusinessCode, decision.Locale, decision.CatalogSHA256,
+		decision.QuotaDelta, decision.MonthlyQuota, decision.LevelRank,
 		decision.OpenIDHash, decision.FormSHA256, decision.StartTime,
 		decision.Reverted, createdAt,
 	); err != nil {
@@ -423,7 +598,8 @@ func terminalStatesForOutcome(outcome DecisionOutcome) (jobStatus, ProcessingSta
 	case DecisionOutcomeReversalPending:
 		return jobStatusReversalPending, ProcessingStateReversalPending, nil
 	case DecisionOutcomeDeadLetterUnknownStatus,
-		DecisionOutcomeDeadLetterUnsupportedEventType:
+		DecisionOutcomeDeadLetterUnsupportedEventType,
+		DecisionOutcomeDeadLetterPolicyValidation:
 		return jobStatusDeadLetter, ProcessingStateDeadLetter, nil
 	default:
 		return "", "", fmt.Errorf("unknown shadow decision outcome %q", outcome)
@@ -450,13 +626,18 @@ WHERE id = ? AND status = ?`,
 func (s *Store) GetDecision(ctx context.Context, eventKey string) (Decision, error) {
 	const query = `
 SELECT event_key, approval_code, instance_code, event_status, authority_status,
-       outcome, open_id_hash, form_sha256, start_time, reverted, created_at
+       outcome, policy_version, approval_kind, schema_fingerprint, business_code,
+       locale, catalog_sha256, quota_delta, monthly_quota, level_rank,
+       open_id_hash, form_sha256, start_time, reverted, created_at
 FROM approval_instances WHERE event_key = ?`
 	var decision Decision
 	var createdAt string
 	err := s.database.QueryRowContext(ctx, query, eventKey).Scan(
 		&decision.EventKey, &decision.ApprovalCode, &decision.InstanceCode,
 		&decision.EventStatus, &decision.AuthorityStatus, &decision.Outcome,
+		&decision.PolicyVersion, &decision.ApprovalKind, &decision.SchemaFingerprint,
+		&decision.BusinessCode, &decision.Locale, &decision.CatalogSHA256,
+		&decision.QuotaDelta, &decision.MonthlyQuota, &decision.LevelRank,
 		&decision.OpenIDHash, &decision.FormSHA256, &decision.StartTime,
 		&decision.Reverted, &createdAt,
 	)
