@@ -42,6 +42,37 @@ func (c *grantClient) Grant(
 	return c.response, c.err
 }
 
+func TestGrantExecutorRejectsTypedNilDependencies(t *testing.T) {
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant keyring: %v", err)
+	}
+	var nilClient *grantClient
+	var nilKeyring *newapi.GrantKeyring
+	for name, dependencies := range map[string]struct {
+		client worker.GrantClient
+		opener worker.GrantRequestOpener
+	}{
+		"grant client":   {client: nilClient, opener: keyring},
+		"payload opener": {client: &grantClient{}, opener: nilKeyring},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := worker.NewGrantExecutor(
+				store,
+				dependencies.client,
+				dependencies.opener,
+			); err == nil {
+				t.Fatalf("accepted typed-nil %s", name)
+			}
+		})
+	}
+}
+
 func TestGrantExecutorAppliesReleasedJobAndStoresReceipt(t *testing.T) {
 	ctx := context.Background()
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
@@ -78,6 +109,43 @@ func TestGrantExecutorAppliesReleasedJobAndStoresReceipt(t *testing.T) {
 	}
 	if processed, err := executor.RunOnce(ctx); err != nil || processed {
 		t.Fatalf("execute completed grant again: processed=%t err=%v", processed, err)
+	}
+}
+
+func TestGrantExecutorOpensPreviousKeyAfterRotation(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	_ = prepareReleasedGrantJob(t, ctx, store, "evt-execute-rotated-grant")
+	externalID := "lark:wallet-topup:instance-evt-execute-rotated-grant"
+	keyring, err := newapi.NewGrantKeyring(
+		bytes.Repeat([]byte{0x24}, 32),
+		bytes.Repeat([]byte{0x42}, 32),
+	)
+	if err != nil {
+		t.Fatalf("new rotated grant keyring: %v", err)
+	}
+	executor, err := worker.NewGrantExecutor(store, &grantClient{
+		response: newapi.EntitlementGrantResponse{
+			Status: "applied", ExternalID: externalID, UserID: 42,
+			Result: newapi.GrantResult{GrantType: "wallet_quota", QuotaDelta: 2_500_000},
+		},
+	}, keyring)
+	if err != nil {
+		t.Fatalf("new grant executor with rotated keyring: %v", err)
+	}
+	if processed, err := executor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("execute grant sealed by previous key: processed=%t err=%v", processed, err)
+	}
+	stored, err := store.GetEntitlementGrantJob(ctx, externalID)
+	if err != nil {
+		t.Fatalf("get rotated grant execution: %v", err)
+	}
+	if stored.Status != inbox.EntitlementGrantJobStatusSucceeded {
+		t.Fatalf("rotated grant execution = %+v", stored)
 	}
 }
 

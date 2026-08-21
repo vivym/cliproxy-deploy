@@ -56,6 +56,42 @@ func (f *approvalFetcher) Fetch(_ context.Context, instanceCode, locale string) 
 	}, nil
 }
 
+func TestShadowProcessorRejectsTypedNilDependencies(t *testing.T) {
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant keyring: %v", err)
+	}
+	var nilFetcher *approvalFetcher
+	var nilResolver *approvalResolver
+	var nilKeyring *newapi.GrantKeyring
+	for name, dependencies := range map[string]struct {
+		fetcher  worker.ApprovalFetcher
+		resolver worker.ApprovalResolver
+		sealer   worker.GrantRequestSealer
+	}{
+		"approval fetcher":  {fetcher: nilFetcher, resolver: &approvalResolver{}, sealer: keyring},
+		"approval resolver": {fetcher: &approvalFetcher{}, resolver: nilResolver, sealer: keyring},
+		"grant sealer":      {fetcher: &approvalFetcher{}, resolver: &approvalResolver{}, sealer: nilKeyring},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := worker.NewShadowProcessorWithGrantSealer(
+				store,
+				dependencies.fetcher,
+				dependencies.resolver,
+				"zh-CN",
+				dependencies.sealer,
+			); err == nil {
+				t.Fatalf("accepted typed-nil %s", name)
+			}
+		})
+	}
+}
+
 func TestShadowProcessorDeadLettersTerminalApprovalFetchFailure(t *testing.T) {
 	ctx := context.Background()
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
@@ -526,7 +562,7 @@ func TestShadowProcessorPersistsResolvedPolicyEvidence(t *testing.T) {
 	}
 }
 
-func TestShadowProcessorWithGrantSealerPersistsHeldCanonicalRequest(t *testing.T) {
+func TestShadowProcessorWithGrantKeyringPersistsHeldCanonicalRequest(t *testing.T) {
 	ctx := context.Background()
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
 	if err != nil {
@@ -534,16 +570,19 @@ func TestShadowProcessorWithGrantSealerPersistsHeldCanonicalRequest(t *testing.T
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	recordApprovedEvent(t, ctx, store, "evt-sealed-grant")
-	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	keyring, err := newapi.NewGrantKeyring(
+		bytes.Repeat([]byte{0x24}, 32),
+		bytes.Repeat([]byte{0x42}, 32),
+	)
 	if err != nil {
-		t.Fatalf("new grant sealer: %v", err)
+		t.Fatalf("new grant keyring: %v", err)
 	}
 	processor, err := worker.NewShadowProcessorWithGrantSealer(
 		store,
 		&approvalFetcher{},
 		&approvalResolver{resolution: verifiedWalletResolution()},
 		"zh-CN",
-		sealer,
+		keyring,
 	)
 	if err != nil {
 		t.Fatalf("new processor with grant sealer: %v", err)
@@ -555,7 +594,10 @@ func TestShadowProcessorWithGrantSealerPersistsHeldCanonicalRequest(t *testing.T
 	if err != nil {
 		t.Fatalf("get entitlement grant job: %v", err)
 	}
-	opened, err := sealer.Open(newapi.SealedGrantRequest{
+	if stored.KeyID != keyring.PrimaryKeyID() {
+		t.Fatalf("held request key ID = %q, want primary %q", stored.KeyID, keyring.PrimaryKeyID())
+	}
+	opened, err := keyring.Open(newapi.SealedGrantRequest{
 		KeyID: stored.KeyID, ExternalID: stored.ExternalID,
 		RequestSHA256: stored.RequestSHA256, Nonce: stored.Nonce,
 		Ciphertext: stored.Ciphertext,

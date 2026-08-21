@@ -7,21 +7,21 @@ import (
 )
 
 type Config struct {
-	Mode                  string
-	ListenAddress         string
-	DatabasePath          string
-	AppID                 string
-	AppSecret             string
-	VerificationToken     string
-	EventEncryptKey       string
-	TenantKey             string
-	Locale                string
-	ActivePolicyVersion   string
-	PolicyBundleDirectory string
-	ApprovalBindingsFile  string
-	GrantPayloadKeyFile   string
-	WorkerPoll            time.Duration
-	ReadinessMaxQueueAge  time.Duration
+	Mode                    string
+	ListenAddress           string
+	DatabasePath            string
+	AppID                   string
+	AppSecret               string
+	VerificationToken       string
+	EventEncryptKey         string
+	TenantKey               string
+	Locale                  string
+	ActivePolicyVersion     string
+	PolicyBundleDirectory   string
+	ApprovalBindingsFile    string
+	GrantPayloadKeyringFile string
+	WorkerPoll              time.Duration
+	ReadinessMaxQueueAge    time.Duration
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -29,21 +29,21 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("environment lookup is required")
 	}
 	loaded := Config{
-		Mode:                  getenv("LARK_CONTROLLER_MODE"),
-		ListenAddress:         getenv("LARK_CONTROLLER_LISTEN_ADDR"),
-		DatabasePath:          getenv("LARK_CONTROLLER_DB_PATH"),
-		AppID:                 getenv("LARK_APP_ID"),
-		AppSecret:             getenv("LARK_APP_SECRET"),
-		VerificationToken:     getenv("LARK_VERIFICATION_TOKEN"),
-		EventEncryptKey:       getenv("LARK_EVENT_ENCRYPT_KEY"),
-		TenantKey:             getenv("LARK_TENANT_KEY"),
-		Locale:                getenv("LARK_APPROVAL_LOCALE"),
-		ActivePolicyVersion:   getenv("LARK_ACTIVE_POLICY_VERSION"),
-		PolicyBundleDirectory: getenv("LARK_POLICY_BUNDLE_DIR"),
-		ApprovalBindingsFile:  getenv("LARK_APPROVAL_BINDINGS_FILE"),
-		GrantPayloadKeyFile:   getenv("LARK_GRANT_PAYLOAD_KEY_FILE"),
-		WorkerPoll:            time.Second,
-		ReadinessMaxQueueAge:  15 * time.Minute,
+		Mode:                    getenv("LARK_CONTROLLER_MODE"),
+		ListenAddress:           getenv("LARK_CONTROLLER_LISTEN_ADDR"),
+		DatabasePath:            getenv("LARK_CONTROLLER_DB_PATH"),
+		AppID:                   getenv("LARK_APP_ID"),
+		AppSecret:               getenv("LARK_APP_SECRET"),
+		VerificationToken:       getenv("LARK_VERIFICATION_TOKEN"),
+		EventEncryptKey:         getenv("LARK_EVENT_ENCRYPT_KEY"),
+		TenantKey:               getenv("LARK_TENANT_KEY"),
+		Locale:                  getenv("LARK_APPROVAL_LOCALE"),
+		ActivePolicyVersion:     getenv("LARK_ACTIVE_POLICY_VERSION"),
+		PolicyBundleDirectory:   getenv("LARK_POLICY_BUNDLE_DIR"),
+		ApprovalBindingsFile:    getenv("LARK_APPROVAL_BINDINGS_FILE"),
+		GrantPayloadKeyringFile: getenv("LARK_GRANT_PAYLOAD_KEYRING_FILE"),
+		WorkerPoll:              time.Second,
+		ReadinessMaxQueueAge:    15 * time.Minute,
 	}
 	if loaded.Mode == "" {
 		loaded.Mode = "shadow"
@@ -68,16 +68,16 @@ func Load(getenv func(string) string) (Config, error) {
 		loaded.ReadinessMaxQueueAge = threshold
 	}
 	required := map[string]string{
-		"LARK_CONTROLLER_DB_PATH":     loaded.DatabasePath,
-		"LARK_APP_ID":                 loaded.AppID,
-		"LARK_APP_SECRET":             loaded.AppSecret,
-		"LARK_VERIFICATION_TOKEN":     loaded.VerificationToken,
-		"LARK_EVENT_ENCRYPT_KEY":      loaded.EventEncryptKey,
-		"LARK_TENANT_KEY":             loaded.TenantKey,
-		"LARK_ACTIVE_POLICY_VERSION":  loaded.ActivePolicyVersion,
-		"LARK_POLICY_BUNDLE_DIR":      loaded.PolicyBundleDirectory,
-		"LARK_APPROVAL_BINDINGS_FILE": loaded.ApprovalBindingsFile,
-		"LARK_GRANT_PAYLOAD_KEY_FILE": loaded.GrantPayloadKeyFile,
+		"LARK_CONTROLLER_DB_PATH":         loaded.DatabasePath,
+		"LARK_APP_ID":                     loaded.AppID,
+		"LARK_APP_SECRET":                 loaded.AppSecret,
+		"LARK_VERIFICATION_TOKEN":         loaded.VerificationToken,
+		"LARK_EVENT_ENCRYPT_KEY":          loaded.EventEncryptKey,
+		"LARK_TENANT_KEY":                 loaded.TenantKey,
+		"LARK_ACTIVE_POLICY_VERSION":      loaded.ActivePolicyVersion,
+		"LARK_POLICY_BUNDLE_DIR":          loaded.PolicyBundleDirectory,
+		"LARK_APPROVAL_BINDINGS_FILE":     loaded.ApprovalBindingsFile,
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE": loaded.GrantPayloadKeyringFile,
 	}
 	for name, value := range required {
 		if value == "" {

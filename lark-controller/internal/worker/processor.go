@@ -59,11 +59,15 @@ type ApprovalResolver interface {
 	ResolveApproval(policy.ApprovalRequest) (policy.ApprovalResolution, error)
 }
 
+type GrantRequestSealer interface {
+	Seal(newapi.EntitlementGrantRequest) (newapi.SealedGrantRequest, error)
+}
+
 type ShadowProcessor struct {
 	store       *inbox.Store
 	fetcher     ApprovalFetcher
 	resolver    ApprovalResolver
-	grantSealer *newapi.GrantSealer
+	grantSealer GrantRequestSealer
 	locale      string
 	retryPolicy RetryPolicy
 }
@@ -122,7 +126,7 @@ func NewShadowProcessor(
 	locale string,
 	options ...ProcessorOption,
 ) (*ShadowProcessor, error) {
-	if store == nil || fetcher == nil || resolver == nil || locale == "" {
+	if store == nil || isNilDependency(fetcher) || isNilDependency(resolver) || locale == "" {
 		return nil, errors.New("store, approval fetcher, approval resolver, and locale are required")
 	}
 	processor := &ShadowProcessor{
@@ -145,10 +149,10 @@ func NewShadowProcessorWithGrantSealer(
 	fetcher ApprovalFetcher,
 	resolver ApprovalResolver,
 	locale string,
-	grantSealer *newapi.GrantSealer,
+	grantSealer GrantRequestSealer,
 	options ...ProcessorOption,
 ) (*ShadowProcessor, error) {
-	if grantSealer == nil {
+	if isNilDependency(grantSealer) {
 		return nil, errors.New("grant payload sealer is required")
 	}
 	processor, err := NewShadowProcessor(store, fetcher, resolver, locale, options...)

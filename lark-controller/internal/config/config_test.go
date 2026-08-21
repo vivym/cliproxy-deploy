@@ -10,17 +10,17 @@ import (
 
 func TestLoadRequiresSecretsAndOnlyAllowsShadowMode(t *testing.T) {
 	values := map[string]string{
-		"LARK_CONTROLLER_MODE":        "shadow",
-		"LARK_CONTROLLER_DB_PATH":     "/data/controller.sqlite",
-		"LARK_APP_ID":                 "cli_test",
-		"LARK_APP_SECRET":             "app-secret",
-		"LARK_VERIFICATION_TOKEN":     "verification-token",
-		"LARK_EVENT_ENCRYPT_KEY":      "event-encryption-key",
-		"LARK_TENANT_KEY":             "tenant-test",
-		"LARK_ACTIVE_POLICY_VERSION":  "employee-v1",
-		"LARK_POLICY_BUNDLE_DIR":      "/policies",
-		"LARK_APPROVAL_BINDINGS_FILE": "/policies/approval-bindings.json",
-		"LARK_GRANT_PAYLOAD_KEY_FILE": "/run/secrets/lark_grant_payload_key",
+		"LARK_CONTROLLER_MODE":            "shadow",
+		"LARK_CONTROLLER_DB_PATH":         "/data/controller.sqlite",
+		"LARK_APP_ID":                     "cli_test",
+		"LARK_APP_SECRET":                 "app-secret",
+		"LARK_VERIFICATION_TOKEN":         "verification-token",
+		"LARK_EVENT_ENCRYPT_KEY":          "event-encryption-key",
+		"LARK_TENANT_KEY":                 "tenant-test",
+		"LARK_ACTIVE_POLICY_VERSION":      "employee-v1",
+		"LARK_POLICY_BUNDLE_DIR":          "/policies",
+		"LARK_APPROVAL_BINDINGS_FILE":     "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE": "/run/secrets/lark_grant_payload_keyring",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -34,7 +34,7 @@ func TestLoadRequiresSecretsAndOnlyAllowsShadowMode(t *testing.T) {
 	}
 	if loaded.ActivePolicyVersion != "employee-v1" || loaded.PolicyBundleDirectory != "/policies" ||
 		loaded.ApprovalBindingsFile != "/policies/approval-bindings.json" ||
-		loaded.GrantPayloadKeyFile != "/run/secrets/lark_grant_payload_key" {
+		loaded.GrantPayloadKeyringFile != "/run/secrets/lark_grant_payload_keyring" {
 		t.Fatalf("unexpected policy config: %+v", loaded)
 	}
 
@@ -54,17 +54,17 @@ func TestLoadRequiresSecretsAndOnlyAllowsShadowMode(t *testing.T) {
 
 func TestLoadValidatesReadinessQueueAge(t *testing.T) {
 	values := map[string]string{
-		"LARK_CONTROLLER_DB_PATH":      "/data/controller.sqlite",
-		"LARK_APP_ID":                  "cli_test",
-		"LARK_APP_SECRET":              "app-secret",
-		"LARK_VERIFICATION_TOKEN":      "verification-token",
-		"LARK_EVENT_ENCRYPT_KEY":       "event-encryption-key",
-		"LARK_TENANT_KEY":              "tenant-test",
-		"LARK_ACTIVE_POLICY_VERSION":   "employee-v1",
-		"LARK_POLICY_BUNDLE_DIR":       "/policies",
-		"LARK_APPROVAL_BINDINGS_FILE":  "/policies/approval-bindings.json",
-		"LARK_GRANT_PAYLOAD_KEY_FILE":  "/run/secrets/lark_grant_payload_key",
-		"LARK_READINESS_MAX_QUEUE_AGE": "20m",
+		"LARK_CONTROLLER_DB_PATH":         "/data/controller.sqlite",
+		"LARK_APP_ID":                     "cli_test",
+		"LARK_APP_SECRET":                 "app-secret",
+		"LARK_VERIFICATION_TOKEN":         "verification-token",
+		"LARK_EVENT_ENCRYPT_KEY":          "event-encryption-key",
+		"LARK_TENANT_KEY":                 "tenant-test",
+		"LARK_ACTIVE_POLICY_VERSION":      "employee-v1",
+		"LARK_POLICY_BUNDLE_DIR":          "/policies",
+		"LARK_APPROVAL_BINDINGS_FILE":     "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE": "/run/secrets/lark_grant_payload_keyring",
+		"LARK_READINESS_MAX_QUEUE_AGE":    "20m",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })
 	if err != nil {

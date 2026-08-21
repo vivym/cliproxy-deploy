@@ -28,6 +28,12 @@ type GrantSealer struct {
 	keyID string
 }
 
+type GrantKeyring struct {
+	primary *GrantSealer
+	sealers map[string]*GrantSealer
+	keyIDs  []string
+}
+
 func NewGrantSealer(key []byte) (*GrantSealer, error) {
 	if len(key) != grantPayloadKeyBytes {
 		return nil, errors.New("grant payload key must contain exactly 32 bytes")
@@ -44,6 +50,63 @@ func NewGrantSealer(key []byte) (*GrantSealer, error) {
 	return &GrantSealer{aead: aead, keyID: hex.EncodeToString(digest[:])}, nil
 }
 
+func NewGrantKeyring(keys ...[]byte) (*GrantKeyring, error) {
+	if len(keys) == 0 {
+		return nil, errors.New("grant payload keyring requires at least one key")
+	}
+	keyring := &GrantKeyring{
+		sealers: make(map[string]*GrantSealer, len(keys)),
+		keyIDs:  make([]string, 0, len(keys)),
+	}
+	for _, key := range keys {
+		sealer, err := NewGrantSealer(key)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := keyring.sealers[sealer.KeyID()]; duplicate {
+			return nil, errors.New("grant payload keyring contains a duplicate key")
+		}
+		if keyring.primary == nil {
+			keyring.primary = sealer
+		}
+		keyring.sealers[sealer.KeyID()] = sealer
+		keyring.keyIDs = append(keyring.keyIDs, sealer.KeyID())
+	}
+	return keyring, nil
+}
+
+func (k *GrantKeyring) PrimaryKeyID() string {
+	if k == nil || k.primary == nil {
+		return ""
+	}
+	return k.primary.KeyID()
+}
+
+func (k *GrantKeyring) KeyIDs() []string {
+	if k == nil {
+		return nil
+	}
+	return append([]string(nil), k.keyIDs...)
+}
+
+func (k *GrantKeyring) Seal(request EntitlementGrantRequest) (SealedGrantRequest, error) {
+	if k == nil || k.primary == nil {
+		return SealedGrantRequest{}, errors.New("grant payload keyring is required")
+	}
+	return k.primary.Seal(request)
+}
+
+func (k *GrantKeyring) Open(sealed SealedGrantRequest) (EntitlementGrantRequest, error) {
+	if k == nil || k.sealers == nil {
+		return EntitlementGrantRequest{}, errors.New("grant payload keyring is required")
+	}
+	sealer, ok := k.sealers[sealed.KeyID]
+	if !ok {
+		return EntitlementGrantRequest{}, errors.New("sealed grant payload uses an unavailable key")
+	}
+	return sealer.Open(sealed)
+}
+
 func (s *GrantSealer) KeyID() string {
 	if s == nil {
 		return ""
@@ -51,24 +114,79 @@ func (s *GrantSealer) KeyID() string {
 	return s.keyID
 }
 
-func LoadGrantPayloadKeyFile(path string) ([]byte, error) {
+func LoadGrantPayloadKeyringFile(path string) (*GrantKeyring, error) {
 	if path == "" {
-		return nil, errors.New("grant payload key file is required")
+		return nil, errors.New("grant payload keyring file is required")
 	}
 	encoded, err := os.ReadFile(path)
 	if err != nil {
-		return nil, errors.New("read grant payload key file")
+		return nil, errors.New("read grant payload keyring file")
 	}
-	encoded = bytes.TrimSuffix(encoded, []byte{'\n'})
-	encoded = bytes.TrimSuffix(encoded, []byte{'\r'})
+	defer func() {
+		for index := range encoded {
+			encoded[index] = 0
+		}
+	}()
+	if len(encoded) == 0 {
+		return nil, errors.New("grant payload keyring file must contain at least one key")
+	}
+	lines, validLineEndings := splitGrantPayloadKeyringLines(encoded)
+	if !validLineEndings {
+		return nil, errors.New("grant payload keyring file must use LF or CRLF line endings")
+	}
+	keys := make([][]byte, 0, len(lines))
+	defer func() {
+		for _, key := range keys {
+			for index := range key {
+				key[index] = 0
+			}
+		}
+	}()
+	for _, line := range lines {
+		key := make([]byte, grantPayloadKeyBytes)
+		keys = append(keys, key)
+		if !isLowerHexGrantPayloadKey(line) {
+			return nil, errors.New("grant payload keyring file must contain 64-character lowercase hex lines")
+		}
+		_, _ = hex.Decode(key, line)
+	}
+	return NewGrantKeyring(keys...)
+}
+
+func splitGrantPayloadKeyringLines(encoded []byte) ([][]byte, bool) {
+	separator := []byte{'\n'}
+	if bytes.IndexByte(encoded, '\r') >= 0 {
+		for index, character := range encoded {
+			switch character {
+			case '\r':
+				if index+1 >= len(encoded) || encoded[index+1] != '\n' {
+					return nil, false
+				}
+			case '\n':
+				if index == 0 || encoded[index-1] != '\r' {
+					return nil, false
+				}
+			}
+		}
+		separator = []byte{'\r', '\n'}
+	}
+	lines := bytes.Split(encoded, separator)
+	if len(lines) > 0 && len(lines[len(lines)-1]) == 0 {
+		lines = lines[:len(lines)-1]
+	}
+	return lines, len(lines) > 0
+}
+
+func isLowerHexGrantPayloadKey(encoded []byte) bool {
 	if len(encoded) != grantPayloadKeyBytes*2 {
-		return nil, errors.New("grant payload key file must contain one 64-character lowercase hex line")
+		return false
 	}
-	key := make([]byte, grantPayloadKeyBytes)
-	if _, err := hex.Decode(key, encoded); err != nil || !bytes.Equal([]byte(hex.EncodeToString(key)), encoded) {
-		return nil, errors.New("grant payload key file must contain one 64-character lowercase hex line")
+	for _, character := range encoded {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
 	}
-	return key, nil
+	return true
 }
 
 func (s *GrantSealer) Seal(request EntitlementGrantRequest) (SealedGrantRequest, error) {

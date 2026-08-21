@@ -18,6 +18,8 @@ The current tracer slice is deliberately shadow-only. It:
 - plans the exact New API entitlement-grant contract and atomically stores its
   sanitized receipt plus an AES-256-GCM sealed canonical request in a durable
   `held_shadow` grant job;
+- loads a rotation-safe payload keyring whose first key seals new jobs and whose
+  remaining keys decrypt jobs created before rotation;
 - records same-payload external-ID reuse as `shadow_replayed` and dead-letters
   payload mismatches without replacing the first shadow ledger entry;
 - classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
@@ -47,17 +49,23 @@ LARK_TENANT_KEY=...
 LARK_ACTIVE_POLICY_VERSION=...
 LARK_POLICY_BUNDLE_DIR=/policies
 LARK_APPROVAL_BINDINGS_FILE=/policies/approval-bindings.json
-LARK_GRANT_PAYLOAD_KEY_FILE=/run/secrets/lark_grant_payload_key
+LARK_GRANT_PAYLOAD_KEYRING_FILE=/run/secrets/lark_grant_payload_keyring
 ```
 
-The grant payload key file must contain exactly one 64-character lowercase hex
-line, with an optional final line ending. Generate it with
-`openssl rand -hex 32 > /secure/path/lark_grant_payload_key` and keep the file
-out of Git. This slice supports one key at a time: do not replace or delete the
-key while any held job may need to be opened. Keyring-based rotation belongs
-to the future active claimant slice. Startup compares this key's fingerprint
-with every existing held job and fails closed before starting the worker if any
-record was sealed with a different key.
+The grant payload keyring file contains one or more 64-character lowercase hex
+lines, with an optional final line ending. Use LF or CRLF consistently; mixed
+line endings and bare CR are rejected. The first line is the primary key for
+new jobs; later lines are decrypt-only keys retained from earlier rotations.
+Generate the initial line with
+`openssl rand -hex 32 > /secure/path/lark_grant_payload_keyring` and keep the
+file out of Git. To rotate, atomically install a file with a newly generated key
+as the first line followed by every existing line, then restart the controller
+and require its startup gate to pass before resuming service. Do not remove an
+older line until no nonterminal grant job uses it. Retire an old key by
+atomically installing the reduced file and restarting through the same gate.
+Startup checks every nonterminal job and fails closed before starting the
+worker if its key is unavailable. Succeeded and dead-letter jobs do not block
+key retirement.
 
 Optional variables:
 
@@ -165,6 +173,6 @@ go build ./cmd/lark-controller
 ```
 
 This slice does not add the service to Docker Compose and must not be deployed.
-OAuth, employment reconciliation, active-mode credential/keyring wiring, held
+OAuth, employment reconciliation, active-mode credentials/runtime wiring, held
 job release, and all real entitlement mutation remain follow-up WP3 slices.
 There is still no active entitlement path.

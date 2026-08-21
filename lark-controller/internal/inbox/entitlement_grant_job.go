@@ -456,17 +456,41 @@ VALUES (?, ?, ?, ?)`, eventKey, auditAction, reason, now.Format(time.RFC3339Nano
 	return nil
 }
 
-func (s *Store) ValidateEntitlementGrantJobKeyID(ctx context.Context, keyID string) error {
-	if !isSHA256Hex(keyID) {
-		return errors.New("invalid grant payload key ID")
+func (s *Store) ValidateEntitlementGrantJobKeyIDs(ctx context.Context, keyIDs []string) error {
+	if len(keyIDs) == 0 {
+		return errors.New("grant payload keyring must contain at least one key ID")
 	}
-	var incompatible int64
-	if err := s.database.QueryRowContext(ctx, `
-SELECT COUNT(*) FROM entitlement_grant_jobs WHERE key_id != ?`, keyID).Scan(&incompatible); err != nil {
-		return fmt.Errorf("validate held grant job key: %w", err)
+	available := make(map[string]struct{}, len(keyIDs))
+	for _, keyID := range keyIDs {
+		if !isSHA256Hex(keyID) {
+			return errors.New("grant payload keyring contains an invalid key ID")
+		}
+		if _, duplicate := available[keyID]; duplicate {
+			return errors.New("grant payload keyring contains a duplicate key ID")
+		}
+		available[keyID] = struct{}{}
 	}
-	if incompatible != 0 {
-		return errors.New("configured grant payload key cannot open held grant jobs")
+	rows, err := s.database.QueryContext(ctx, `
+SELECT DISTINCT key_id FROM entitlement_grant_jobs
+WHERE status NOT IN (?, ?)`,
+		EntitlementGrantJobStatusSucceeded,
+		EntitlementGrantJobStatusDeadLetter,
+	)
+	if err != nil {
+		return fmt.Errorf("validate grant job keyring: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var keyID string
+		if err := rows.Scan(&keyID); err != nil {
+			return fmt.Errorf("scan grant job key ID: %w", err)
+		}
+		if _, ok := available[keyID]; !ok {
+			return errors.New("configured grant payload keyring cannot open nonterminal grant jobs")
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate grant job key IDs: %w", err)
 	}
 	return nil
 }

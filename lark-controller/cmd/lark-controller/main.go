@@ -75,20 +75,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	grantPayloadKey, err := newapi.LoadGrantPayloadKeyFile(loaded.GrantPayloadKeyFile)
+	grantKeyring, err := newapi.LoadGrantPayloadKeyringFile(loaded.GrantPayloadKeyringFile)
 	if err != nil {
 		return err
 	}
-	grantSealer, err := newapi.NewGrantSealer(grantPayloadKey)
-	for index := range grantPayloadKey {
-		grantPayloadKey[index] = 0
-	}
-	if err != nil {
-		return err
-	}
-	if err := store.ValidateEntitlementGrantJobKeyID(
+	if err := store.ValidateEntitlementGrantJobKeyIDs(
 		context.Background(),
-		grantSealer.KeyID(),
+		grantKeyring.KeyIDs(),
 	); err != nil {
 		return err
 	}
@@ -97,7 +90,7 @@ func run() error {
 		fetcher,
 		policyCatalog,
 		loaded.Locale,
-		grantSealer,
+		grantKeyring,
 	)
 	if err != nil {
 		return err

@@ -1244,7 +1244,7 @@ LARK_TENANT_KEY_ALLOWLIST
 LARK_ACTIVE_POLICY_VERSION
 LARK_POLICY_BUNDLE_DIR
 LARK_APPROVAL_BINDINGS_FILE
-LARK_GRANT_PAYLOAD_KEY_FILE
+LARK_GRANT_PAYLOAD_KEYRING_FILE
 LARK_INTEGRATION_SECRET_FILE
 NEW_API_INTERNAL_BASE_URL
 NEW_API_BRIDGE_CLIENT_ID
@@ -1253,7 +1253,7 @@ NEW_API_OAUTH_CALLBACK_ALLOWLIST
 CONTROLLER_DATABASE_PATH
 ```
 
-`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。
+`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。
 
 日志必须对以下字段脱敏：
 
@@ -1544,9 +1544,10 @@ New API grant canonical request，并在同一 SQLite 事务保存 sanitized sha
 AES-256-GCM 密封的 canonical request；密封记录使用 `held_shadow` 状态，现有 claimant
 不会领取，也不计入 ready-queue age。同 payload 的 external ID 重放复用首条密封记录并记为
 `shadow_replayed`，不同 payload 进入 `external_id_payload_mismatch` dead-letter。密钥通过
-`LARK_GRANT_PAYLOAD_KEY_FILE` 读取一行 64 字符小写 hex，当前只支持单 key，active claimant
-切片必须先补 keyring/rotation 方案；启动时若已有 held job 的 key ID 与当前 key 不同，必须在
-worker 启动前 fail closed，防止形成无法由单 key 解密的混合账本。当前还实现了未接入 runtime
+`LARK_GRANT_PAYLOAD_KEYRING_FILE` 读取严格的多行 keyring；第一行只负责新 job 密封，后续行
+解密轮换前记录，loader 会清零原始文件 buffer 和临时 decoded key。启动时会在 worker 前验证
+每个非终态 grant job 的 key ID 都存在，缺失时 fail closed；succeeded/dead-letter 历史记录
+不阻止旧 key 退役。当前还实现了未接入 runtime
 的 `GrantExecutor` 核心和显式 release/claim/recovery API：它可解封请求、调用既有 adapter、
 保存 sanitized result、处理 response-loss replay，并按登记 code retry/dead-letter；
 `principal_not_ready` 的 24 小时从 `activated_at` 计算。active result/retry/dead-letter metrics

@@ -97,14 +97,20 @@ func TestCompleteDecisionPersistsHeldGrantJobAcrossRestart(t *testing.T) {
 	if opened.ExternalID != request.ExternalID || opened.Identity.Subject != request.Identity.Subject {
 		t.Fatalf("opened grant = %+v, want original request", opened)
 	}
-	if err := store.ValidateEntitlementGrantJobKeyID(ctx, sealer.KeyID()); err != nil {
+	if err := store.ValidateEntitlementGrantJobKeyIDs(ctx, []string{sealer.KeyID()}); err != nil {
 		t.Fatalf("validate original grant payload key: %v", err)
 	}
 	replacement, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x24}, 32))
 	if err != nil {
 		t.Fatalf("new replacement grant sealer: %v", err)
 	}
-	err = store.ValidateEntitlementGrantJobKeyID(ctx, replacement.KeyID())
+	if err := store.ValidateEntitlementGrantJobKeyIDs(
+		ctx,
+		[]string{replacement.KeyID(), sealer.KeyID()},
+	); err != nil {
+		t.Fatalf("validate rotated grant payload keyring: %v", err)
+	}
+	err = store.ValidateEntitlementGrantJobKeyIDs(ctx, []string{replacement.KeyID()})
 	if err == nil || strings.Contains(err.Error(), replacement.KeyID()) ||
 		strings.Contains(err.Error(), sealed.KeyID) {
 		t.Fatalf("replacement key validation error = %v", err)
@@ -117,11 +123,84 @@ func TestEmptyStoreAcceptsInitialGrantPayloadKey(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if err := store.ValidateEntitlementGrantJobKeyID(
+	if err := store.ValidateEntitlementGrantJobKeyIDs(
 		context.Background(),
-		strings.Repeat("a", 64),
+		[]string{strings.Repeat("a", 64)},
 	); err != nil {
 		t.Fatalf("validate initial grant payload key: %v", err)
+	}
+	if err := store.ValidateEntitlementGrantJobKeyIDs(context.Background(), nil); err == nil {
+		t.Fatal("accepted empty grant payload keyring")
+	}
+}
+
+func TestTerminalEntitlementGrantJobDoesNotBlockKeyRetirement(t *testing.T) {
+	for _, terminalStatus := range []inbox.EntitlementGrantJobStatus{
+		inbox.EntitlementGrantJobStatusSucceeded,
+		inbox.EntitlementGrantJobStatusDeadLetter,
+	} {
+		t.Run(string(terminalStatus), func(t *testing.T) {
+			ctx := context.Background()
+			store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			externalID := recordHeldGrantJob(t, ctx, store, "evt-retire-grant-key-"+string(terminalStatus))
+			if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+				t.Fatalf("release held grant: released=%d err=%v", released, err)
+			}
+			job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+			if err != nil || !found {
+				t.Fatalf("claim released grant: found=%t err=%v", found, err)
+			}
+			switch terminalStatus {
+			case inbox.EntitlementGrantJobStatusSucceeded:
+				err = store.CompleteEntitlementGrantJob(ctx, job, inbox.EntitlementGrantReceipt{
+					ExternalID: externalID,
+					Status:     "applied",
+					UserID:     42,
+					GrantType:  "wallet_quota",
+					QuotaDelta: 2_500_000,
+				})
+			case inbox.EntitlementGrantJobStatusDeadLetter:
+				err = store.DeadLetterEntitlementGrantJob(
+					ctx,
+					job,
+					inbox.EntitlementGrantFailureInvalidSealedPayload,
+				)
+			}
+			if err != nil {
+				t.Fatalf("transition grant to %s: %v", terminalStatus, err)
+			}
+			replacement, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x24}, 32))
+			if err != nil {
+				t.Fatalf("new replacement sealer: %v", err)
+			}
+			if err := store.ValidateEntitlementGrantJobKeyIDs(ctx, []string{replacement.KeyID()}); err != nil {
+				t.Fatalf("terminal grant blocked key retirement: %v", err)
+			}
+		})
+	}
+}
+
+func TestUnknownEntitlementGrantJobStatusBlocksKeyRetirement(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")
+	createLegacyEntitlementGrantJobDatabase(
+		t,
+		databasePath,
+		inbox.EntitlementGrantJobStatus("future_nonterminal_status"),
+	)
+	store, err := inbox.Open(databasePath)
+	if err != nil {
+		t.Fatalf("open store with future grant status: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	configuredKeyID := strings.Repeat("d", 64)
+	err = store.ValidateEntitlementGrantJobKeyIDs(context.Background(), []string{configuredKeyID})
+	if err == nil || strings.Contains(err.Error(), configuredKeyID) ||
+		strings.Contains(err.Error(), strings.Repeat("c", 64)) {
+		t.Fatalf("future grant status key validation error = %v", err)
 	}
 }
 

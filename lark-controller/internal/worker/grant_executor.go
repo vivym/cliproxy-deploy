@@ -13,10 +13,14 @@ type GrantClient interface {
 	Grant(context.Context, newapi.EntitlementGrantRequest) (newapi.EntitlementGrantResponse, error)
 }
 
+type GrantRequestOpener interface {
+	Open(newapi.SealedGrantRequest) (newapi.EntitlementGrantRequest, error)
+}
+
 type GrantExecutor struct {
 	store       *inbox.Store
 	client      GrantClient
-	sealer      *newapi.GrantSealer
+	opener      GrantRequestOpener
 	retryPolicy GrantRetryPolicy
 	now         func() time.Time
 }
@@ -52,14 +56,14 @@ func WithGrantClock(now func() time.Time) GrantExecutorOption {
 func NewGrantExecutor(
 	store *inbox.Store,
 	client GrantClient,
-	sealer *newapi.GrantSealer,
+	opener GrantRequestOpener,
 	options ...GrantExecutorOption,
 ) (*GrantExecutor, error) {
-	if store == nil || client == nil || sealer == nil {
-		return nil, errors.New("store, grant client, and grant sealer are required")
+	if store == nil || isNilDependency(client) || isNilDependency(opener) {
+		return nil, errors.New("store, grant client, and grant payload opener are required")
 	}
 	executor := &GrantExecutor{
-		store: store, client: client, sealer: sealer, retryPolicy: defaultGrantRetryPolicy(),
+		store: store, client: client, opener: opener, retryPolicy: defaultGrantRetryPolicy(),
 		now: func() time.Time { return time.Now().UTC() },
 	}
 	for _, option := range options {
@@ -78,7 +82,7 @@ func (e *GrantExecutor) RunOnce(ctx context.Context) (bool, error) {
 	if err != nil || !found {
 		return false, err
 	}
-	request, err := e.sealer.Open(newapi.SealedGrantRequest{
+	request, err := e.opener.Open(newapi.SealedGrantRequest{
 		KeyID: job.KeyID, ExternalID: job.ExternalID,
 		RequestSHA256: job.RequestSHA256, Nonce: job.Nonce,
 		Ciphertext: job.Ciphertext,

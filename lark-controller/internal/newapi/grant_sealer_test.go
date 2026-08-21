@@ -75,6 +75,51 @@ func TestGrantSealerRequiresAES256Key(t *testing.T) {
 	}
 }
 
+func TestGrantKeyringRotatesPrimaryWhileOpeningPreviousCiphertext(t *testing.T) {
+	oldKey := bytes.Repeat([]byte{0x24}, 32)
+	newKey := bytes.Repeat([]byte{0x42}, 32)
+	oldKeyring, err := newapi.NewGrantKeyring(oldKey)
+	if err != nil {
+		t.Fatalf("new old grant keyring: %v", err)
+	}
+	request := validSubscriptionGrant()
+	oldSealed, err := oldKeyring.Seal(request)
+	if err != nil {
+		t.Fatalf("seal with old grant key: %v", err)
+	}
+
+	rotated, err := newapi.NewGrantKeyring(newKey, oldKey)
+	if err != nil {
+		t.Fatalf("new rotated grant keyring: %v", err)
+	}
+	keyIDs := rotated.KeyIDs()
+	if len(keyIDs) != 2 || keyIDs[0] != rotated.PrimaryKeyID() ||
+		keyIDs[0] == oldSealed.KeyID || keyIDs[1] != oldSealed.KeyID {
+		t.Fatalf("unexpected rotated grant key IDs: %v", keyIDs)
+	}
+	if opened, err := rotated.Open(oldSealed); err != nil || opened.ExternalID != request.ExternalID {
+		t.Fatalf("open old ciphertext after rotation: opened=%+v err=%v", opened, err)
+	}
+	newSealed, err := rotated.Seal(request)
+	if err != nil {
+		t.Fatalf("seal with rotated primary key: %v", err)
+	}
+	if newSealed.KeyID != rotated.PrimaryKeyID() || newSealed.KeyID == oldSealed.KeyID {
+		t.Fatalf("rotated seal used key %q, want new primary %q", newSealed.KeyID, rotated.PrimaryKeyID())
+	}
+
+	retired, err := newapi.NewGrantKeyring(newKey)
+	if err != nil {
+		t.Fatalf("new retired grant keyring: %v", err)
+	}
+	if _, err := retired.Open(oldSealed); err == nil || strings.Contains(err.Error(), oldSealed.KeyID) {
+		t.Fatalf("retired key opened old ciphertext or leaked key ID: %v", err)
+	}
+	if _, err := retired.Open(newSealed); err != nil {
+		t.Fatalf("retired keyring did not open new ciphertext: %v", err)
+	}
+}
+
 func TestGrantSealerRejectsAuthenticatedNonCanonicalJSON(t *testing.T) {
 	key := bytes.Repeat([]byte{0x42}, 32)
 	sealer, err := newapi.NewGrantSealer(key)
@@ -115,32 +160,61 @@ func TestGrantSealerRejectsAuthenticatedNonCanonicalJSON(t *testing.T) {
 	}
 }
 
-func TestLoadGrantPayloadKeyFileAcceptsOneLowerHexLine(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "grant-payload.key")
-	if err := os.WriteFile(path, []byte(strings.Repeat("42", 32)+"\n"), 0o600); err != nil {
-		t.Fatalf("write grant payload key: %v", err)
+func TestLoadGrantPayloadKeyringFileSupportsStrictRotationFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "grant-payload.keyring")
+	primaryLine := strings.Repeat("42", 32)
+	previousLine := strings.Repeat("24", 32)
+	if err := os.WriteFile(path, []byte(primaryLine+"\r\n"+previousLine+"\r\n"), 0o600); err != nil {
+		t.Fatalf("write grant payload keyring: %v", err)
 	}
-	key, err := newapi.LoadGrantPayloadKeyFile(path)
+	keyring, err := newapi.LoadGrantPayloadKeyringFile(path)
 	if err != nil {
-		t.Fatalf("load grant payload key: %v", err)
+		t.Fatalf("load grant payload keyring: %v", err)
 	}
-	if !bytes.Equal(key, bytes.Repeat([]byte{0x42}, 32)) {
-		t.Fatalf("loaded key has unexpected value")
+	primary, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new expected primary sealer: %v", err)
+	}
+	previous, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x24}, 32))
+	if err != nil {
+		t.Fatalf("new previous sealer: %v", err)
+	}
+	if keyring.PrimaryKeyID() != primary.KeyID() || len(keyring.KeyIDs()) != 2 {
+		t.Fatalf("unexpected loaded keyring IDs: %v", keyring.KeyIDs())
+	}
+	oldSealed, err := previous.Seal(validSubscriptionGrant())
+	if err != nil {
+		t.Fatalf("seal previous grant: %v", err)
+	}
+	if _, err := keyring.Open(oldSealed); err != nil {
+		t.Fatalf("loaded keyring did not open previous grant: %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte(primaryLine), 0o600); err != nil {
+		t.Fatalf("write one-line compatible keyring: %v", err)
+	}
+	if one, err := newapi.LoadGrantPayloadKeyringFile(path); err != nil || len(one.KeyIDs()) != 1 {
+		t.Fatalf("load one-line compatible keyring: keys=%v err=%v", one.KeyIDs(), err)
 	}
 
 	for name, value := range map[string]string{
-		"too short":      strings.Repeat("42", 31),
-		"uppercase":      strings.Repeat("AB", 32),
-		"leading space":  " " + strings.Repeat("42", 32),
-		"multiple lines": strings.Repeat("42", 32) + "\n\n",
+		"empty":                      "",
+		"too short":                  strings.Repeat("42", 31),
+		"uppercase":                  strings.Repeat("AB", 32),
+		"leading space":              " " + primaryLine,
+		"blank line":                 primaryLine + "\n\n" + previousLine,
+		"duplicate":                  primaryLine + "\n" + primaryLine,
+		"bare carriage return":       primaryLine + "\r",
+		"bare carriage return split": primaryLine + "\r" + previousLine,
+		"mixed line endings":         primaryLine + "\r\n" + previousLine + "\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
-				t.Fatalf("write invalid grant payload key: %v", err)
+				t.Fatalf("write invalid grant payload keyring: %v", err)
 			}
-			if _, err := newapi.LoadGrantPayloadKeyFile(path); err == nil ||
-				strings.Contains(err.Error(), value) {
-				t.Fatalf("invalid key error = %v", err)
+			if _, err := newapi.LoadGrantPayloadKeyringFile(path); err == nil ||
+				(value != "" && strings.Contains(err.Error(), value)) {
+				t.Fatalf("invalid keyring error = %v", err)
 			}
 		})
 	}
