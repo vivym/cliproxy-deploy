@@ -2,10 +2,10 @@
 
 ## 文档状态
 
-- 状态：设计已确定，待实施
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 为 shadow-only，WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
-- New API 基线：`v1.0.0-rc.23`
+- New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
 - 当前额度换算：`$1 = 500,000 quota`
 - 实施形态：独立 `lark-quota-controller` + 最小化 New API fork
 
@@ -94,7 +94,7 @@ allow_wallet_overflow = true
 allow_balance_pay = false
 ```
 
-New API `v1.0.0-rc.23` 的 `subscription_first` 是请求级、全额预扣语义，而不是把同一个请求拆分到两个资金源：
+当前 fork（上游基线 `v0.13.2`）的 `subscription_first` 是请求级、全额预扣语义，而不是把同一个请求拆分到两个资金源：
 
 1. 如果某份有效订阅可以覆盖本次请求的全部预扣额度，整个请求由订阅支付。
 2. 如果订阅不能覆盖本次请求的全部预扣额度，并且允许 wallet overflow，整个请求改由 wallet 支付。
@@ -677,6 +677,29 @@ migration/correction 使用另一份默认不挂载到 Controller 的短期运�
 }
 ```
 
+订阅等级 grant 的 `result` 固定返回投影和 assignment 收据：
+
+```json
+{
+  "status": "applied",
+  "external_id": "lark:subscription-level:81D31358-...",
+  "user_id": 42,
+  "result": {
+    "grant_type": "subscription_level",
+    "level_code": "pro",
+    "subscription_id": 701,
+    "assignment_version": 3,
+    "transition": "updated"
+  }
+}
+```
+
+`subscription_id` 和 `assignment_version` 必须为正整数，`level_code` 必须与请求一致。
+`transition` 只能为 `created`、`updated`、`noop` 或 `ignored_stale`，并与外层
+`status` 保持以下关系：`applied -> created|updated`、`noop -> noop`、
+`ignored_stale -> ignored_stale`。`replayed` 返回历史不可变 result，因此可保留上述任一
+合法 `transition`。
+
 `status` 可能为：
 
 - `applied`：本次事务首次生效。
@@ -685,6 +708,18 @@ migration/correction 使用另一份默认不挂载到 Controller 的短期运�
 - `ignored_stale`：低等级或旧版本命令不会覆盖较新状态。
 
 错误：
+
+```json
+{
+  "error": {
+    "code": "principal_not_ready",
+    "message": "principal_not_ready"
+  }
+}
+```
+
+所有非 2xx 响应使用该嵌套 envelope。Controller 只按 HTTP status 和登记过的 `code`
+分类；`message` 不作为控制流输入，也不写入持久化错误记录。
 
 | HTTP | code | 语义 | Controller 动作 |
 | ---: | --- | --- | --- |
@@ -864,7 +899,7 @@ deny fence 建立前已经持久化的 `SubscriptionPreConsumeRecord` 仍允许�
 
 ### New API Postgres
 
-首先迁移 wallet 计数宽度。现有 `users.quota` 和 `users.used_quota` 是 PostgreSQL `int`，累计审批余额会溢出；两列、Go model、批量聚合器、Redis cache、日志、API DTO 和所有 quota 算术必须一起改为 `bigint/int64`。更新使用 checked addition 和配置化业务上限；若 JSON 继续输出 number，业务上限不得超过 `2^53-1`。migration 先检查现有值和所有读写调用，再变更列类型，不能只把 `integration_grants.quota_delta` 改成 bigint。
+上游 `v0.13.2` 的 `users.quota` 和 `users.used_quota` 原为 PostgreSQL `int`；WP2 fork 已把两列、Go model、批量聚合器、Redis cache、日志、API DTO 和 quota 算术迁移到 `bigint/int64`，使用 checked addition，并把默认业务上限限制在 `2^53-1` 以内以保持 JSON number 兼容。部署 migration 前仍必须 preflight 现有值和完整读写链，不能只变更 `integration_grants.quota_delta`。
 
 建议新增 `integration_principals`，作为 OAuth binding 之外的永久身份映射：
 
@@ -1147,9 +1182,9 @@ Lark 的审批订阅接口目前要求 `approval:approval` 或 `approval:definit
 
 应用可用范围只开放给允许使用 AI Gateway 的员工或组织单元。Controller 仍以 `tenant_key` allowlist 做第二层校验。
 
-## 部署拓扑
+## 目标部署拓扑（尚未落入当前 `docker-compose.yml`）
 
-在根目录唯一的 `docker-compose.yml` 中增加 `lark-quota-controller`，并把自定义 New API fork 镜像固定到不可变 tag 或 digest。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
+当前根 Compose 仍只运行 upstream New API、Sub2API 及其数据服务，没有 Controller、`:3001` integration listener、`lark-integration` network、policy volume 或 integration secret。目标是在根目录唯一的 `docker-compose.yml` 中增加 `lark-quota-controller`，并把自定义 New API fork 镜像固定到不可变 tag 或 digest。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
 
 网络：
 
@@ -1477,6 +1512,13 @@ New API 检查：
 - 实现 disable 的 deny fence、单事务状态/auth/session 更新和 post-commit outbox。
 - 补齐并发、事务和故障窗口测试。
 
+当前本地实现收据：fork 从上游 `v0.13.2` 的 peeled commit
+`bee339d279ccecbf8c8a89e14ddbbd902f78bd5d` 开始，bigint、wallet grant、managed
+subscription、managed OAuth 和 principal disable 五个 tracer slice 均已实现，wire contract
+固定于 `f2ef0d95`。`go test ./service ./router ./middleware ./model ./controller` 已通过；真实
+MySQL/PostgreSQL migration 测试仍需要外部 DSN，仓库全量套件仍保留 WP2 baseline 记录的
+4 个非集成失败。这些是本地验证收据，不代表镜像已构建、Compose 已接入或生产已验收。
+
 ### WP3：Controller
 
 - 实现 Lark OAuth bridge 和 opaque handle store。
@@ -1492,8 +1534,9 @@ display-text mapping、有限重试/dead-letter/reversal pending、重启恢复�
 snapshot，以及 `/healthz`、`/readyz`、`/metrics` 已实现。Controller 现在还会生成精确的
 New API grant canonical request，并在同一 SQLite 事务只保存 external ID、policy/business
 字段、request hash 和 subject hash；同 payload 的 external ID 重放记为 `shadow_replayed`，
-不同 payload 进入 `external_id_payload_mismatch` dead-letter。HTTP adapter 的 grant 与分页
-active Lark principal contract 已用本地测试服务器验证，但 `cmd/lark-controller` 不读取 New API
+不同 payload 进入 `external_id_payload_mismatch` dead-letter。Controller compatibility receipt
+`166bbeb` 与 New API Gin router receipt `f2ef0d95` 已共同固定 nested error envelope、subscription
+result 和分页 active Lark principal wire contract；`cmd/lark-controller` 仍不读取 New API
 URL/credential、不构造 client，也不发送请求。principals contract 不返回 New API user ID、
 wallet、token 或 subscription 明细。Lark OAuth bridge、任何 entitlement write、就业状态
 reconciliation、Compose 接入和生产验证仍未实现。
@@ -1598,12 +1641,12 @@ Lark 官方文档：
 - 审批实例事件：`https://open.feishu.cn/document/server-docs/approval-v4/event/common-event/approval-instance-event`
 - 员工离职事件：`https://open.feishu.cn/document/server-docs/contact-v3/user/events/deleted`
 
-New API `v1.0.0-rc.23` 检查位置：
+上游 New API `v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）及当前 fork 检查位置：
 
 - `oauth/generic.go`：form token exchange、debug body logging、userinfo mapping
 - `controller/oauth.go`、`controller/custom_oauth.go`：OAuth 创建/绑定流程和现有自助/admin 解绑入口
 - `controller/subscription.go`：现有 billing preference、余额购买和普通 admin bind 入口
-- `controller/user.go`、`model/user.go`：新用户/邀请额度、现有 `int` wallet 字段和非幂等 quota 增加
+- `controller/user.go`、`model/user.go`：上游新用户/邀请额度、原有 `int` wallet 字段，以及 fork 的 checked `int64` 迁移
 - `model/subscription.go`：支付订单完成、subscription snapshot，以及绑定旧 subscription ID 的 preconsume/settle/refund
 - `service/billing_session.go`：`subscription_first` 和 wallet overflow
 
