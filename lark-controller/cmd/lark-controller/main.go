@@ -18,6 +18,12 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/worker"
 )
 
+const (
+	controllerReadHeaderTimeout = 500 * time.Millisecond
+	controllerReadTimeout       = 2 * time.Second
+	controllerWriteTimeout      = 2300 * time.Millisecond
+)
+
 func main() {
 	if err := run(); err != nil {
 		log.Printf("lark controller stopped: %v", err)
@@ -65,14 +71,7 @@ func run() error {
 		response.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_ = json.NewEncoder(response).Encode(map[string]string{"status": "ok", "mode": loaded.Mode})
 	})
-	server := &http.Server{
-		Addr:              loaded.ListenAddress,
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       5 * time.Second,
-		WriteTimeout:      5 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
+	server := newControllerHTTPServer(loaded.ListenAddress, mux)
 	serveResult := make(chan error, 1)
 	go func() {
 		log.Printf("lark controller listening in shadow mode")
@@ -89,6 +88,17 @@ func run() error {
 			return nil
 		}
 		return err
+	}
+}
+
+func newControllerHTTPServer(address string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              address,
+		Handler:           handler,
+		ReadHeaderTimeout: controllerReadHeaderTimeout,
+		ReadTimeout:       controllerReadTimeout,
+		WriteTimeout:      controllerWriteTimeout,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 

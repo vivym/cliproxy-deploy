@@ -67,6 +67,30 @@ func TestURLVerificationRequiresConfiguredToken(t *testing.T) {
 	}
 }
 
+func TestURLVerificationRejectsUnknownSchema(t *testing.T) {
+	recorder := &eventRecorder{}
+	handler, err := webhook.NewHandler(webhook.Config{
+		VerificationToken: "verification-token",
+		AppID:             "cli_test",
+		TenantKey:         "tenant-test",
+	}, recorder)
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	response := postJSON(t, handler, map[string]any{
+		"schema":    "3.0",
+		"challenge": "challenge-value",
+		"token":     "verification-token",
+		"type":      "url_verification",
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown challenge schema status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if recorder.records != 0 {
+		t.Fatalf("unknown challenge schema wrote %d inbox records, want 0", recorder.records)
+	}
+}
+
 func TestEventReturnsRetryableFailureUntilInboxCommitSucceeds(t *testing.T) {
 	handler, err := webhook.NewHandler(webhook.Config{
 		VerificationToken: "verification-token",

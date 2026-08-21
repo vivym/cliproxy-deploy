@@ -55,3 +55,66 @@ func TestV1ApprovalEventUsesTopLevelUUIDForDurableDeduplication(t *testing.T) {
 		t.Fatalf("recorded event = %+v, want fields %+v", recorded, want)
 	}
 }
+
+func TestV1EventRejectsNonCallbackEnvelopeWithoutRecording(t *testing.T) {
+	recorder := &eventRecorder{}
+	handler, err := webhook.NewHandler(webhook.Config{
+		VerificationToken: "verification-token",
+		AppID:             "cli_test",
+		TenantKey:         "tenant-test",
+	}, recorder)
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	response := postJSON(t, handler, map[string]any{
+		"uuid":  "uuid-wrong-type",
+		"token": "verification-token",
+		"type":  "approval_callback",
+		"event": map[string]any{
+			"type":          "approval_instance",
+			"app_id":        "cli_test",
+			"tenant_key":    "tenant-test",
+			"approval_code": "approval-level-v1",
+			"instance_code": "instance-v1-wrong-type",
+			"status":        "APPROVED",
+		},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("non-callback status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if recorder.records != 0 {
+		t.Fatalf("non-callback envelope wrote %d inbox records, want 0", recorder.records)
+	}
+}
+
+func TestEventRejectsUnknownSchemaWithoutRecording(t *testing.T) {
+	recorder := &eventRecorder{}
+	handler, err := webhook.NewHandler(webhook.Config{
+		VerificationToken: "verification-token",
+		AppID:             "cli_test",
+		TenantKey:         "tenant-test",
+	}, recorder)
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	response := postJSON(t, handler, map[string]any{
+		"schema": "3.0",
+		"uuid":   "uuid-unknown-schema",
+		"token":  "verification-token",
+		"type":   "event_callback",
+		"event": map[string]any{
+			"type":          "approval_instance",
+			"app_id":        "cli_test",
+			"tenant_key":    "tenant-test",
+			"approval_code": "approval-level-v1",
+			"instance_code": "instance-v1-unknown-schema",
+			"status":        "APPROVED",
+		},
+	})
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown schema status = %d, want %d; body=%s", response.Code, http.StatusBadRequest, response.Body.String())
+	}
+	if recorder.records != 0 {
+		t.Fatalf("unknown schema wrote %d inbox records, want 0", recorder.records)
+	}
+}

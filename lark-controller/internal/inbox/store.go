@@ -8,11 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+const sqliteBusyTimeout = 500 * time.Millisecond
 
 type Event struct {
 	Key             string
@@ -25,11 +26,43 @@ type Event struct {
 	InstanceCode    string
 	Status          string
 	PayloadJSON     string
-	ProcessingState string
+	ProcessingState ProcessingState
 	DuplicateCount  int64
 	ReceivedAt      time.Time
 	LastSeenAt      time.Time
 }
+
+type ProcessingState string
+
+const (
+	ProcessingStatePending         ProcessingState = "pending"
+	ProcessingStateProcessing      ProcessingState = "processing"
+	ProcessingStateShadowRecorded  ProcessingState = "shadow_recorded"
+	ProcessingStateReversalPending ProcessingState = "reversal_pending"
+	ProcessingStateDeadLetter      ProcessingState = "dead_letter"
+)
+
+type DecisionOutcome string
+
+const (
+	DecisionOutcomeShadowAuthorityVerified        DecisionOutcome = "shadow_authority_verified"
+	DecisionOutcomeShadowAuthorityRejected        DecisionOutcome = "shadow_authority_rejected"
+	DecisionOutcomeShadowIgnoredNonApproved       DecisionOutcome = "shadow_ignored_non_approved"
+	DecisionOutcomeReversalPending                DecisionOutcome = "reversal_pending"
+	DecisionOutcomeDeadLetterUnknownStatus        DecisionOutcome = "dead_letter_unknown_status"
+	DecisionOutcomeDeadLetterUnsupportedEventType DecisionOutcome = "dead_letter_unsupported_event_type"
+)
+
+type jobStatus string
+
+const (
+	jobStatusPending         jobStatus = "pending"
+	jobStatusProcessing      jobStatus = "processing"
+	jobStatusRetryWait       jobStatus = "retry_wait"
+	jobStatusSucceeded       jobStatus = "succeeded"
+	jobStatusReversalPending jobStatus = "reversal_pending"
+	jobStatusDeadLetter      jobStatus = "dead_letter"
+)
 
 type Store struct {
 	database *sql.DB
@@ -48,7 +81,7 @@ type Decision struct {
 	InstanceCode    string
 	EventStatus     string
 	AuthorityStatus string
-	Outcome         string
+	Outcome         DecisionOutcome
 	OpenIDHash      string
 	FormSHA256      string
 	StartTime       string
@@ -61,9 +94,12 @@ func Open(path string) (*Store, error) {
 		return nil, errors.New("sqlite path is required")
 	}
 	dsn := (&url.URL{
-		Scheme:   "file",
-		Path:     path,
-		RawQuery: "_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)",
+		Scheme: "file",
+		Path:   path,
+		RawQuery: fmt.Sprintf(
+			"_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)",
+			sqliteBusyTimeout.Milliseconds(),
+		),
 	}).String()
 	database, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -156,7 +192,7 @@ INSERT INTO lark_event_inbox (
     event_key, schema_version, event_id, event_type, app_id, tenant_key,
     approval_code, instance_code, event_status, payload_json, payload_hash,
     processing_state, duplicate_count, received_at, last_seen_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 ON CONFLICT(event_key) DO NOTHING`
 	tx, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -166,7 +202,7 @@ ON CONFLICT(event_key) DO NOTHING`
 	result, err := tx.ExecContext(ctx, insertEvent,
 		event.Key, event.SchemaVersion, event.EventID, event.EventType,
 		event.AppID, event.TenantKey, event.ApprovalCode, event.InstanceCode,
-		event.Status, event.PayloadJSON, payloadHash, now, now,
+		event.Status, event.PayloadJSON, payloadHash, ProcessingStatePending, now, now,
 	)
 	if err != nil {
 		return false, fmt.Errorf("record inbox event: %w", err)
@@ -179,8 +215,8 @@ ON CONFLICT(event_key) DO NOTHING`
 	if !duplicate {
 		const insertJob = `
 INSERT INTO jobs (event_key, job_type, status, next_attempt_at, created_at, updated_at)
-VALUES (?, 'process_lark_event', 'pending', ?, ?, ?)`
-		if _, err := tx.ExecContext(ctx, insertJob, event.Key, now, now, now); err != nil {
+VALUES (?, 'process_lark_event', ?, ?, ?, ?)`
+		if _, err := tx.ExecContext(ctx, insertJob, event.Key, jobStatusPending, now, now, now); err != nil {
 			return false, fmt.Errorf("create inbox job: %w", err)
 		}
 	} else {
@@ -281,13 +317,13 @@ SELECT j.id, i.event_key, i.schema_version, i.event_id, i.event_type,
        i.duplicate_count, i.received_at, i.last_seen_at
 FROM jobs j
 JOIN lark_event_inbox i ON i.event_key = j.event_key
-WHERE j.status IN ('pending', 'retry_wait') AND j.next_attempt_at <= ?
+WHERE j.status IN (?, ?) AND j.next_attempt_at <= ?
 ORDER BY j.id
 LIMIT 1`
 	var job Job
 	var receivedAt string
 	var lastSeenAt string
-	err = tx.QueryRowContext(ctx, query, now).Scan(
+	err = tx.QueryRowContext(ctx, query, jobStatusPending, jobStatusRetryWait, now).Scan(
 		&job.ID, &job.Event.Key, &job.Event.SchemaVersion, &job.Event.EventID,
 		&job.Event.EventType, &job.Event.AppID, &job.Event.TenantKey,
 		&job.Event.ApprovalCode, &job.Event.InstanceCode, &job.Event.Status,
@@ -301,9 +337,11 @@ LIMIT 1`
 		return Job{}, false, fmt.Errorf("select job: %w", err)
 	}
 	const claim = `
-UPDATE jobs SET status = 'processing', attempts = attempts + 1, updated_at = ?
-WHERE id = ? AND status IN ('pending', 'retry_wait')`
-	result, err := tx.ExecContext(ctx, claim, now, job.ID)
+UPDATE jobs SET status = ?, attempts = attempts + 1, updated_at = ?
+WHERE id = ? AND status IN (?, ?)`
+	result, err := tx.ExecContext(
+		ctx, claim, jobStatusProcessing, now, job.ID, jobStatusPending, jobStatusRetryWait,
+	)
 	if err != nil {
 		return Job{}, false, fmt.Errorf("claim job: %w", err)
 	}
@@ -312,8 +350,8 @@ WHERE id = ? AND status IN ('pending', 'retry_wait')`
 		return Job{}, false, fmt.Errorf("claim job affected %d rows: %w", affected, err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		"UPDATE lark_event_inbox SET processing_state = 'processing' WHERE event_key = ?",
-		job.Event.Key,
+		"UPDATE lark_event_inbox SET processing_state = ? WHERE event_key = ?",
+		ProcessingStateProcessing, job.Event.Key,
 	); err != nil {
 		return Job{}, false, fmt.Errorf("mark inbox processing: %w", err)
 	}
@@ -335,15 +373,9 @@ func (s *Store) CompleteDecision(ctx context.Context, job Job, decision Decision
 	}
 	defer func() { _ = tx.Rollback() }()
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
-	jobStatus := "succeeded"
-	inboxState := "shadow_recorded"
-	switch {
-	case decision.Outcome == "reversal_pending":
-		jobStatus = "reversal_pending"
-		inboxState = "reversal_pending"
-	case strings.HasPrefix(decision.Outcome, "dead_letter_"):
-		jobStatus = "dead_letter"
-		inboxState = "dead_letter"
+	terminalJobStatus, terminalInboxState, err := terminalStatesForOutcome(decision.Outcome)
+	if err != nil {
+		return err
 	}
 	const insertDecision = `
 INSERT INTO approval_instances (
@@ -365,14 +397,14 @@ INSERT INTO approval_instances (
 		return fmt.Errorf("store controller audit: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		"UPDATE jobs SET status = ?, last_error = '', updated_at = ? WHERE id = ? AND status = 'processing'",
-		jobStatus, createdAt, job.ID,
+		"UPDATE jobs SET status = ?, last_error = '', updated_at = ? WHERE id = ? AND status = ?",
+		terminalJobStatus, createdAt, job.ID, jobStatusProcessing,
 	); err != nil {
 		return fmt.Errorf("complete job: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE lark_event_inbox SET processing_state = ? WHERE event_key = ?",
-		inboxState, decision.EventKey,
+		terminalInboxState, decision.EventKey,
 	); err != nil {
 		return fmt.Errorf("complete inbox event: %w", err)
 	}
@@ -382,15 +414,32 @@ INSERT INTO approval_instances (
 	return nil
 }
 
+func terminalStatesForOutcome(outcome DecisionOutcome) (jobStatus, ProcessingState, error) {
+	switch outcome {
+	case DecisionOutcomeShadowAuthorityVerified,
+		DecisionOutcomeShadowAuthorityRejected,
+		DecisionOutcomeShadowIgnoredNonApproved:
+		return jobStatusSucceeded, ProcessingStateShadowRecorded, nil
+	case DecisionOutcomeReversalPending:
+		return jobStatusReversalPending, ProcessingStateReversalPending, nil
+	case DecisionOutcomeDeadLetterUnknownStatus,
+		DecisionOutcomeDeadLetterUnsupportedEventType:
+		return jobStatusDeadLetter, ProcessingStateDeadLetter, nil
+	default:
+		return "", "", fmt.Errorf("unknown shadow decision outcome %q", outcome)
+	}
+}
+
 func (s *Store) Retry(ctx context.Context, job Job, processErr error, delay time.Duration) error {
 	if job.ID <= 0 || processErr == nil || delay <= 0 {
 		return errors.New("invalid job retry")
 	}
 	now := time.Now().UTC()
 	_, err := s.database.ExecContext(ctx, `
-UPDATE jobs SET status = 'retry_wait', next_attempt_at = ?, last_error = ?, updated_at = ?
-WHERE id = ? AND status = 'processing'`,
-		now.Add(delay).Format(time.RFC3339Nano), processErr.Error(), now.Format(time.RFC3339Nano), job.ID,
+UPDATE jobs SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
+WHERE id = ? AND status = ?`,
+		jobStatusRetryWait, now.Add(delay).Format(time.RFC3339Nano), processErr.Error(),
+		now.Format(time.RFC3339Nano), job.ID, jobStatusProcessing,
 	)
 	if err != nil {
 		return fmt.Errorf("schedule job retry: %w", err)

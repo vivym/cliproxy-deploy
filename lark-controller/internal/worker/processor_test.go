@@ -33,7 +33,7 @@ func TestShadowProcessorFailsClosedAcrossEventStatusMatrix(t *testing.T) {
 	tests := []struct {
 		status     string
 		fetchCalls int
-		outcome    string
+		outcome    inbox.DecisionOutcome
 	}{
 		{status: "PENDING", fetchCalls: 0, outcome: "shadow_ignored_non_approved"},
 		{status: "REJECTED", fetchCalls: 0, outcome: "shadow_ignored_non_approved"},

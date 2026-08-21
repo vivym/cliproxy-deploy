@@ -9,13 +9,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 )
 
-const defaultBodyLimit int64 = 1 << 20
+const (
+	defaultBodyLimit    int64 = 1 << 20
+	defaultInboxTimeout       = 2 * time.Second
+	larkACKDeadline           = 3 * time.Second
+)
 
 type Config struct {
 	VerificationToken string
@@ -23,6 +28,7 @@ type Config struct {
 	AppID             string
 	TenantKey         string
 	BodyLimit         int64
+	InboxTimeout      time.Duration
 }
 
 type Recorder interface {
@@ -47,6 +53,12 @@ func NewHandler(config Config, recorder Recorder) (*Handler, error) {
 	if config.BodyLimit < 1 {
 		return nil, errors.New("body limit must be positive")
 	}
+	if config.InboxTimeout == 0 {
+		config.InboxTimeout = defaultInboxTimeout
+	}
+	if config.InboxTimeout < 0 || config.InboxTimeout >= larkACKDeadline {
+		return nil, errors.New("inbox timeout must be positive and less than 3 seconds")
+	}
 	return &Handler{config: config, recorder: recorder}, nil
 }
 
@@ -55,6 +67,8 @@ func (h *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		writeError(response, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
+	inboxContext, cancel := context.WithTimeout(request.Context(), h.config.InboxTimeout)
+	defer cancel()
 
 	body, err := io.ReadAll(http.MaxBytesReader(response, request.Body, h.config.BodyLimit))
 	if err != nil {
@@ -72,10 +86,14 @@ func (h *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request)
 		return
 	}
 	if envelope.Type == "url_verification" {
+		if envelope.Schema != "" && envelope.Schema != "2.0" {
+			writeError(response, http.StatusBadRequest, "invalid_event")
+			return
+		}
 		h.handleChallenge(response, envelope)
 		return
 	}
-	if err := h.recordEvent(request.Context(), envelope); err != nil {
+	if err := h.recordEvent(inboxContext, envelope); err != nil {
 		if errors.Is(err, errVerificationFailed) {
 			writeError(response, http.StatusUnauthorized, "verification_failed")
 			return
@@ -159,10 +177,14 @@ func (h *Handler) handleChallenge(response http.ResponseWriter, envelope eventEn
 }
 
 func (h *Handler) recordEvent(ctx context.Context, envelope eventEnvelope) error {
-	if envelope.Schema == "2.0" {
+	switch envelope.Schema {
+	case "2.0":
 		return h.recordV2Event(ctx, envelope)
+	case "":
+		return h.recordV1Event(ctx, envelope)
+	default:
+		return errors.New("unsupported event schema")
 	}
-	return h.recordV1Event(ctx, envelope)
 }
 
 func (h *Handler) recordV2Event(ctx context.Context, envelope eventEnvelope) error {
@@ -207,7 +229,8 @@ func (h *Handler) recordV2Event(ctx context.Context, envelope eventEnvelope) err
 }
 
 func (h *Handler) recordV1Event(ctx context.Context, envelope eventEnvelope) error {
-	if envelope.UUID == "" || len(envelope.Event) == 0 || string(envelope.Event) == "null" {
+	if envelope.Type != "event_callback" || envelope.UUID == "" ||
+		len(envelope.Event) == 0 || string(envelope.Event) == "null" {
 		return errors.New("incomplete v1 event")
 	}
 	if !secretEqual(envelope.Token, h.config.VerificationToken) {

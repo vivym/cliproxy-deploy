@@ -46,7 +46,7 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 		decision := inbox.Decision{
 			EventKey: job.Event.Key, ApprovalCode: job.Event.ApprovalCode,
 			InstanceCode: job.Event.InstanceCode, EventStatus: job.Event.Status,
-			Outcome: "dead_letter_unsupported_event_type",
+			Outcome: inbox.DecisionOutcomeDeadLetterUnsupportedEventType,
 		}
 		if err := p.store.CompleteDecision(ctx, job, decision); err != nil {
 			return true, err
@@ -71,7 +71,7 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 		decision = inbox.Decision{
 			EventKey: job.Event.Key, ApprovalCode: job.Event.ApprovalCode,
 			InstanceCode: job.Event.InstanceCode, EventStatus: job.Event.Status,
-			AuthorityStatus: instance.Status, Outcome: "shadow_authority_rejected",
+			AuthorityStatus: instance.Status, Outcome: inbox.DecisionOutcomeShadowAuthorityRejected,
 			OpenIDHash: HashEvidence(instance.OpenID), FormSHA256: HashEvidence(instance.FormJSON),
 			StartTime: instance.StartTime, Reverted: instance.Reverted,
 		}
@@ -96,11 +96,11 @@ func decisionWithoutFetch(event inbox.Event) (inbox.Decision, bool) {
 	case "APPROVED", "OVERTIME_RECOVER":
 		return inbox.Decision{}, false
 	case "PENDING", "REJECTED", "CANCELED", "DELETED", "OVERTIME_CLOSE":
-		decision.Outcome = "shadow_ignored_non_approved"
+		decision.Outcome = inbox.DecisionOutcomeShadowIgnoredNonApproved
 	case "REVERTED":
-		decision.Outcome = "reversal_pending"
+		decision.Outcome = inbox.DecisionOutcomeReversalPending
 	default:
-		decision.Outcome = "dead_letter_unknown_status"
+		decision.Outcome = inbox.DecisionOutcomeDeadLetterUnknownStatus
 	}
 	return decision, true
 }
@@ -117,7 +117,7 @@ func evaluateApprovedEvent(event inbox.Event, instance ApprovalInstance) (inbox.
 	return inbox.Decision{
 		EventKey: event.Key, ApprovalCode: instance.ApprovalCode,
 		InstanceCode: instance.InstanceCode, EventStatus: event.Status,
-		AuthorityStatus: instance.Status, Outcome: "shadow_authority_verified",
+		AuthorityStatus: instance.Status, Outcome: inbox.DecisionOutcomeShadowAuthorityVerified,
 		OpenIDHash: HashEvidence(instance.OpenID), FormSHA256: HashEvidence(instance.FormJSON),
 		StartTime: instance.StartTime, Reverted: instance.Reverted,
 	}, nil

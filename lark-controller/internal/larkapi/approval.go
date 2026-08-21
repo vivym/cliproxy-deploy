@@ -64,17 +64,17 @@ func (f *ApprovalFetcher) Fetch(ctx context.Context, instanceCode, locale string
 		return worker.ApprovalInstance{}, errors.New("get Lark approval instance returned no data")
 	}
 	return worker.ApprovalInstance{
-		ApprovalCode: value(response.Data.ApprovalCode),
-		InstanceCode: value(response.Data.InstanceCode),
-		Status:       value(response.Data.Status),
-		OpenID:       value(response.Data.OpenId),
-		StartTime:    value(response.Data.StartTime),
-		FormJSON:     value(response.Data.Form),
+		ApprovalCode: stringValue(response.Data.ApprovalCode),
+		InstanceCode: stringValue(response.Data.InstanceCode),
+		Status:       stringValue(response.Data.Status),
+		OpenID:       stringValue(response.Data.OpenId),
+		StartTime:    stringValue(response.Data.StartTime),
+		FormJSON:     stringValue(response.Data.Form),
 		Reverted:     response.Data.Reverted != nil && *response.Data.Reverted,
 	}, nil
 }
 
-func value(pointer *string) string {
+func stringValue(pointer *string) string {
 	if pointer == nil {
 		return ""
 	}

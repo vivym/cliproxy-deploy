@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 
@@ -93,6 +96,50 @@ func TestDuplicateEventIDRejectsDifferentPayload(t *testing.T) {
 	}
 	if recorded.InstanceCode != "instance-001" || recorded.Status != "PENDING" || recorded.DuplicateCount != 0 {
 		t.Fatalf("original event was changed: %+v", recorded)
+	}
+}
+
+func TestInboxContentionReturnsBeforeLarkAcknowledgementDeadline(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")
+	store := openStore(t, databasePath)
+	locker, err := sql.Open("sqlite", (&url.URL{
+		Scheme: "file",
+		Path:   databasePath,
+	}).String())
+	if err != nil {
+		t.Fatalf("open lock connection: %v", err)
+	}
+	t.Cleanup(func() { _ = locker.Close() })
+	lockConnection, err := locker.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("acquire lock connection: %v", err)
+	}
+	t.Cleanup(func() { _ = lockConnection.Close() })
+	if _, err := lockConnection.ExecContext(context.Background(), "BEGIN IMMEDIATE"); err != nil {
+		t.Fatalf("lock database for writing: %v", err)
+	}
+	t.Cleanup(func() { _, _ = lockConnection.ExecContext(context.Background(), "ROLLBACK") })
+
+	handler, err := webhook.NewHandler(webhook.Config{
+		VerificationToken: "verification-token",
+		AppID:             "cli_test",
+		TenantKey:         "tenant-test",
+		InboxTimeout:      200 * time.Millisecond,
+	}, store)
+	if err != nil {
+		t.Fatalf("new handler: %v", err)
+	}
+	started := time.Now()
+	response := postJSON(t, handler, approvalEvent("evt-contended", "instance-contended", "APPROVED"))
+	elapsed := time.Since(started)
+	if response.Code != http.StatusServiceUnavailable {
+		t.Fatalf("contended inbox status = %d, want %d; body=%s", response.Code, http.StatusServiceUnavailable, response.Body.String())
+	}
+	if elapsed >= time.Second {
+		t.Fatalf("contended inbox response took %s, want less than 1s", elapsed)
+	}
+	if !strings.Contains(response.Body.String(), "inbox_unavailable") {
+		t.Fatalf("contended inbox body = %s, want stable retryable error", response.Body.String())
 	}
 }
 
