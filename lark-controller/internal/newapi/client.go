@@ -66,10 +66,13 @@ type EntitlementGrantRequest struct {
 }
 
 type GrantResult struct {
-	GrantType   string `json:"grant_type"`
-	PackageCode string `json:"package_code,omitempty"`
-	QuotaDelta  int64  `json:"quota_delta,omitempty"`
-	LevelCode   string `json:"level_code,omitempty"`
+	GrantType         string `json:"grant_type"`
+	PackageCode       string `json:"package_code,omitempty"`
+	QuotaDelta        int64  `json:"quota_delta,omitempty"`
+	LevelCode         string `json:"level_code,omitempty"`
+	SubscriptionID    int64  `json:"subscription_id,omitempty"`
+	AssignmentVersion int64  `json:"assignment_version,omitempty"`
+	Transition        string `json:"transition,omitempty"`
 }
 
 type EntitlementGrantResponse struct {
@@ -268,7 +271,21 @@ func validateGrantResponse(
 		response.Result.LevelCode != request.Grant.LevelCode {
 		return errors.New("New API subscription result does not match request")
 	}
+	if request.Grant.Type == "subscription_level" &&
+		(response.Result.SubscriptionID <= 0 || response.Result.AssignmentVersion <= 0 ||
+			!validSubscriptionTransition(response.Result.Transition)) {
+		return errors.New("New API subscription result is incomplete")
+	}
 	return nil
+}
+
+func validSubscriptionTransition(transition string) bool {
+	switch transition {
+	case "created", "updated", "noop", "ignored_stale":
+		return true
+	default:
+		return false
+	}
 }
 
 func validatePrincipalPage(page PrincipalPage, limit int) error {
@@ -289,9 +306,12 @@ func validatePrincipalPage(page PrincipalPage, limit int) error {
 
 func decodeAPIError(response *http.Response) error {
 	var payload struct {
-		Code string `json:"code"`
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes+1)).Decode(&payload); err != nil || payload.Code == "" {
+	if err := decodeStrictJSON(response.Body, &payload); err != nil || payload.Error.Code == "" {
 		if response.StatusCode == http.StatusServiceUnavailable {
 			return &APIError{
 				StatusCode: response.StatusCode, Code: "temporarily_unavailable", Retryable: true,
@@ -299,7 +319,7 @@ func decodeAPIError(response *http.Response) error {
 		}
 		return &APIError{StatusCode: response.StatusCode, Code: "invalid_response"}
 	}
-	code := normalizeAPIErrorCode(payload.Code)
+	code := normalizeAPIErrorCode(payload.Error.Code)
 	if response.StatusCode == http.StatusServiceUnavailable {
 		return &APIError{
 			StatusCode: response.StatusCode, Code: "temporarily_unavailable", Retryable: true,

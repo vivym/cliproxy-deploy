@@ -100,7 +100,7 @@ func TestClientClassifiesOnlyDocumentedRetryableErrors(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 				response.WriteHeader(test.statusCode)
-				_, _ = response.Write([]byte(`{"code":"` + test.upstreamCode + `","message":"sensitive upstream detail"}`))
+				_, _ = response.Write([]byte(`{"error":{"code":"` + test.upstreamCode + `","message":"sensitive upstream detail"}}`))
 			}))
 			defer server.Close()
 			client, err := newapi.NewClient(newapi.Config{
@@ -120,6 +120,77 @@ func TestClientClassifiesOnlyDocumentedRetryableErrors(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), "sensitive") {
 				t.Fatalf("error leaked upstream message: %v", err)
+			}
+		})
+	}
+}
+
+func TestClientAcceptsNewAPISubscriptionGrantResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{
+            "status":"applied",
+            "external_id":"lark:subscription-level:instance-1",
+            "user_id":42,
+            "result":{
+                "grant_type":"subscription_level",
+                "level_code":"pro",
+                "subscription_id":701,
+                "assignment_version":3,
+                "transition":"updated"
+            }
+        }`))
+	}))
+	defer server.Close()
+
+	client, err := newapi.NewClient(newapi.Config{
+		BaseURL: server.URL, IntegrationSecret: integrationSecret, HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	result, err := client.Grant(context.Background(), validSubscriptionGrant())
+	if err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	if result.Result.LevelCode != "pro" || result.Result.SubscriptionID != 701 ||
+		result.Result.AssignmentVersion != 3 || result.Result.Transition != "updated" {
+		t.Fatalf("unexpected subscription result: %+v", result.Result)
+	}
+}
+
+func TestClientRejectsIncompleteNewAPISubscriptionGrantResult(t *testing.T) {
+	tests := []struct {
+		name   string
+		result string
+	}{
+		{name: "missing subscription id", result: `"assignment_version":3,"transition":"updated"`},
+		{name: "missing assignment version", result: `"subscription_id":701,"transition":"updated"`},
+		{name: "missing transition", result: `"subscription_id":701,"assignment_version":3`},
+		{name: "unknown transition", result: `"subscription_id":701,"assignment_version":3,"transition":"replaced"`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				_, _ = response.Write([]byte(`{
+                    "status":"applied",
+                    "external_id":"lark:subscription-level:instance-1",
+                    "user_id":42,
+                    "result":{"grant_type":"subscription_level","level_code":"pro",` + test.result + `}
+                }`))
+			}))
+			defer server.Close()
+
+			client, err := newapi.NewClient(newapi.Config{
+				BaseURL: server.URL, IntegrationSecret: integrationSecret, HTTPClient: server.Client(),
+			})
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			_, err = client.Grant(context.Background(), validSubscriptionGrant())
+			if err == nil || !strings.Contains(err.Error(), "subscription result is incomplete") {
+				t.Fatalf("error = %v, want incomplete subscription result", err)
 			}
 		})
 	}
