@@ -91,9 +91,18 @@ func TestClientClassifiesOnlyDocumentedRetryableErrors(t *testing.T) {
 		wantCode     string
 		retryable    bool
 	}{
+		{name: "invalid request", statusCode: http.StatusBadRequest, upstreamCode: "invalid_request", wantCode: "invalid_request", retryable: false},
+		{name: "unauthorized", statusCode: http.StatusUnauthorized, upstreamCode: "integration_unauthorized", wantCode: "integration_unauthorized", retryable: false},
 		{name: "principal not ready", statusCode: http.StatusNotFound, upstreamCode: "principal_not_ready", wantCode: "principal_not_ready", retryable: true},
+		{name: "principal disabled", statusCode: http.StatusConflict, upstreamCode: "principal_disabled", wantCode: "principal_disabled", retryable: false},
+		{name: "unmanaged subscription conflict", statusCode: http.StatusConflict, upstreamCode: "unmanaged_subscription_conflict", wantCode: "unmanaged_subscription_conflict", retryable: false},
+		{name: "policy version mismatch", statusCode: http.StatusConflict, upstreamCode: "policy_version_mismatch", wantCode: "policy_version_mismatch", retryable: false},
+		{name: "approval binding mismatch", statusCode: http.StatusConflict, upstreamCode: "approval_binding_mismatch", wantCode: "approval_binding_mismatch", retryable: false},
 		{name: "temporary unavailable", statusCode: http.StatusServiceUnavailable, upstreamCode: "temporarily_unavailable", wantCode: "temporarily_unavailable", retryable: true},
 		{name: "payload mismatch", statusCode: http.StatusConflict, upstreamCode: "external_id_payload_mismatch", wantCode: "external_id_payload_mismatch", retryable: false},
+		{name: "unknown package", statusCode: http.StatusUnprocessableEntity, upstreamCode: "unknown_package", wantCode: "unknown_package", retryable: false},
+		{name: "unknown level", statusCode: http.StatusUnprocessableEntity, upstreamCode: "unknown_level", wantCode: "unknown_level", retryable: false},
+		{name: "quota out of range", statusCode: http.StatusUnprocessableEntity, upstreamCode: "quota_out_of_range", wantCode: "quota_out_of_range", retryable: false},
 		{name: "unknown code", statusCode: http.StatusInternalServerError, upstreamCode: "sensitive_internal_detail", wantCode: "unclassified_error", retryable: false},
 	}
 	for _, test := range tests {
@@ -193,6 +202,58 @@ func TestClientRejectsIncompleteNewAPISubscriptionGrantResult(t *testing.T) {
 				t.Fatalf("error = %v, want incomplete subscription result", err)
 			}
 		})
+	}
+}
+
+func TestClientValidatesSubscriptionStatusTransitionMatrix(t *testing.T) {
+	validPairs := map[string]bool{
+		"applied/created":             true,
+		"applied/updated":             true,
+		"noop/noop":                   true,
+		"ignored_stale/ignored_stale": true,
+		"replayed/created":            true,
+		"replayed/updated":            true,
+		"replayed/noop":               true,
+		"replayed/ignored_stale":      true,
+	}
+	statuses := []string{"applied", "noop", "ignored_stale", "replayed"}
+	transitions := []string{"created", "updated", "noop", "ignored_stale"}
+	for _, status := range statuses {
+		for _, transition := range transitions {
+			pair := status + "/" + transition
+			t.Run(pair, func(t *testing.T) {
+				server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+					response.Header().Set("Content-Type", "application/json")
+					_, _ = response.Write([]byte(`{
+					"status":"` + status + `",
+					"external_id":"lark:subscription-level:instance-1",
+					"user_id":42,
+					"result":{
+                        "grant_type":"subscription_level",
+						"level_code":"pro",
+						"subscription_id":701,
+						"assignment_version":3,
+						"transition":"` + transition + `"
+					}
+				}`))
+				}))
+				defer server.Close()
+
+				client, err := newapi.NewClient(newapi.Config{
+					BaseURL: server.URL, IntegrationSecret: integrationSecret, HTTPClient: server.Client(),
+				})
+				if err != nil {
+					t.Fatalf("new client: %v", err)
+				}
+				_, err = client.Grant(context.Background(), validSubscriptionGrant())
+				if validPairs[pair] && err != nil {
+					t.Fatalf("grant: %v", err)
+				}
+				if !validPairs[pair] && (err == nil || !strings.Contains(err.Error(), "subscription status and transition do not match")) {
+					t.Fatalf("error = %v, want subscription status/transition mismatch", err)
+				}
+			})
+		}
 	}
 }
 

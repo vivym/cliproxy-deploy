@@ -276,6 +276,10 @@ func validateGrantResponse(
 			!validSubscriptionTransition(response.Result.Transition)) {
 		return errors.New("New API subscription result is incomplete")
 	}
+	if request.Grant.Type == "subscription_level" &&
+		!validSubscriptionStatusTransition(response.Status, response.Result.Transition) {
+		return errors.New("New API subscription status and transition do not match")
+	}
 	return nil
 }
 
@@ -283,6 +287,21 @@ func validSubscriptionTransition(transition string) bool {
 	switch transition {
 	case "created", "updated", "noop", "ignored_stale":
 		return true
+	default:
+		return false
+	}
+}
+
+func validSubscriptionStatusTransition(status, transition string) bool {
+	switch status {
+	case "applied":
+		return transition == "created" || transition == "updated"
+	case "noop":
+		return transition == "noop"
+	case "ignored_stale":
+		return transition == "ignored_stale"
+	case "replayed":
+		return validSubscriptionTransition(transition)
 	default:
 		return false
 	}
