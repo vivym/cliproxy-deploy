@@ -23,6 +23,9 @@ The controller supports a locally verified `shadow` mode and an explicit
   remaining keys decrypt jobs created before rotation;
 - records same-payload external-ID reuse as `shadow_replayed` and dead-letters
   payload mismatches without replacing the first shadow ledger entry;
+- persists 256-bit OAuth state, login-code, and access-handle credentials only
+  by SHA-256 digest, with atomic single-use consumption and fixed five-minute
+  or 60-second expiry windows;
 - classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
   six-step jittered retry schedule before durable dead-lettering;
 - recovers interrupted jobs with their attempt counters after restart;
@@ -189,7 +192,8 @@ go build ./cmd/lark-controller
 ```
 
 This slice does not add the service to Docker Compose and must not be deployed.
-Active grant execution is implemented locally, but Lark OAuth, employment
-reconciliation, Compose wiring, operational runbooks, and production validation
-remain follow-up work. Do not enable active mode in production before those
-gates are complete.
+Active grant execution and the durable opaque OAuth credential store are
+implemented locally, but the OAuth HTTP bridge, Lark token/userinfo exchange,
+base-subscription dispatch, employment reconciliation, Compose wiring,
+operational runbooks, and production validation remain follow-up work. Do not
+enable active mode in production before those gates are complete.

@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow 与 active grant runtime，OAuth/在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime 与 opaque OAuth credential store，OAuth HTTP bridge/在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1537,7 +1537,11 @@ MySQL/PostgreSQL migration 测试仍需要外部 DSN，仓库全量套件仍保�
 - 实现 New API adapter、metrics、health 和 audit。
 - 实现 Controller 侧每日 inbox/job/approval reconciliation 和 active principal 在职状态核验，权限故障 fail open 并告警。
 
-当前本地实现边界（shadow/active grant，尚未部署）：v1/v2 webhook 验证与 durable inbox、
+当前本地实现边界（shadow/active grant，尚未部署）：OAuth state、login code 和 access handle
+已使用三个 SQLite 表持久化；Controller 生成 256-bit 随机 credential，数据库只保存 SHA-256
+digest，state 默认五分钟、code/handle 默认 60 秒，并通过带 expiry/consumed 条件的原子更新实现
+单次消费。login code 到 access handle 的交换在同一事务完成；subject 固定为
+`tenant_key:open_id`，username 按 75-bit base32 规则确定性生成。v1/v2 webhook 验证与 durable inbox、
 authoritative Approval v4 fetch、versioned policy/manifest 解析、固定 locale 与 exact
 display-text mapping、有限重试/dead-letter/reversal pending、重启恢复、SQLite audit
 snapshot，以及 `/healthz`、`/readyz`、`/metrics` 已实现。Controller 现在还会生成精确的
@@ -1560,7 +1564,8 @@ Controller compatibility receipt
 result 和分页 active Lark principal wire contract；active mode 现在读取专用 integration
 credential、构造 client/executor 并执行幂等 entitlement write，shadow mode 保持零 New API
 调用。principals contract 不返回 New API user ID、wallet、token 或 subscription 明细。
-Lark OAuth bridge、就业状态 reconciliation、Compose 接入和生产验证仍未实现。
+OAuth authorize/callback/token/userinfo HTTP handlers、Lark token/userinfo exchange、登录后的基础
+订阅 job、就业状态 reconciliation、Compose 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的

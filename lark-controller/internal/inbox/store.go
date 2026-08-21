@@ -73,6 +73,7 @@ const (
 
 type Store struct {
 	database *sql.DB
+	now      func() time.Time
 }
 
 var ErrEventPayloadMismatch = errors.New("event id payload mismatch")
@@ -126,7 +127,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	database.SetMaxOpenConns(1)
-	store := &Store{database: database}
+	store := &Store{database: database, now: time.Now}
 	if err := store.migrate(context.Background()); err != nil {
 		_ = database.Close()
 		return nil, err
@@ -240,9 +241,41 @@ CREATE TABLE IF NOT EXISTS entitlement_grant_jobs (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_entitlement_grant_jobs_ready
-    ON entitlement_grant_jobs(status, next_attempt_at, id);
-CREATE TABLE IF NOT EXISTS policy_versions (
+	CREATE INDEX IF NOT EXISTS idx_entitlement_grant_jobs_ready
+	    ON entitlement_grant_jobs(status, next_attempt_at, id);
+	CREATE TABLE IF NOT EXISTS oauth_states (
+	    state_hash BLOB PRIMARY KEY CHECK(length(state_hash) = 32),
+	    new_api_state TEXT NOT NULL,
+	    redirect_uri TEXT NOT NULL,
+	    expires_at INTEGER NOT NULL,
+	    consumed_at TEXT NOT NULL DEFAULT '',
+	    created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_oauth_states_expiry
+	    ON oauth_states(expires_at);
+	CREATE TABLE IF NOT EXISTS oauth_login_codes (
+	    code_hash BLOB PRIMARY KEY CHECK(length(code_hash) = 32),
+	    subject TEXT NOT NULL,
+	    username TEXT NOT NULL,
+	    display_name TEXT NOT NULL,
+	    expires_at INTEGER NOT NULL,
+	    consumed_at TEXT NOT NULL DEFAULT '',
+	    created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_oauth_login_codes_expiry
+	    ON oauth_login_codes(expires_at);
+	CREATE TABLE IF NOT EXISTS oauth_access_handles (
+	    handle_hash BLOB PRIMARY KEY CHECK(length(handle_hash) = 32),
+	    subject TEXT NOT NULL,
+	    username TEXT NOT NULL,
+	    display_name TEXT NOT NULL,
+	    expires_at INTEGER NOT NULL,
+	    consumed_at TEXT NOT NULL DEFAULT '',
+	    created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_oauth_access_handles_expiry
+	    ON oauth_access_handles(expires_at);
+	CREATE TABLE IF NOT EXISTS policy_versions (
     policy_version TEXT PRIMARY KEY,
     catalog_sha256 TEXT NOT NULL UNIQUE,
     source_sha256 TEXT NOT NULL,
