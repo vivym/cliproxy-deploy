@@ -15,6 +15,11 @@ The current tracer slice is deliberately shadow-only. It:
   from operator-mounted strict JSON files;
 - resolves `radioV2` values by exact display text and persists only sanitized
   shadow evidence;
+- classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
+  six-step jittered retry schedule before durable dead-lettering;
+- recovers interrupted jobs with their attempt counters after restart;
+- exposes liveness, readiness, and bounded-label Prometheus metrics for inbox,
+  jobs, approval fetches, policy failures, dead letters, and queue age;
 - stores only normalized event data, requester/form hashes, and shadow
   decisions; and
 - has no New API entitlement client or grant execution path.
@@ -39,7 +44,28 @@ Optional variables:
 ```text
 LARK_CONTROLLER_LISTEN_ADDR=0.0.0.0:8080
 LARK_APPROVAL_LOCALE=zh-CN
+LARK_READINESS_MAX_QUEUE_AGE=15m
 ```
+
+Approval fetches retry after `5s, 15s, 1m, 5m, 15m, 1h`, with deterministic
+20 percent jitter. A valid Lark `Retry-After` takes precedence and is capped at
+24 hours. A seventh failed attempt is terminal. HTTP `408`, `429`, `5xx`, Lark
+business code `99991400`, request timeouts, and transport failures are
+retryable; other `4xx`, token rejection, malformed success responses, and
+unclassified failures are terminal. Only stable failure reasons are persisted.
+
+Operational endpoints:
+
+```text
+GET /healthz  process liveness; does not depend on SQLite
+GET /readyz   SQLite availability and age of jobs ready to run
+GET /metrics  Prometheus text format with bounded label values
+```
+
+`LARK_READINESS_MAX_QUEUE_AGE` controls when an already-due job is considered
+stalled. A future `retry_wait` job does not fail readiness merely because Lark
+asked the controller to wait. Dead letters remain visible in metrics but do not
+disable webhook ingestion.
 
 The policy directory has no built-in defaults. Operators must mount one or
 more files named `*.policy.json`; every file uses `format_version: 1` and
@@ -97,5 +123,5 @@ go build ./cmd/lark-controller
 ```
 
 This slice does not add the service to Docker Compose and must not be deployed.
-Retry classification, metrics, OAuth, employment reconciliation, and the New
-API adapter remain follow-up WP3 slices.
+OAuth, employment reconciliation, and the New API adapter remain follow-up WP3
+slices. There is still no entitlement mutation path.

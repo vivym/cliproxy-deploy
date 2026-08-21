@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -55,6 +56,7 @@ const (
 	DecisionOutcomeDeadLetterUnknownStatus        DecisionOutcome = "dead_letter_unknown_status"
 	DecisionOutcomeDeadLetterUnsupportedEventType DecisionOutcome = "dead_letter_unsupported_event_type"
 	DecisionOutcomeDeadLetterPolicyValidation     DecisionOutcome = "dead_letter_policy_validation_failed"
+	DecisionOutcomeDeadLetterApprovalFetch        DecisionOutcome = "dead_letter_approval_fetch_failed"
 )
 
 type jobStatus string
@@ -75,8 +77,9 @@ type Store struct {
 var ErrEventPayloadMismatch = errors.New("event id payload mismatch")
 
 type Job struct {
-	ID    int64
-	Event Event
+	ID       int64
+	Attempts int
+	Event    Event
 }
 
 type Decision struct {
@@ -95,6 +98,7 @@ type Decision struct {
 	QuotaDelta        int64
 	MonthlyQuota      int64
 	LevelRank         int
+	FailureReason     string
 	OpenIDHash        string
 	FormSHA256        string
 	StartTime         string
@@ -177,6 +181,7 @@ CREATE TABLE IF NOT EXISTS approval_instances (
     quota_delta INTEGER NOT NULL DEFAULT 0,
     monthly_quota INTEGER NOT NULL DEFAULT 0,
     level_rank INTEGER NOT NULL DEFAULT 0,
+	 failure_reason TEXT NOT NULL DEFAULT '',
     open_id_hash TEXT NOT NULL DEFAULT '',
     form_sha256 TEXT NOT NULL DEFAULT '',
     start_time TEXT NOT NULL DEFAULT '',
@@ -213,6 +218,9 @@ CREATE TABLE IF NOT EXISTS approval_policy_bindings (
 );
 UPDATE jobs SET status = 'pending', updated_at = next_attempt_at
 WHERE status = 'processing';
+UPDATE lark_event_inbox SET processing_state = 'pending'
+WHERE processing_state = 'processing'
+  AND event_key IN (SELECT event_key FROM jobs WHERE status = 'pending');
 `
 	if _, err := s.database.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate inbox: %w", err)
@@ -243,6 +251,7 @@ func (s *Store) ensureApprovalDecisionColumns(ctx context.Context) error {
 		{"quota_delta", "ALTER TABLE approval_instances ADD COLUMN quota_delta INTEGER NOT NULL DEFAULT 0"},
 		{"monthly_quota", "ALTER TABLE approval_instances ADD COLUMN monthly_quota INTEGER NOT NULL DEFAULT 0"},
 		{"level_rank", "ALTER TABLE approval_instances ADD COLUMN level_rank INTEGER NOT NULL DEFAULT 0"},
+		{"failure_reason", "ALTER TABLE approval_instances ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''"},
 	}
 	columns, err := s.tableColumns(ctx, "approval_instances")
 	if err != nil {
@@ -481,7 +490,7 @@ func (s *Store) ClaimNext(ctx context.Context) (Job, bool, error) {
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	const query = `
-SELECT j.id, i.event_key, i.schema_version, i.event_id, i.event_type,
+SELECT j.id, j.attempts, i.event_key, i.schema_version, i.event_id, i.event_type,
        i.app_id, i.tenant_key, i.approval_code, i.instance_code,
        i.event_status, i.payload_json, i.processing_state,
        i.duplicate_count, i.received_at, i.last_seen_at
@@ -494,7 +503,7 @@ LIMIT 1`
 	var receivedAt string
 	var lastSeenAt string
 	err = tx.QueryRowContext(ctx, query, jobStatusPending, jobStatusRetryWait, now).Scan(
-		&job.ID, &job.Event.Key, &job.Event.SchemaVersion, &job.Event.EventID,
+		&job.ID, &job.Attempts, &job.Event.Key, &job.Event.SchemaVersion, &job.Event.EventID,
 		&job.Event.EventType, &job.Event.AppID, &job.Event.TenantKey,
 		&job.Event.ApprovalCode, &job.Event.InstanceCode, &job.Event.Status,
 		&job.Event.PayloadJSON, &job.Event.ProcessingState, &job.Event.DuplicateCount,
@@ -530,6 +539,7 @@ WHERE id = ? AND status IN (?, ?)`
 	}
 	job.Event.ReceivedAt, _ = time.Parse(time.RFC3339Nano, receivedAt)
 	job.Event.LastSeenAt, _ = time.Parse(time.RFC3339Nano, lastSeenAt)
+	job.Attempts++
 	return job, true, nil
 }
 
@@ -551,15 +561,16 @@ func (s *Store) CompleteDecision(ctx context.Context, job Job, decision Decision
 INSERT INTO approval_instances (
     event_key, approval_code, instance_code, event_status, authority_status,
 	 outcome, policy_version, approval_kind, schema_fingerprint, business_code,
-	 locale, catalog_sha256, quota_delta, monthly_quota, level_rank,
-	 open_id_hash, form_sha256, start_time, reverted, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		 locale, catalog_sha256, quota_delta, monthly_quota, level_rank, failure_reason,
+		 open_id_hash, form_sha256, start_time, reverted, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if _, err := tx.ExecContext(ctx, insertDecision,
 		decision.EventKey, decision.ApprovalCode, decision.InstanceCode,
 		decision.EventStatus, decision.AuthorityStatus, decision.Outcome,
 		decision.PolicyVersion, decision.ApprovalKind, decision.SchemaFingerprint,
 		decision.BusinessCode, decision.Locale, decision.CatalogSHA256,
 		decision.QuotaDelta, decision.MonthlyQuota, decision.LevelRank,
+		decision.FailureReason,
 		decision.OpenIDHash, decision.FormSHA256, decision.StartTime,
 		decision.Reverted, createdAt,
 	); err != nil {
@@ -571,9 +582,26 @@ INSERT INTO approval_instances (
 	); err != nil {
 		return fmt.Errorf("store controller audit: %w", err)
 	}
+	fetchResult := ""
+	if decision.AuthorityStatus != "" {
+		fetchResult = "success"
+	} else if decision.Outcome == DecisionOutcomeDeadLetterApprovalFetch {
+		fetchResult = "terminal_error"
+		if strings.HasPrefix(decision.FailureReason, "retry_exhausted_") {
+			fetchResult = "retryable_error"
+		}
+	}
+	if fetchResult != "" {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO controller_audit (event_key, action, outcome, created_at) VALUES (?, 'approval_fetch', ?, ?)",
+			decision.EventKey, fetchResult, createdAt,
+		); err != nil {
+			return fmt.Errorf("store approval fetch audit: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
-		"UPDATE jobs SET status = ?, last_error = '', updated_at = ? WHERE id = ? AND status = ?",
-		terminalJobStatus, createdAt, job.ID, jobStatusProcessing,
+		"UPDATE jobs SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND status = ?",
+		terminalJobStatus, decision.FailureReason, createdAt, job.ID, jobStatusProcessing,
 	); err != nil {
 		return fmt.Errorf("complete job: %w", err)
 	}
@@ -599,26 +627,51 @@ func terminalStatesForOutcome(outcome DecisionOutcome) (jobStatus, ProcessingSta
 		return jobStatusReversalPending, ProcessingStateReversalPending, nil
 	case DecisionOutcomeDeadLetterUnknownStatus,
 		DecisionOutcomeDeadLetterUnsupportedEventType,
-		DecisionOutcomeDeadLetterPolicyValidation:
+		DecisionOutcomeDeadLetterPolicyValidation,
+		DecisionOutcomeDeadLetterApprovalFetch:
 		return jobStatusDeadLetter, ProcessingStateDeadLetter, nil
 	default:
 		return "", "", fmt.Errorf("unknown shadow decision outcome %q", outcome)
 	}
 }
 
-func (s *Store) Retry(ctx context.Context, job Job, processErr error, delay time.Duration) error {
-	if job.ID <= 0 || processErr == nil || delay <= 0 {
+func (s *Store) Retry(ctx context.Context, job Job, reason string, delay time.Duration) error {
+	if job.ID <= 0 || reason == "" || delay <= 0 {
 		return errors.New("invalid job retry")
 	}
 	now := time.Now().UTC()
-	_, err := s.database.ExecContext(ctx, `
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin job retry: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 UPDATE jobs SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
 WHERE id = ? AND status = ?`,
-		jobStatusRetryWait, now.Add(delay).Format(time.RFC3339Nano), processErr.Error(),
+		jobStatusRetryWait, now.Add(delay).Format(time.RFC3339Nano), reason,
 		now.Format(time.RFC3339Nano), job.ID, jobStatusProcessing,
 	)
 	if err != nil {
 		return fmt.Errorf("schedule job retry: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil || affected != 1 {
+		return fmt.Errorf("schedule job retry affected %d rows: %w", affected, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"UPDATE lark_event_inbox SET processing_state = ? WHERE event_key = ?",
+		ProcessingStatePending, job.Event.Key,
+	); err != nil {
+		return fmt.Errorf("mark retrying inbox event pending: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO controller_audit (event_key, action, outcome, created_at) VALUES (?, 'approval_fetch', 'retryable_error', ?)",
+		job.Event.Key, now.Format(time.RFC3339Nano),
+	); err != nil {
+		return fmt.Errorf("audit approval fetch retry: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit job retry: %w", err)
 	}
 	return nil
 }
@@ -627,8 +680,8 @@ func (s *Store) GetDecision(ctx context.Context, eventKey string) (Decision, err
 	const query = `
 SELECT event_key, approval_code, instance_code, event_status, authority_status,
        outcome, policy_version, approval_kind, schema_fingerprint, business_code,
-       locale, catalog_sha256, quota_delta, monthly_quota, level_rank,
-       open_id_hash, form_sha256, start_time, reverted, created_at
+		 locale, catalog_sha256, quota_delta, monthly_quota, level_rank, failure_reason,
+		 open_id_hash, form_sha256, start_time, reverted, created_at
 FROM approval_instances WHERE event_key = ?`
 	var decision Decision
 	var createdAt string
@@ -638,6 +691,7 @@ FROM approval_instances WHERE event_key = ?`
 		&decision.PolicyVersion, &decision.ApprovalKind, &decision.SchemaFingerprint,
 		&decision.BusinessCode, &decision.Locale, &decision.CatalogSHA256,
 		&decision.QuotaDelta, &decision.MonthlyQuota, &decision.LevelRank,
+		&decision.FailureReason,
 		&decision.OpenIDHash, &decision.FormSHA256, &decision.StartTime,
 		&decision.Reverted, &createdAt,
 	)

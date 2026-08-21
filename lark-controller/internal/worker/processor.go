@@ -25,15 +25,92 @@ type ApprovalFetcher interface {
 	Fetch(context.Context, string, string) (ApprovalInstance, error)
 }
 
+type ApprovalFetchFailureReason string
+
+const (
+	ApprovalFetchRateLimited     ApprovalFetchFailureReason = "rate_limited"
+	ApprovalFetchServerError     ApprovalFetchFailureReason = "server_error"
+	ApprovalFetchClientError     ApprovalFetchFailureReason = "client_error"
+	ApprovalFetchTimeout         ApprovalFetchFailureReason = "timeout"
+	ApprovalFetchTransportError  ApprovalFetchFailureReason = "transport_error"
+	ApprovalFetchInvalidResponse ApprovalFetchFailureReason = "invalid_response"
+	ApprovalFetchUnclassified    ApprovalFetchFailureReason = "unclassified_error"
+)
+
+type ApprovalFetchError struct {
+	Reason     ApprovalFetchFailureReason
+	Retryable  bool
+	RetryAfter time.Duration
+	StatusCode int
+	LarkCode   int
+}
+
+func (e *ApprovalFetchError) Error() string {
+	return fmt.Sprintf(
+		"Lark approval fetch failed: %s (HTTP %d, code %d)",
+		e.Reason,
+		e.StatusCode,
+		e.LarkCode,
+	)
+}
+
 type ApprovalResolver interface {
 	ResolveApproval(policy.ApprovalRequest) (policy.ApprovalResolution, error)
 }
 
 type ShadowProcessor struct {
-	store    *inbox.Store
-	fetcher  ApprovalFetcher
-	resolver ApprovalResolver
-	locale   string
+	store       *inbox.Store
+	fetcher     ApprovalFetcher
+	resolver    ApprovalResolver
+	locale      string
+	retryPolicy RetryPolicy
+}
+
+type RetryPolicy struct {
+	Schedule       []time.Duration
+	MaxDelay       time.Duration
+	JitterFraction float64
+}
+
+type ProcessorOption func(*ShadowProcessor) error
+
+func WithRetryPolicy(policy RetryPolicy) ProcessorOption {
+	return func(processor *ShadowProcessor) error {
+		if err := validateRetryPolicy(policy); err != nil {
+			return err
+		}
+		policy.Schedule = append([]time.Duration(nil), policy.Schedule...)
+		processor.retryPolicy = policy
+		return nil
+	}
+}
+
+func defaultRetryPolicy() RetryPolicy {
+	return RetryPolicy{
+		Schedule: []time.Duration{
+			5 * time.Second,
+			15 * time.Second,
+			time.Minute,
+			5 * time.Minute,
+			15 * time.Minute,
+			time.Hour,
+		},
+		MaxDelay:       24 * time.Hour,
+		JitterFraction: 0.2,
+	}
+}
+
+func validateRetryPolicy(policy RetryPolicy) error {
+	if len(policy.Schedule) == 0 || policy.MaxDelay <= 0 ||
+		policy.JitterFraction < 0 || policy.JitterFraction > 0.5 {
+		return errors.New("invalid approval fetch retry policy")
+	}
+	for _, delay := range policy.Schedule {
+		if delay <= 0 || delay > policy.MaxDelay {
+			return errors.New("invalid approval fetch retry schedule")
+		}
+	}
+	return nil
 }
 
 func NewShadowProcessor(
@@ -41,11 +118,24 @@ func NewShadowProcessor(
 	fetcher ApprovalFetcher,
 	resolver ApprovalResolver,
 	locale string,
+	options ...ProcessorOption,
 ) (*ShadowProcessor, error) {
 	if store == nil || fetcher == nil || resolver == nil || locale == "" {
 		return nil, errors.New("store, approval fetcher, approval resolver, and locale are required")
 	}
-	return &ShadowProcessor{store: store, fetcher: fetcher, resolver: resolver, locale: locale}, nil
+	processor := &ShadowProcessor{
+		store: store, fetcher: fetcher, resolver: resolver, locale: locale,
+		retryPolicy: defaultRetryPolicy(),
+	}
+	for _, option := range options {
+		if option == nil {
+			return nil, errors.New("processor option is required")
+		}
+		if err := option(processor); err != nil {
+			return nil, err
+		}
+	}
+	return processor, nil
 }
 
 func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
@@ -72,10 +162,36 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 	}
 	instance, err := p.fetcher.Fetch(ctx, job.Event.InstanceCode, p.locale)
 	if err != nil {
-		if retryErr := p.store.Retry(ctx, job, err, 5*time.Second); retryErr != nil {
-			return true, fmt.Errorf("fetch approval instance: %v; schedule retry: %w", err, retryErr)
+		if ctx.Err() != nil {
+			return true, ctx.Err()
 		}
-		return true, fmt.Errorf("fetch approval instance: %w", err)
+		var failure *ApprovalFetchError
+		classified := errors.As(err, &failure) && failure != nil && knownFetchFailure(failure.Reason)
+		if !classified || !failure.Retryable {
+			reason := ApprovalFetchUnclassified
+			if classified {
+				reason = failure.Reason
+			}
+			if completeErr := p.completeFetchDeadLetter(ctx, job, string(reason)); completeErr != nil {
+				return true, completeErr
+			}
+			return true, nil
+		}
+		delay, retry := p.retryDelay(job, failure)
+		if !retry {
+			if completeErr := p.completeFetchDeadLetter(
+				ctx,
+				job,
+				"retry_exhausted_"+string(failure.Reason),
+			); completeErr != nil {
+				return true, completeErr
+			}
+			return true, nil
+		}
+		if retryErr := p.store.Retry(ctx, job, string(failure.Reason), delay); retryErr != nil {
+			return true, fmt.Errorf("schedule approval fetch retry: %w", retryErr)
+		}
+		return true, nil
 	}
 	decision, validationErr := evaluateApprovedEvent(job.Event, instance)
 	if validationErr != nil {
@@ -111,6 +227,54 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 		return true, err
 	}
 	return true, nil
+}
+
+func (p *ShadowProcessor) completeFetchDeadLetter(ctx context.Context, job inbox.Job, reason string) error {
+	return p.store.CompleteDecision(ctx, job, inbox.Decision{
+		EventKey: job.Event.Key, ApprovalCode: job.Event.ApprovalCode,
+		InstanceCode: job.Event.InstanceCode, EventStatus: job.Event.Status,
+		Outcome:       inbox.DecisionOutcomeDeadLetterApprovalFetch,
+		FailureReason: reason,
+	})
+}
+
+func knownFetchFailure(reason ApprovalFetchFailureReason) bool {
+	switch reason {
+	case ApprovalFetchRateLimited,
+		ApprovalFetchServerError,
+		ApprovalFetchClientError,
+		ApprovalFetchTimeout,
+		ApprovalFetchTransportError,
+		ApprovalFetchInvalidResponse:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *ShadowProcessor) retryDelay(job inbox.Job, failure *ApprovalFetchError) (time.Duration, bool) {
+	index := job.Attempts - 1
+	if index < 0 || index >= len(p.retryPolicy.Schedule) {
+		return 0, false
+	}
+	if failure.RetryAfter > 0 {
+		return min(failure.RetryAfter, p.retryPolicy.MaxDelay), true
+	}
+	delay := p.retryPolicy.Schedule[index]
+	if p.retryPolicy.JitterFraction == 0 {
+		return delay, true
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", job.Event.Key, job.Attempts)))
+	unit := float64(uint16(digest[0])<<8|uint16(digest[1])) / 65535
+	factor := 1 - p.retryPolicy.JitterFraction + 2*p.retryPolicy.JitterFraction*unit
+	jittered := float64(delay) * factor
+	if jittered >= float64(p.retryPolicy.MaxDelay) {
+		return p.retryPolicy.MaxDelay, true
+	}
+	if jittered < 1 {
+		return time.Nanosecond, true
+	}
+	return time.Duration(jittered), true
 }
 
 func supportedApprovalInstanceEvent(event inbox.Event) bool {

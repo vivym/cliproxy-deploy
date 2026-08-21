@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,6 +14,7 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/config"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/larkapi"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/observability"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/worker"
@@ -60,6 +60,14 @@ func run() error {
 	if err := store.SyncPolicySnapshot(context.Background(), policyCatalog.Snapshot()); err != nil {
 		return err
 	}
+	operationalHandler, err := observability.NewHandler(
+		loaded.Mode,
+		store,
+		loaded.ReadinessMaxQueueAge,
+	)
+	if err != nil {
+		return err
+	}
 	fetcher, err := larkapi.NewApprovalFetcher(larkapi.Config{
 		AppID: loaded.AppID, AppSecret: loaded.AppSecret,
 	})
@@ -86,10 +94,7 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /integrations/lark/events", eventHandler)
-	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
-		response.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_ = json.NewEncoder(response).Encode(map[string]string{"status": "ok", "mode": loaded.Mode})
-	})
+	operationalHandler.Register(mux)
 	server := newControllerHTTPServer(loaded.ListenAddress, mux)
 	serveResult := make(chan error, 1)
 	go func() {

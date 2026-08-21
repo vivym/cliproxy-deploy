@@ -1294,6 +1294,13 @@ lark_webhook_received_total{event_type}
 lark_webhook_duplicate_total{event_type}
 lark_event_processing_seconds{event_type}
 lark_approval_fetch_total{result}
+lark_controller_inbox_events{state}
+lark_controller_jobs{state}
+lark_controller_dead_letter_total{reason}
+lark_controller_oldest_active_job_age_seconds
+lark_controller_oldest_ready_job_age_seconds
+lark_controller_ready
+lark_policy_validation_failure_total
 entitlement_grant_total{type,status}
 entitlement_grant_retry_total{reason}
 entitlement_dead_letter_total{reason}
@@ -1478,6 +1485,19 @@ New API 检查：
 - 实现 job retry、dead-letter、reversal pending。
 - 实现 New API adapter、metrics、health 和 audit。
 - 实现 Controller 侧每日 inbox/job/approval reconciliation 和 active principal 在职状态核验，权限故障 fail open 并告警。
+
+当前本地实现边界（shadow-only，尚未部署）：v1/v2 webhook 验证与 durable inbox、
+authoritative Approval v4 fetch、versioned policy/manifest 解析、固定 locale 与 exact
+display-text mapping、有限重试/dead-letter/reversal pending、重启恢复、SQLite audit
+snapshot，以及 `/healthz`、`/readyz`、`/metrics` 已实现。Lark OAuth bridge、New API
+adapter、任何 entitlement write、就业状态 reconciliation、Compose 接入和生产验证均未实现。
+
+当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
+和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的
+有限退避；合法 `Retry-After` 优先但上限为 24 小时。第七次失败进入 dead-letter。
+其他 `4xx`、token rejection、invalid response 和 unclassified error fail closed，持久化
+内容只使用固定 reason，不保存 Lark 原始错误文本。readiness 只用已经到期可执行的最老
+job 年龄，未来的 `retry_wait` 不会被误判为卡死。
 
 ### WP4：部署和运维
 

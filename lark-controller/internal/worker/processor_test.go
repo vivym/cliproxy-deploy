@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
@@ -14,6 +15,7 @@ import (
 type approvalFetcher struct {
 	calls    int
 	instance worker.ApprovalInstance
+	failures []error
 }
 
 type approvalResolver struct {
@@ -31,6 +33,9 @@ func (r *approvalResolver) ResolveApproval(request policy.ApprovalRequest) (poli
 
 func (f *approvalFetcher) Fetch(_ context.Context, instanceCode, locale string) (worker.ApprovalInstance, error) {
 	f.calls++
+	if f.calls <= len(f.failures) {
+		return worker.ApprovalInstance{}, f.failures[f.calls-1]
+	}
 	if f.instance.InstanceCode != "" {
 		return f.instance, nil
 	}
@@ -42,6 +47,239 @@ func (f *approvalFetcher) Fetch(_ context.Context, instanceCode, locale string) 
 		StartTime:    "1787270300000",
 		FormJSON:     `[{"custom_id":"wallet_package","value":"Small"}]`,
 	}, nil
+}
+
+func TestShadowProcessorDeadLettersTerminalApprovalFetchFailure(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordApprovedEvent(t, ctx, store, "evt-terminal-fetch")
+
+	fetcher := &approvalFetcher{failures: []error{&worker.ApprovalFetchError{
+		Reason: worker.ApprovalFetchClientError,
+	}}}
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process terminal fetch failure: processed=%t err=%v", processed, err)
+	}
+	decision, err := store.GetDecision(ctx, "lark:v2:evt-terminal-fetch")
+	if err != nil {
+		t.Fatalf("get terminal fetch decision: %v", err)
+	}
+	if decision.Outcome != "dead_letter_approval_fetch_failed" || decision.FailureReason != "client_error" {
+		t.Fatalf("terminal fetch decision = %+v", decision)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || processed {
+		t.Fatalf("terminal fetch job was reclaimed: processed=%t err=%v", processed, err)
+	}
+	if fetcher.calls != 1 {
+		t.Fatalf("fetch calls = %d, want 1", fetcher.calls)
+	}
+}
+
+func TestShadowProcessorNormalizesUnknownFetchFailureReason(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordApprovedEvent(t, ctx, store, "evt-unknown-fetch-reason")
+
+	fetcher := &approvalFetcher{failures: []error{&worker.ApprovalFetchError{
+		Reason: "external_text_must_not_be_persisted", Retryable: true,
+	}}}
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process unknown failure: processed=%t err=%v", processed, err)
+	}
+	decision, err := store.GetDecision(ctx, "lark:v2:evt-unknown-fetch-reason")
+	if err != nil {
+		t.Fatalf("get unknown failure decision: %v", err)
+	}
+	if decision.FailureReason != "unclassified_error" {
+		t.Fatalf("failure reason = %q, want unclassified_error", decision.FailureReason)
+	}
+}
+
+func TestShadowProcessorRetriesTransientFetchFailureOnlyWithinSchedule(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordApprovedEvent(t, ctx, store, "evt-retry-exhausted")
+
+	fetcher := &approvalFetcher{failures: []error{
+		&worker.ApprovalFetchError{Reason: worker.ApprovalFetchRateLimited, Retryable: true},
+		&worker.ApprovalFetchError{Reason: worker.ApprovalFetchRateLimited, Retryable: true},
+	}}
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+		worker.WithRetryPolicy(worker.RetryPolicy{
+			Schedule: []time.Duration{time.Nanosecond}, MaxDelay: time.Hour,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("schedule retry: processed=%t err=%v", processed, err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("exhaust retry: processed=%t err=%v", processed, err)
+	}
+	decision, err := store.GetDecision(ctx, "lark:v2:evt-retry-exhausted")
+	if err != nil {
+		t.Fatalf("get exhausted fetch decision: %v", err)
+	}
+	if decision.Outcome != "dead_letter_approval_fetch_failed" ||
+		decision.FailureReason != "retry_exhausted_rate_limited" {
+		t.Fatalf("exhausted fetch decision = %+v", decision)
+	}
+	if fetcher.calls != 2 {
+		t.Fatalf("fetch calls = %d, want 2", fetcher.calls)
+	}
+}
+
+func TestShadowProcessorRetriesTransientFetchThenSucceeds(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordApprovedEvent(t, ctx, store, "evt-retry-success")
+
+	fetcher := &approvalFetcher{failures: []error{&worker.ApprovalFetchError{
+		Reason: worker.ApprovalFetchServerError, Retryable: true,
+	}}}
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+		worker.WithRetryPolicy(worker.RetryPolicy{
+			Schedule: []time.Duration{time.Nanosecond}, MaxDelay: time.Hour,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+			t.Fatalf("process attempt %d: processed=%t err=%v", attempt+1, processed, err)
+		}
+	}
+	decision, err := store.GetDecision(ctx, "lark:v2:evt-retry-success")
+	if err != nil {
+		t.Fatalf("get successful retry decision: %v", err)
+	}
+	if decision.Outcome != inbox.DecisionOutcomeShadowAuthorityVerified || decision.FailureReason != "" {
+		t.Fatalf("successful retry decision = %+v", decision)
+	}
+	if fetcher.calls != 2 {
+		t.Fatalf("fetch calls = %d, want 2", fetcher.calls)
+	}
+}
+
+func TestShadowProcessorHonorsRetryAfterBeforeReclaimingJob(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordApprovedEvent(t, ctx, store, "evt-retry-after")
+
+	fetcher := &approvalFetcher{failures: []error{&worker.ApprovalFetchError{
+		Reason: worker.ApprovalFetchRateLimited, Retryable: true, RetryAfter: time.Hour,
+	}}}
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+		worker.WithRetryPolicy(worker.RetryPolicy{
+			Schedule: []time.Duration{time.Nanosecond}, MaxDelay: 2 * time.Hour,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("schedule retry-after: processed=%t err=%v", processed, err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || processed {
+		t.Fatalf("retry-after job reclaimed early: processed=%t err=%v", processed, err)
+	}
+	if fetcher.calls != 1 {
+		t.Fatalf("fetch calls = %d, want 1", fetcher.calls)
+	}
+}
+
+func TestShadowProcessorClampsJitterBeforeDurationOverflow(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordApprovedEvent(t, ctx, store, "evt-jitter-overflow")
+
+	fetcher := &approvalFetcher{failures: []error{&worker.ApprovalFetchError{
+		Reason: worker.ApprovalFetchServerError, Retryable: true,
+	}}}
+	const maxDuration = time.Duration(1<<63 - 1)
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+		worker.WithRetryPolicy(worker.RetryPolicy{
+			Schedule: []time.Duration{maxDuration}, MaxDelay: maxDuration, JitterFraction: 0.5,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("schedule clamped jitter retry: processed=%t err=%v", processed, err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || processed {
+		t.Fatalf("overflowed retry became immediately ready: processed=%t err=%v", processed, err)
+	}
+}
+
+func TestShadowProcessorClampsJitterToPositiveDuration(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordApprovedEvent(t, ctx, store, "evt-jitter-underflow")
+
+	fetcher := &approvalFetcher{failures: []error{&worker.ApprovalFetchError{
+		Reason: worker.ApprovalFetchServerError, Retryable: true,
+	}}}
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+		worker.WithRetryPolicy(worker.RetryPolicy{
+			Schedule: []time.Duration{time.Nanosecond}, MaxDelay: time.Hour, JitterFraction: 0.5,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("schedule positive jitter retry: processed=%t err=%v", processed, err)
+	}
 }
 
 func TestShadowProcessorFailsClosedAcrossEventStatusMatrix(t *testing.T) {
@@ -313,5 +551,18 @@ func verifiedWalletResolution() policy.ApprovalResolution {
 		BusinessCode: "topup_5", QuotaDelta: 2500000,
 		SchemaFingerprint: walletFingerprintForWorkerTest,
 		CatalogSHA256:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+}
+
+func recordApprovedEvent(t *testing.T, ctx context.Context, store *inbox.Store, eventID string) {
+	t.Helper()
+	_, err := store.Record(ctx, inbox.Event{
+		Key: "lark:v2:" + eventID, SchemaVersion: "2.0", EventID: eventID,
+		EventType: "approval.instance.status_changed_v4", AppID: "cli_test", TenantKey: "tenant-test",
+		ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-" + eventID, Status: "APPROVED",
+		PayloadJSON: `{"status":"APPROVED"}`,
+	})
+	if err != nil {
+		t.Fatalf("record approved event: %v", err)
 	}
 }

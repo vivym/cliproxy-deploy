@@ -20,6 +20,7 @@ type Config struct {
 	PolicyBundleDirectory string
 	ApprovalBindingsFile  string
 	WorkerPoll            time.Duration
+	ReadinessMaxQueueAge  time.Duration
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -40,6 +41,7 @@ func Load(getenv func(string) string) (Config, error) {
 		PolicyBundleDirectory: getenv("LARK_POLICY_BUNDLE_DIR"),
 		ApprovalBindingsFile:  getenv("LARK_APPROVAL_BINDINGS_FILE"),
 		WorkerPoll:            time.Second,
+		ReadinessMaxQueueAge:  15 * time.Minute,
 	}
 	if loaded.Mode == "" {
 		loaded.Mode = "shadow"
@@ -55,6 +57,13 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if loaded.Locale != "zh-CN" {
 		return Config{}, errors.New("LARK_APPROVAL_LOCALE must be zh-CN for the initial policy")
+	}
+	if raw := getenv("LARK_READINESS_MAX_QUEUE_AGE"); raw != "" {
+		threshold, err := time.ParseDuration(raw)
+		if err != nil || threshold <= 0 {
+			return Config{}, errors.New("LARK_READINESS_MAX_QUEUE_AGE must be a positive duration")
+		}
+		loaded.ReadinessMaxQueueAge = threshold
 	}
 	required := map[string]string{
 		"LARK_CONTROLLER_DB_PATH":     loaded.DatabasePath,
