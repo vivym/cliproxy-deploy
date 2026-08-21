@@ -147,7 +147,7 @@ func TestTerminalEntitlementGrantJobDoesNotBlockKeyRetirement(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			externalID := recordHeldGrantJob(t, ctx, store, "evt-retire-grant-key-"+string(terminalStatus))
-			if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+			if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 1 {
 				t.Fatalf("release held grant: released=%d err=%v", released, err)
 			}
 			job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
@@ -227,14 +227,9 @@ func TestOpenMigratesLegacyEntitlementGrantJobSchema(t *testing.T) {
 		_ = store.Close()
 		t.Fatalf("unexpected migrated grant job: %+v", job)
 	}
-	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 0 {
 		_ = store.Close()
-		t.Fatalf("release migrated grant job: released=%d err=%v", released, err)
-	}
-	claimed, found, err := store.ClaimNextEntitlementGrantJob(ctx)
-	if err != nil || !found || claimed.ActivatedAt.IsZero() {
-		_ = store.Close()
-		t.Fatalf("claim migrated grant job: found=%t job=%+v err=%v", found, claimed, err)
+		t.Fatalf("orphaned migrated grant job release: released=%d err=%v", released, err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close migrated store: %v", err)
@@ -334,11 +329,11 @@ func TestHeldGrantJobsRequireExplicitReleaseBeforeClaim(t *testing.T) {
 	if _, found, err := store.ClaimNextEntitlementGrantJob(ctx); err != nil || found {
 		t.Fatalf("claim held job: found=%t err=%v", found, err)
 	}
-	released, err := store.ReleaseHeldEntitlementGrantJobs(ctx)
+	released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1")
 	if err != nil || released != 1 {
 		t.Fatalf("release held jobs: released=%d err=%v", released, err)
 	}
-	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 0 {
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 0 {
 		t.Fatalf("repeat release: released=%d err=%v", released, err)
 	}
 	job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
@@ -362,7 +357,7 @@ func TestOpenRecoversProcessingEntitlementGrantJob(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	externalID := recordHeldGrantJob(t, ctx, store, "evt-recover-grant")
-	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 1 {
 		t.Fatalf("release held job: released=%d err=%v", released, err)
 	}
 	first, found, err := store.ClaimNextEntitlementGrantJob(ctx)
@@ -399,7 +394,7 @@ func TestCompleteEntitlementGrantJobPersistsSanitizedReceipt(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	externalID := recordHeldGrantJob(t, ctx, store, "evt-complete-grant")
-	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 1 {
 		t.Fatalf("release held job: released=%d err=%v", released, err)
 	}
 	job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
@@ -445,7 +440,7 @@ func TestRetryEntitlementGrantJobWaitsUntilEligible(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	externalID := recordHeldGrantJob(t, ctx, store, "evt-retry-grant")
-	if _, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil {
+	if _, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil {
 		t.Fatalf("release held job: %v", err)
 	}
 	job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
@@ -494,7 +489,7 @@ func TestDeadLetterEntitlementGrantJobStoresOnlyKnownReason(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	externalID := recordHeldGrantJob(t, ctx, store, "evt-dead-grant")
-	if _, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil {
+	if _, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil {
 		t.Fatalf("release held job: %v", err)
 	}
 	job, found, err := store.ClaimNextEntitlementGrantJob(ctx)

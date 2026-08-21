@@ -84,6 +84,14 @@ func TestLoadDirectoryResolvesWalletApprovalByExactDisplayText(t *testing.T) {
 	if catalog.ActivePolicyVersion() != "employee-v1" {
 		t.Fatalf("active policy = %q, want employee-v1", catalog.ActivePolicyVersion())
 	}
+	base, err := catalog.ResolveBaseSubscription()
+	if err != nil {
+		t.Fatalf("resolve base subscription: %v", err)
+	}
+	if base.PolicyVersion != "employee-v1" || base.LevelCode != "basic" ||
+		base.LevelRank != 10 || base.MonthlyQuota != 5_000_000 || len(base.CatalogSHA256) != 64 {
+		t.Fatalf("unexpected base subscription: %+v", base)
+	}
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
 	if err != nil {
 		t.Fatalf("open policy snapshot store: %v", err)
@@ -386,6 +394,70 @@ func TestLoadDirectoryRejectsDuplicateJSONKeys(t *testing.T) {
 	if _, err := policy.LoadDirectory(policyDirectory, bindingsPath); err == nil ||
 		!strings.Contains(err.Error(), "duplicate JSON object key") {
 		t.Fatalf("duplicate manifest key error = %v, want duplicate-key rejection", err)
+	}
+}
+
+func TestResolveBaseSubscriptionRejectsActivePolicyWithoutBasicLevel(t *testing.T) {
+	policyDirectory := t.TempDir()
+	writeFile(t, filepath.Join(policyDirectory, "employee-v1.policy.json"), `{
+  "format_version": 1,
+  "policy_version": "employee-v1",
+  "state": "active",
+  "levels": [
+    {"level_code": "plus", "rank": 20, "monthly_quota": 12500000},
+    {"level_code": "pro", "rank": 30, "monthly_quota": 25000000}
+  ],
+  "wallet_packages": [
+    {"package_code": "topup_5", "quota_delta": 2500000},
+    {"package_code": "topup_10", "quota_delta": 5000000}
+  ]
+}`)
+	bindingsPath := filepath.Join(t.TempDir(), "approval-bindings.json")
+	writeFile(t, bindingsPath, `{
+  "format_version": 1,
+  "bindings": [{
+    "approval_code": "approval-wallet-v1",
+    "locale": "zh-CN",
+    "policy_version": "employee-v1",
+    "approval_kind": "wallet_topup",
+    "schema_fingerprint": "`+walletManifestFingerprint+`",
+    "manifest": {
+      "approval_kind": "wallet_topup",
+      "locale": "zh-CN",
+      "fields": [
+        {"custom_id": "request_reason", "type": "textarea", "required": true, "options": []},
+        {"custom_id": "wallet_package", "type": "radioV2", "required": true, "options": [
+          {"display_text": "Small", "code": "topup_5"},
+          {"display_text": "Large", "code": "topup_10"}
+        ]}
+      ]
+    }
+  }, {
+    "approval_code": "approval-level-v1",
+    "locale": "zh-CN",
+    "policy_version": "employee-v1",
+    "approval_kind": "subscription_level",
+    "schema_fingerprint": "`+levelManifestFingerprint+`",
+    "manifest": {
+      "approval_kind": "subscription_level",
+      "locale": "zh-CN",
+      "fields": [
+        {"custom_id": "request_reason", "type": "textarea", "required": true, "options": []},
+        {"custom_id": "target_level", "type": "radioV2", "required": true, "options": [
+          {"display_text": "Plus", "code": "plus"},
+          {"display_text": "Pro", "code": "pro"}
+        ]}
+      ]
+    }
+  }]
+}`)
+
+	catalog, err := policy.LoadDirectory(policyDirectory, bindingsPath)
+	if err != nil {
+		t.Fatalf("load catalog without basic level: %v", err)
+	}
+	if _, err := catalog.ResolveBaseSubscription(); err == nil || !strings.Contains(err.Error(), "basic") {
+		t.Fatalf("resolve base subscription error = %v, want missing basic rejection", err)
 	}
 }
 

@@ -4,11 +4,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/digest"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 )
 
@@ -74,11 +74,21 @@ FROM policy_versions`)
 		return fmt.Errorf("iterate policy snapshots: %w", err)
 	}
 	newPolicyVersions := make(map[string]struct{})
+	activePolicyVersion := ""
+	for version, incoming := range policies {
+		if incoming.State == policy.PolicyStateActive {
+			activePolicyVersion = version
+			break
+		}
+	}
+	if err := validateActiveBaseGrantPolicy(ctx, tx, activePolicyVersion); err != nil {
+		return err
+	}
 	for version, incoming := range policies {
 		storedState, exists := existingPolicies[version]
 		if incoming.State == policy.PolicyStateRetired &&
 			(!exists || storedState != policy.PolicyStateRetired) {
-			if err := ensureNoUnfinishedPolicyApprovals(ctx, tx, version, bindings); err != nil {
+			if err := ensureNoUnfinishedPolicyJobs(ctx, tx, version, bindings); err != nil {
 				return err
 			}
 		}
@@ -188,7 +198,7 @@ INSERT INTO approval_policy_bindings (
 	return nil
 }
 
-func ensureNoUnfinishedPolicyApprovals(
+func ensureNoUnfinishedPolicyJobs(
 	ctx context.Context,
 	tx *sql.Tx,
 	policyVersion string,
@@ -219,6 +229,44 @@ SELECT EXISTS (
 			return fmt.Errorf("policy %q has unfinished approval jobs", policyVersion)
 		}
 	}
+	var unfinishedBaseGrant int
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM entitlement_grant_jobs grant_job
+    JOIN base_subscription_grants base_grant ON base_grant.external_id = grant_job.external_id
+    WHERE base_grant.policy_version = ? AND grant_job.status IN (?, ?, ?, ?)
+)`,
+		policyVersion,
+		EntitlementGrantJobStatusHeldShadow,
+		EntitlementGrantJobStatusPending,
+		EntitlementGrantJobStatusProcessing,
+		EntitlementGrantJobStatusRetryWait,
+	).Scan(&unfinishedBaseGrant); err != nil {
+		return fmt.Errorf("check unfinished base grants for policy %q: %w", policyVersion, err)
+	}
+	if unfinishedBaseGrant != 0 {
+		return fmt.Errorf("policy %q has unfinished base subscription grant jobs", policyVersion)
+	}
+	var unfinishedApprovalGrant int
+	if err := tx.QueryRowContext(ctx, `
+SELECT EXISTS (
+    SELECT 1
+    FROM entitlement_grant_jobs grant_job
+    JOIN entitlement_command_shadows command ON command.external_id = grant_job.external_id
+    WHERE command.policy_version = ? AND grant_job.status IN (?, ?, ?, ?)
+)`,
+		policyVersion,
+		EntitlementGrantJobStatusHeldShadow,
+		EntitlementGrantJobStatusPending,
+		EntitlementGrantJobStatusProcessing,
+		EntitlementGrantJobStatusRetryWait,
+	).Scan(&unfinishedApprovalGrant); err != nil {
+		return fmt.Errorf("check unfinished entitlement grants for policy %q: %w", policyVersion, err)
+	}
+	if unfinishedApprovalGrant != 0 {
+		return fmt.Errorf("policy %q has unfinished approval entitlement grant jobs", policyVersion)
+	}
 	return nil
 }
 
@@ -233,8 +281,8 @@ func validatePolicySnapshot(snapshot policy.Snapshot, loadedAt time.Time) (
 	policies := make(map[string]policy.PolicySnapshot, len(snapshot.Policies))
 	activePolicies := 0
 	for _, item := range snapshot.Policies {
-		if item.PolicyVersion == "" || !validSHA256(item.CatalogSHA256) ||
-			!validSHA256(item.SourceSHA256) || item.CatalogJSON == "" {
+		if item.PolicyVersion == "" || !digest.IsCanonicalSHA256(item.CatalogSHA256) ||
+			!digest.IsCanonicalSHA256(item.SourceSHA256) || item.CatalogJSON == "" {
 			return nil, nil, errors.New("policy snapshot contains an incomplete policy")
 		}
 		if item.CatalogSHA256 != sha256String(item.CatalogJSON) {
@@ -272,7 +320,7 @@ func validatePolicySnapshot(snapshot policy.Snapshot, loadedAt time.Time) (
 		if item.ApprovalCode == "" || item.Locale == "" || !exists ||
 			(item.ApprovalKind != policy.ApprovalKindWalletTopUp &&
 				item.ApprovalKind != policy.ApprovalKindSubscriptionLevel) ||
-			!validSHA256(item.DefinitionManifestSHA256) ||
+			!digest.IsCanonicalSHA256(item.DefinitionManifestSHA256) ||
 			item.DefinitionManifestJSON == "" ||
 			item.SchemaFingerprint != "sha256:"+item.DefinitionManifestSHA256 {
 			return nil, nil, errors.New("policy snapshot contains an incomplete approval binding")
@@ -319,14 +367,6 @@ func policyStateTransitionAllowed(from, to policy.PolicyState) bool {
 
 func approvalBindingSnapshotKey(binding policy.ApprovalBindingSnapshot) string {
 	return binding.ApprovalCode + "\x00" + binding.SchemaFingerprint + "\x00" + binding.Locale
-}
-
-func validSHA256(value string) bool {
-	if len(value) != sha256.Size*2 {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-	return err == nil
 }
 
 func sha256String(value string) string {

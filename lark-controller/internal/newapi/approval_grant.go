@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strconv"
 	"time"
+
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/digest"
 )
 
 type ApprovalGrantInput struct {
@@ -25,6 +27,14 @@ type ApprovalGrantInput struct {
 	CatalogSHA256         string
 }
 
+type BaseSubscriptionGrantInput struct {
+	Subject       string
+	PolicyVersion string
+	LevelCode     string
+	MonthlyQuota  int64
+	CatalogSHA256 string
+}
+
 type ShadowReceipt struct {
 	ExternalID    string
 	RequestSHA256 string
@@ -35,6 +45,37 @@ type ShadowReceipt struct {
 	BusinessCode  string
 	QuotaDelta    int64
 	MonthlyQuota  int64
+}
+
+func PlanBaseSubscriptionGrant(input BaseSubscriptionGrantInput) (
+	EntitlementGrantRequest,
+	ShadowReceipt,
+	error,
+) {
+	if input.Subject == "" || input.PolicyVersion == "" || input.LevelCode != "basic" ||
+		input.MonthlyQuota <= 0 || !digest.IsCanonicalSHA256(input.CatalogSHA256) {
+		return EntitlementGrantRequest{}, ShadowReceipt{}, errors.New("invalid base subscription grant input")
+	}
+	request := EntitlementGrantRequest{
+		ExternalID:    "lark:base:" + input.Subject + ":" + input.PolicyVersion,
+		Source:        "base_login",
+		PolicyVersion: input.PolicyVersion,
+		Identity:      Identity{ProviderSlug: "lark", Subject: input.Subject},
+		Grant: Grant{
+			Type: "subscription_level", LevelCode: input.LevelCode, MinimumRankOnly: true,
+		},
+	}
+	_, requestSHA256, err := canonicalizeGrantRequest(request)
+	if err != nil {
+		return EntitlementGrantRequest{}, ShadowReceipt{}, err
+	}
+	receipt := ShadowReceipt{
+		ExternalID: request.ExternalID, RequestSHA256: requestSHA256,
+		SubjectSHA256: sha256Hex([]byte(input.Subject)), PolicyVersion: input.PolicyVersion,
+		CatalogSHA256: input.CatalogSHA256, GrantType: request.Grant.Type,
+		BusinessCode: input.LevelCode, MonthlyQuota: input.MonthlyQuota,
+	}
+	return request, receipt, nil
 }
 
 func PlanApprovalGrant(input ApprovalGrantInput) (EntitlementGrantRequest, ShadowReceipt, error) {

@@ -1,6 +1,7 @@
 package oauthbridge_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/larkapi"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthbridge"
 )
 
@@ -23,6 +25,65 @@ const (
 	testControllerCallback = "https://ai.x2r.store/integrations/lark/oauth/callback"
 	testNewAPICallback     = "https://ai.x2r.store/oauth/lark"
 )
+
+var testBaseSubscriptionConfig = oauthbridge.BaseSubscriptionConfig{
+	PolicyVersion: "employee-v1", LevelCode: "basic", MonthlyQuota: 5_000_000,
+	CatalogSHA256: strings.Repeat("a", 64),
+}
+
+func TestNewHandlerRejectsInvalidBaseSubscriptionConfiguration(t *testing.T) {
+	tests := []struct {
+		name          string
+		mutate        func(*oauthbridge.Config)
+		missingSealer bool
+	}{
+		{name: "missing base configuration", mutate: func(config *oauthbridge.Config) {
+			config.BaseSubscription = oauthbridge.BaseSubscriptionConfig{}
+		}},
+		{name: "missing policy version", mutate: func(config *oauthbridge.Config) {
+			config.BaseSubscription.PolicyVersion = ""
+		}},
+		{name: "non-basic level", mutate: func(config *oauthbridge.Config) {
+			config.BaseSubscription.LevelCode = "pro"
+		}},
+		{name: "zero monthly quota", mutate: func(config *oauthbridge.Config) {
+			config.BaseSubscription.MonthlyQuota = 0
+		}},
+		{name: "short catalog hash", mutate: func(config *oauthbridge.Config) {
+			config.BaseSubscription.CatalogSHA256 = "abc"
+		}},
+		{name: "non-hex catalog hash", mutate: func(config *oauthbridge.Config) {
+			config.BaseSubscription.CatalogSHA256 = strings.Repeat("z", 64)
+		}},
+		{name: "uppercase catalog hash", mutate: func(config *oauthbridge.Config) {
+			config.BaseSubscription.CatalogSHA256 = strings.Repeat("A", 64)
+		}},
+		{name: "missing grant sealer", missingSealer: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := oauthbridge.Config{
+				BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
+				NewAPIRedirectURI: testNewAPICallback, BaseSubscription: testBaseSubscriptionConfig,
+			}
+			if test.mutate != nil {
+				test.mutate(&config)
+			}
+			var sealer oauthbridge.GrantRequestSealer = newBridgeTestGrantSealer(t)
+			if test.missingSealer {
+				sealer = nil
+			}
+			if _, err := oauthbridge.NewHandler(
+				config,
+				&bridgeTestStore{},
+				&bridgeTestProvider{},
+				sealer,
+			); err == nil {
+				t.Fatal("invalid OAuth bridge startup configuration was accepted")
+			}
+		})
+	}
+}
 
 func TestBrowserCanCompleteLarkAuthorizationAndReceiveOpaqueLoginCode(t *testing.T) {
 	var tokenRequests int
@@ -62,8 +123,8 @@ func TestBrowserCanCompleteLarkAuthorizationAndReceiveOpaqueLoginCode(t *testing
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
 		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
-		NewAPIRedirectURI: testNewAPICallback,
-	}, store, exchanger)
+		NewAPIRedirectURI: testNewAPICallback, BaseSubscription: testBaseSubscriptionConfig,
+	}, store, exchanger, newBridgeTestGrantSealer(t))
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
 	}
@@ -146,8 +207,8 @@ func TestAuthorizeFailsClosedOnInvalidBridgeRequest(t *testing.T) {
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
 		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
-		NewAPIRedirectURI: testNewAPICallback,
-	}, store, exchanger)
+		NewAPIRedirectURI: testNewAPICallback, BaseSubscription: testBaseSubscriptionConfig,
+	}, store, exchanger, newBridgeTestGrantSealer(t))
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
 	}
@@ -218,8 +279,8 @@ func TestCallbackConsumesStateAndRedactsLarkAuthorizationDenial(t *testing.T) {
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
 		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
-		NewAPIRedirectURI: testNewAPICallback,
-	}, store, exchanger)
+		NewAPIRedirectURI: testNewAPICallback, BaseSubscription: testBaseSubscriptionConfig,
+	}, store, exchanger, newBridgeTestGrantSealer(t))
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
 	}
@@ -369,8 +430,8 @@ func TestCallbackDistinguishesUnavailableStateStoreFromInvalidState(t *testing.T
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
 		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
-		NewAPIRedirectURI: testNewAPICallback,
-	}, store, exchanger)
+		NewAPIRedirectURI: testNewAPICallback, BaseSubscription: testBaseSubscriptionConfig,
+	}, store, exchanger, newBridgeTestGrantSealer(t))
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
 	}
@@ -442,8 +503,8 @@ func TestCallbackRejectsAmbiguousOrOversizedCodeBeforeLarkExchange(t *testing.T)
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
 		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
-		NewAPIRedirectURI: testNewAPICallback,
-	}, store, exchanger)
+		NewAPIRedirectURI: testNewAPICallback, BaseSubscription: testBaseSubscriptionConfig,
+	}, store, exchanger, newBridgeTestGrantSealer(t))
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
 	}
@@ -524,8 +585,8 @@ func TestCallbackMapsLarkUpstreamFailureToRedactedRetryableError(t *testing.T) {
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
 		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
-		NewAPIRedirectURI: testNewAPICallback,
-	}, store, exchanger)
+		NewAPIRedirectURI: testNewAPICallback, BaseSubscription: testBaseSubscriptionConfig,
+	}, store, exchanger, newBridgeTestGrantSealer(t))
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
 	}
@@ -939,10 +1000,14 @@ func (s *bridgeTestStore) ExchangeOAuthLoginCode(context.Context, string) (strin
 	return "opaque-access-handle", nil
 }
 
-func (s *bridgeTestStore) ConsumeOAuthAccessHandle(
-	context.Context,
-	string,
+func (s *bridgeTestStore) ConsumeOAuthAccessHandleAndStoreBaseGrant(
+	_ context.Context,
+	_ string,
+	plan func(inbox.OAuthIdentity) (inbox.BaseSubscriptionGrantDraft, error),
 ) (inbox.OAuthIdentity, error) {
+	if _, err := plan(s.identity); err != nil {
+		return inbox.OAuthIdentity{}, err
+	}
 	return s.identity, nil
 }
 
@@ -983,15 +1048,43 @@ func newBridgeTestHandler(
 	store oauthbridge.Store,
 	provider oauthbridge.OAuthProvider,
 ) http.Handler {
+	return newBridgeTestHandlerWithGrantSealer(
+		t,
+		config,
+		store,
+		provider,
+		newBridgeTestGrantSealer(t),
+	)
+}
+
+func newBridgeTestHandlerWithGrantSealer(
+	t *testing.T,
+	config oauthbridge.Config,
+	store oauthbridge.Store,
+	provider oauthbridge.OAuthProvider,
+	grantSealer oauthbridge.GrantRequestSealer,
+) http.Handler {
 	t.Helper()
 	if config.BridgeClientSecret == "" {
 		config.BridgeClientSecret = testBridgeClientSecret
 	}
-	handler, err := oauthbridge.NewHandler(config, store, provider)
+	if config.BaseSubscription.PolicyVersion == "" {
+		config.BaseSubscription = testBaseSubscriptionConfig
+	}
+	handler, err := oauthbridge.NewHandler(config, store, provider, grantSealer)
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
 	}
 	mux := http.NewServeMux()
 	handler.Register(mux)
 	return mux
+}
+
+func newBridgeTestGrantSealer(t *testing.T) *newapi.GrantSealer {
+	t.Helper()
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new OAuth bridge grant sealer: %v", err)
+	}
+	return sealer
 }

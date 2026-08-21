@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 )
 
 const (
@@ -85,7 +86,11 @@ func (h *Handler) userInfo(response http.ResponseWriter, request *http.Request) 
 		writeOAuthBearerError(response)
 		return
 	}
-	identity, err := h.store.ConsumeOAuthAccessHandle(request.Context(), accessHandle)
+	identity, err := h.store.ConsumeOAuthAccessHandleAndStoreBaseGrant(
+		request.Context(),
+		accessHandle,
+		h.planBaseSubscriptionGrant,
+	)
 	if err != nil {
 		if errors.Is(err, inbox.ErrOAuthCredentialInvalid) {
 			writeOAuthBearerError(response)
@@ -101,6 +106,35 @@ func (h *Handler) userInfo(response http.ResponseWriter, request *http.Request) 
 		Username string `json:"username"`
 		Name     string `json:"name"`
 	}{Subject: identity.Subject, Username: identity.Username, Name: identity.Name})
+}
+
+func (h *Handler) planBaseSubscriptionGrant(
+	identity inbox.OAuthIdentity,
+) (inbox.BaseSubscriptionGrantDraft, error) {
+	base := h.config.BaseSubscription
+	request, receipt, err := newapi.PlanBaseSubscriptionGrant(newapi.BaseSubscriptionGrantInput{
+		Subject: identity.Subject, PolicyVersion: base.PolicyVersion,
+		LevelCode: base.LevelCode, MonthlyQuota: base.MonthlyQuota,
+		CatalogSHA256: base.CatalogSHA256,
+	})
+	if err != nil {
+		return inbox.BaseSubscriptionGrantDraft{}, err
+	}
+	sealed, err := h.grantSealer.Seal(request)
+	if err != nil {
+		return inbox.BaseSubscriptionGrantDraft{}, err
+	}
+	return inbox.BaseSubscriptionGrantDraft{
+		ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
+		SubjectSHA256: receipt.SubjectSHA256, PolicyVersion: receipt.PolicyVersion,
+		CatalogSHA256: receipt.CatalogSHA256, LevelCode: receipt.BusinessCode,
+		MonthlyQuota: receipt.MonthlyQuota,
+		GrantJob: inbox.EntitlementGrantJobDraft{
+			ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
+			SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,
+			Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+		},
+	}, nil
 }
 
 func validTokenFormShape(values url.Values) bool {

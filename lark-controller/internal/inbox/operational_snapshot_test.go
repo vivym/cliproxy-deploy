@@ -1,6 +1,7 @@
 package inbox_test
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 )
 
 func TestOperationalSnapshotReportsDurableInboxJobAndFailureState(t *testing.T) {
@@ -159,6 +161,102 @@ func TestOperationalSnapshotReportsNewAPIGrantShadows(t *testing.T) {
 	}
 }
 
+func TestOperationalSnapshotIncludesBaseSubscriptionGrantAudit(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	identity, err := inbox.NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new OAuth identity: %v", err)
+	}
+	loginCode, err := store.CreateOAuthLoginCode(ctx, identity)
+	if err != nil {
+		t.Fatalf("create login code: %v", err)
+	}
+	accessHandle, err := store.ExchangeOAuthLoginCode(ctx, loginCode)
+	if err != nil {
+		t.Fatalf("exchange login code: %v", err)
+	}
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant sealer: %v", err)
+	}
+	_, err = store.ConsumeOAuthAccessHandleAndStoreBaseGrant(
+		ctx,
+		accessHandle,
+		func(got inbox.OAuthIdentity) (inbox.BaseSubscriptionGrantDraft, error) {
+			request, receipt, planErr := newapi.PlanBaseSubscriptionGrant(newapi.BaseSubscriptionGrantInput{
+				Subject: got.Subject, PolicyVersion: "employee-v1", LevelCode: "basic",
+				MonthlyQuota: 5_000_000, CatalogSHA256: strings.Repeat("a", 64),
+			})
+			if planErr != nil {
+				return inbox.BaseSubscriptionGrantDraft{}, planErr
+			}
+			sealed, sealErr := sealer.Seal(request)
+			if sealErr != nil {
+				return inbox.BaseSubscriptionGrantDraft{}, sealErr
+			}
+			return inbox.BaseSubscriptionGrantDraft{
+				ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
+				SubjectSHA256: receipt.SubjectSHA256, PolicyVersion: receipt.PolicyVersion,
+				CatalogSHA256: receipt.CatalogSHA256, LevelCode: receipt.BusinessCode,
+				MonthlyQuota: receipt.MonthlyQuota,
+				GrantJob: inbox.EntitlementGrantJobDraft{
+					ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
+					SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,
+					Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+				},
+			}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("store base subscription grant: %v", err)
+	}
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 1 {
+		t.Fatalf("release base subscription grant: released=%d err=%v", released, err)
+	}
+	job, found, err := store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("claim base subscription grant: found=%t err=%v", found, err)
+	}
+	if err := store.RetryEntitlementGrantJob(
+		ctx,
+		job,
+		inbox.EntitlementGrantFailureTemporarilyUnavailable,
+		time.Nanosecond,
+	); err != nil {
+		t.Fatalf("retry base subscription grant: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+	job, found, err = store.ClaimNextEntitlementGrantJob(ctx)
+	if err != nil || !found {
+		t.Fatalf("reclaim base subscription grant: found=%t err=%v", found, err)
+	}
+	if err := store.DeadLetterEntitlementGrantJob(
+		ctx,
+		job,
+		inbox.EntitlementGrantFailureInvalidResponse,
+	); err != nil {
+		t.Fatalf("dead-letter base subscription grant: %v", err)
+	}
+	snapshot, err := store.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("read operational snapshot: %v", err)
+	}
+	if snapshot.NewAPIGrants[inbox.EntitlementCommandOutcomeShadowPlanned] != 1 {
+		t.Fatalf("base subscription grant metrics = %+v, want one shadow_planned", snapshot.NewAPIGrants)
+	}
+	if snapshot.EntitlementGrantRetries[string(inbox.EntitlementGrantFailureTemporarilyUnavailable)] != 1 {
+		t.Fatalf("base subscription retry metrics = %+v, want temporarily_unavailable", snapshot.EntitlementGrantRetries)
+	}
+	if snapshot.EntitlementGrantDeadLetters[string(inbox.EntitlementGrantFailureInvalidResponse)] != 1 {
+		t.Fatalf("base subscription dead-letter metrics = %+v, want invalid_response", snapshot.EntitlementGrantDeadLetters)
+	}
+}
+
 func TestOperationalSnapshotStartsReleasedGrantAgeAtActivation(t *testing.T) {
 	ctx := context.Background()
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
@@ -168,7 +266,7 @@ func TestOperationalSnapshotStartsReleasedGrantAgeAtActivation(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	recordHeldGrantJob(t, ctx, store, "evt-released-age")
 	time.Sleep(300 * time.Millisecond)
-	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 1 {
 		t.Fatalf("release held grant: released=%d err=%v", released, err)
 	}
 

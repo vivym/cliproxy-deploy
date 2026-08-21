@@ -125,6 +125,14 @@ type ApprovalResolution struct {
 	CatalogSHA256     string
 }
 
+type BaseSubscriptionResolution struct {
+	PolicyVersion string
+	LevelCode     string
+	LevelRank     int
+	MonthlyQuota  int64
+	CatalogSHA256 string
+}
+
 type Snapshot struct {
 	Policies []PolicySnapshot
 	Bindings []ApprovalBindingSnapshot
@@ -461,6 +469,29 @@ func (c *Catalog) ActivePolicyVersion() string {
 		}
 	}
 	return ""
+}
+
+func (c *Catalog) ResolveBaseSubscription() (BaseSubscriptionResolution, error) {
+	if c == nil {
+		return BaseSubscriptionResolution{}, errors.New("policy catalog is required")
+	}
+	policyVersion := c.ActivePolicyVersion()
+	loaded, exists := c.policies[policyVersion]
+	if !exists {
+		return BaseSubscriptionResolution{}, errors.New("active policy is required")
+	}
+	level, exists := loaded.levels["basic"]
+	if !exists {
+		return BaseSubscriptionResolution{}, fmt.Errorf(
+			"active policy %q does not define the basic subscription level",
+			policyVersion,
+		)
+	}
+	return BaseSubscriptionResolution{
+		PolicyVersion: policyVersion, LevelCode: level.LevelCode,
+		LevelRank: level.Rank, MonthlyQuota: level.MonthlyQuota,
+		CatalogSHA256: loaded.catalogSHA256,
+	}, nil
 }
 
 func canonicalManifest(manifest DefinitionManifest) ([]byte, error) {

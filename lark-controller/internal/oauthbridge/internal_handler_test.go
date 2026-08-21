@@ -1,8 +1,10 @@
 package oauthbridge_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthbridge"
 )
 
@@ -237,6 +240,14 @@ func TestInternalUserInfoConsumesBearerHandleAndReturnsMinimalIdentity(t *testin
 		payload["username"] != fixture.identity.Username || payload["name"] != fixture.identity.Name {
 		t.Fatalf("userinfo response=%#v, want minimal normalized identity", payload)
 	}
+	baseExternalID := "lark:base:" + fixture.identity.Subject + ":employee-v1"
+	baseJob, err := fixture.store.GetEntitlementGrantJob(context.Background(), baseExternalID)
+	if err != nil {
+		t.Fatalf("get userinfo base subscription job: %v", err)
+	}
+	if baseJob.Status != inbox.EntitlementGrantJobStatusHeldShadow || baseJob.Attempts != 0 {
+		t.Fatalf("userinfo base subscription job=%+v, want held_shadow", baseJob)
+	}
 	replay := request()
 	if replay.Code != http.StatusUnauthorized ||
 		replay.Header().Get("WWW-Authenticate") != `Bearer error="invalid_token"` ||
@@ -262,6 +273,82 @@ func TestInternalUserInfoReturnsTemporarilyUnavailableWhenSQLiteFails(t *testing
 		response.Body.String() != "{\"error\":\"temporarily_unavailable\"}\n" {
 		t.Fatalf("userinfo SQLite failure status=%d body=%s, want temporarily_unavailable",
 			response.Code, response.Body.String())
+	}
+}
+
+func TestInternalUserInfoRollsBackHandleWhenBaseGrantPlanningFails(t *testing.T) {
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	identity, err := inbox.NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new identity: %v", err)
+	}
+	loginCode, err := store.CreateOAuthLoginCode(context.Background(), identity)
+	if err != nil {
+		t.Fatalf("create login code: %v", err)
+	}
+	accessHandle, err := store.ExchangeOAuthLoginCode(context.Background(), loginCode)
+	if err != nil {
+		t.Fatalf("exchange login code: %v", err)
+	}
+	delegate, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant sealer: %v", err)
+	}
+	sealer := &failOnceGrantSealer{delegate: delegate}
+	handler := newBridgeTestHandlerWithGrantSealer(t, oauthbridge.Config{
+		BridgeClientID: "bridge-client-id", BridgeClientSecret: testBridgeClientSecret,
+		NewAPIRedirectURI: testNewAPICallback, BaseSubscription: testBaseSubscriptionConfig,
+	}, store, &bridgeTestProvider{}, sealer)
+
+	failed := requestInternalUserInfo(handler, http.MethodGet, accessHandle)
+	if failed.Code != http.StatusServiceUnavailable ||
+		failed.Body.String() != "{\"error\":\"temporarily_unavailable\"}\n" {
+		t.Fatalf("failed base plan status=%d body=%s, want temporarily_unavailable",
+			failed.Code, failed.Body.String())
+	}
+	retried := requestInternalUserInfo(handler, http.MethodGet, accessHandle)
+	if retried.Code != http.StatusOK {
+		t.Fatalf("userinfo after planning recovery status=%d body=%s, want unconsumed handle",
+			retried.Code, retried.Body.String())
+	}
+}
+
+func TestInternalUserInfoReusesBaseGrantAcrossDistinctLogins(t *testing.T) {
+	fixture := newInternalOAuthFixture(t, 0)
+	firstHandle, err := fixture.store.ExchangeOAuthLoginCode(context.Background(), fixture.loginCode)
+	if err != nil {
+		t.Fatalf("exchange first login code: %v", err)
+	}
+	if response := requestInternalUserInfo(fixture.handler, http.MethodGet, firstHandle); response.Code != http.StatusOK {
+		t.Fatalf("first userinfo status=%d body=%s", response.Code, response.Body.String())
+	}
+	externalID := "lark:base:" + fixture.identity.Subject + ":employee-v1"
+	firstJob, err := fixture.store.GetEntitlementGrantJob(context.Background(), externalID)
+	if err != nil {
+		t.Fatalf("get first base grant job: %v", err)
+	}
+	secondCode, err := fixture.store.CreateOAuthLoginCode(context.Background(), fixture.identity)
+	if err != nil {
+		t.Fatalf("create second login code: %v", err)
+	}
+	secondHandle, err := fixture.store.ExchangeOAuthLoginCode(context.Background(), secondCode)
+	if err != nil {
+		t.Fatalf("exchange second login code: %v", err)
+	}
+	if response := requestInternalUserInfo(fixture.handler, http.MethodGet, secondHandle); response.Code != http.StatusOK {
+		t.Fatalf("second userinfo status=%d body=%s", response.Code, response.Body.String())
+	}
+	secondJob, err := fixture.store.GetEntitlementGrantJob(context.Background(), externalID)
+	if err != nil {
+		t.Fatalf("get replayed base grant job: %v", err)
+	}
+	if secondJob.ID != firstJob.ID || !bytes.Equal(secondJob.Nonce, firstJob.Nonce) ||
+		!bytes.Equal(secondJob.Ciphertext, firstJob.Ciphertext) {
+		t.Fatalf("repeat login replaced base grant job: first=%+v second=%+v", firstJob, secondJob)
 	}
 }
 
@@ -441,4 +528,19 @@ func requestInternalUserInfo(handler http.Handler, method, accessHandle string) 
 	request.RemoteAddr = "198.51.100.10:1234"
 	handler.ServeHTTP(response, request)
 	return response
+}
+
+type failOnceGrantSealer struct {
+	delegate *newapi.GrantSealer
+	calls    int
+}
+
+func (s *failOnceGrantSealer) Seal(
+	request newapi.EntitlementGrantRequest,
+) (newapi.SealedGrantRequest, error) {
+	s.calls++
+	if s.calls == 1 {
+		return newapi.SealedGrantRequest{}, errors.New("grant sealer temporarily unavailable")
+	}
+	return s.delegate.Seal(request)
 }

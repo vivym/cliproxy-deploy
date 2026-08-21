@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 )
 
 func TestOAuthAuthorizationStateIsBoundSingleUseAndExpires(t *testing.T) {
@@ -153,6 +155,208 @@ func TestOAuthLoginCodeAndAccessHandleAreAtomicSingleUse(t *testing.T) {
 	now = now.Add(oauthAccessHandleTTL + time.Nanosecond)
 	if _, err := store.ConsumeOAuthAccessHandle(ctx, accessHandle); !errors.Is(err, ErrOAuthCredentialInvalid) {
 		t.Fatalf("expired OAuth access handle error = %v", err)
+	}
+}
+
+func TestConsumeOAuthAccessHandleStoresBaseSubscriptionGrantAtomically(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	identity, err := NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new OAuth identity: %v", err)
+	}
+	accessHandle := testOAuthAccessHandle(t, ctx, store, identity)
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant sealer: %v", err)
+	}
+	planner := func(got OAuthIdentity) (BaseSubscriptionGrantDraft, error) {
+		if got != identity {
+			t.Fatalf("planned identity = %+v, want %+v", got, identity)
+		}
+		return testBaseSubscriptionGrantDraft(t, got, 5_000_000, strings.Repeat("a", 64), sealer), nil
+	}
+
+	consumed, err := store.ConsumeOAuthAccessHandleAndStoreBaseGrant(ctx, accessHandle, planner)
+	if err != nil {
+		t.Fatalf("consume handle and store base grant: %v", err)
+	}
+	if consumed != identity {
+		t.Fatalf("consumed identity = %+v, want %+v", consumed, identity)
+	}
+	externalID := "lark:base:tenant-test:ou_employee:employee-v1"
+	job, err := store.GetEntitlementGrantJob(ctx, externalID)
+	if err != nil {
+		t.Fatalf("get base subscription grant job: %v", err)
+	}
+	if job.Status != EntitlementGrantJobStatusHeldShadow || job.Attempts != 0 {
+		t.Fatalf("base subscription job = %+v, want held_shadow", job)
+	}
+	opened, err := sealer.Open(newapi.SealedGrantRequest{
+		KeyID: job.KeyID, ExternalID: job.ExternalID, RequestSHA256: job.RequestSHA256,
+		Nonce: job.Nonce, Ciphertext: job.Ciphertext,
+	})
+	if err != nil {
+		t.Fatalf("open base subscription grant: %v", err)
+	}
+	if opened.Source != "base_login" || opened.Identity.Subject != identity.Subject ||
+		opened.Grant.Type != "subscription_level" || opened.Grant.LevelCode != "basic" ||
+		!opened.Grant.MinimumRankOnly || opened.Evidence != nil {
+		t.Fatalf("opened base subscription grant = %+v", opened)
+	}
+	if _, err := store.ConsumeOAuthAccessHandleAndStoreBaseGrant(ctx, accessHandle, planner); !errors.Is(err, ErrOAuthCredentialInvalid) {
+		t.Fatalf("reused access handle error = %v, want invalid credential", err)
+	}
+}
+
+func TestConsumeOAuthAccessHandleRejectsUnboundBaseGrantWithoutConsumingHandle(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	identity, err := NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new OAuth identity: %v", err)
+	}
+	accessHandle := testOAuthAccessHandle(t, ctx, store, identity)
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant sealer: %v", err)
+	}
+	invalidPlanner := func(got OAuthIdentity) (BaseSubscriptionGrantDraft, error) {
+		draft := testBaseSubscriptionGrantDraft(t, got, 5_000_000, strings.Repeat("a", 64), sealer)
+		draft.SubjectSHA256 = strings.Repeat("b", 64)
+		draft.GrantJob.SubjectSHA256 = draft.SubjectSHA256
+		return draft, nil
+	}
+	if _, err := store.ConsumeOAuthAccessHandleAndStoreBaseGrant(ctx, accessHandle, invalidPlanner); err == nil ||
+		!strings.Contains(err.Error(), "invalid base subscription grant") {
+		t.Fatalf("unbound subject hash error = %v, want invalid base grant", err)
+	}
+	validPlanner := func(got OAuthIdentity) (BaseSubscriptionGrantDraft, error) {
+		return testBaseSubscriptionGrantDraft(t, got, 5_000_000, strings.Repeat("a", 64), sealer), nil
+	}
+	if _, err := store.ConsumeOAuthAccessHandleAndStoreBaseGrant(ctx, accessHandle, validPlanner); err != nil {
+		t.Fatalf("retry valid base grant with preserved handle: %v", err)
+	}
+}
+
+func TestConsumeOAuthAccessHandleRejectsBaseGrantMetadataDriftOnReplay(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	identity, err := NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new OAuth identity: %v", err)
+	}
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant sealer: %v", err)
+	}
+	validPlanner := func(got OAuthIdentity) (BaseSubscriptionGrantDraft, error) {
+		return testBaseSubscriptionGrantDraft(t, got, 5_000_000, strings.Repeat("a", 64), sealer), nil
+	}
+	if _, err := store.ConsumeOAuthAccessHandleAndStoreBaseGrant(
+		ctx,
+		testOAuthAccessHandle(t, ctx, store, identity),
+		validPlanner,
+	); err != nil {
+		t.Fatalf("store original base grant: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*BaseSubscriptionGrantDraft)
+	}{
+		{name: "catalog hash", mutate: func(draft *BaseSubscriptionGrantDraft) {
+			draft.CatalogSHA256 = strings.Repeat("b", 64)
+		}},
+		{name: "monthly quota", mutate: func(draft *BaseSubscriptionGrantDraft) {
+			draft.MonthlyQuota = 6_000_000
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			accessHandle := testOAuthAccessHandle(t, ctx, store, identity)
+			driftedPlanner := func(got OAuthIdentity) (BaseSubscriptionGrantDraft, error) {
+				draft := testBaseSubscriptionGrantDraft(t, got, 5_000_000, strings.Repeat("a", 64), sealer)
+				test.mutate(&draft)
+				return draft, nil
+			}
+			if _, err := store.ConsumeOAuthAccessHandleAndStoreBaseGrant(
+				ctx,
+				accessHandle,
+				driftedPlanner,
+			); !errors.Is(err, ErrEntitlementCommandPayloadMismatch) {
+				t.Fatalf("metadata drift error = %v, want payload mismatch", err)
+			}
+			if _, err := store.ConsumeOAuthAccessHandleAndStoreBaseGrant(
+				ctx,
+				accessHandle,
+				validPlanner,
+			); err != nil {
+				t.Fatalf("retry stable replay with preserved handle: %v", err)
+			}
+		})
+	}
+}
+
+func testOAuthAccessHandle(
+	t *testing.T,
+	ctx context.Context,
+	store *Store,
+	identity OAuthIdentity,
+) string {
+	t.Helper()
+	loginCode, err := store.CreateOAuthLoginCode(ctx, identity)
+	if err != nil {
+		t.Fatalf("create OAuth login code: %v", err)
+	}
+	accessHandle, err := store.ExchangeOAuthLoginCode(ctx, loginCode)
+	if err != nil {
+		t.Fatalf("exchange OAuth login code: %v", err)
+	}
+	return accessHandle
+}
+
+func testBaseSubscriptionGrantDraft(
+	t *testing.T,
+	identity OAuthIdentity,
+	monthlyQuota int64,
+	catalogSHA256 string,
+	sealer *newapi.GrantSealer,
+) BaseSubscriptionGrantDraft {
+	t.Helper()
+	request, receipt, err := newapi.PlanBaseSubscriptionGrant(newapi.BaseSubscriptionGrantInput{
+		Subject: identity.Subject, PolicyVersion: "employee-v1", LevelCode: "basic",
+		MonthlyQuota: monthlyQuota, CatalogSHA256: catalogSHA256,
+	})
+	if err != nil {
+		t.Fatalf("plan base subscription grant: %v", err)
+	}
+	sealed, err := sealer.Seal(request)
+	if err != nil {
+		t.Fatalf("seal base subscription grant: %v", err)
+	}
+	return BaseSubscriptionGrantDraft{
+		ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
+		SubjectSHA256: receipt.SubjectSHA256, PolicyVersion: receipt.PolicyVersion,
+		CatalogSHA256: receipt.CatalogSHA256, LevelCode: receipt.BusinessCode,
+		MonthlyQuota: receipt.MonthlyQuota,
+		GrantJob: EntitlementGrantJobDraft{
+			ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
+			SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,
+			Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+		},
 	}
 }
 

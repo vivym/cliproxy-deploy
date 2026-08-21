@@ -46,8 +46,14 @@ The controller supports a locally verified `shadow` mode and an explicit
   acknowledgement budget;
 - exposes internal token/userinfo endpoints that authenticate the fixed New API
   bridge client, atomically exchange the 60-second login code for a second
-  60-second opaque bearer handle, consume that handle once, and return only
-  `sub`, `username`, and `name`;
+  60-second opaque bearer handle, and return only `sub`, `username`, and `name`;
+- resolves `basic` from the unique active policy and, before userinfo succeeds,
+  atomically consumes the handle and creates or reuses the deterministic
+  `lark:base:<subject>:<policy_version>` ledger, sealed `held_shadow` job, and
+  separate base-subscription audit record;
+- keeps monthly quota and approval evidence out of the `base_login` wire request,
+  binds its subject hash to the consumed identity, preserves the first sealed
+  payload on replay, and rejects catalog or quota metadata drift;
 - applies separate per-client fixed-window limits to OAuth authorize and
   callback, token, and userinfo, caps state issuance at 20 per client per five
   minutes and 500 globally per minute, and groups IPv6 clients by `/64`;
@@ -191,9 +197,24 @@ wallet balance, token, or subscription details. In shadow mode,
 the client/executor, so it performs no New API request. In active mode, startup
 preflights the credential and client before opening SQLite, then binds the HTTP
 listener and validates every nonterminal job key before releasing the held
-backlog. The active grant runtime also releases newly created held jobs before
-claiming them. `held_shadow` jobs remain excluded from the event-worker claim
-path and from ready-queue age.
+approval backlog and only the base jobs for the current active policy. The
+active grant runtime applies the same filter to newly created held jobs before
+claiming them. Policy snapshot sync and the runtime startup/release gate reject
+any nonterminal base job from a non-active policy, including an already released
+or restart-recovered job; a policy switch cannot proceed until the documented
+drain or explicit migration is complete. `held_shadow` jobs remain excluded
+from the event-worker claim path and from ready-queue age.
+
+The active policy must define a positive `basic` level before the OAuth bridge
+can start. Userinfo handle deletion, the base-subscription ledger row, the
+sealed grant job, and its audit row commit in one SQLite transaction. Planning,
+sealing, validation, replay mismatch, or database failure rolls the transaction
+back so New API can retry the same handle. Separate employee logins reuse the
+first job only when request hash, subject hash, policy version, catalog hash,
+level, and monthly quota all match; replay never replaces its key ID, nonce, or
+ciphertext. Base-login retry, result, and dead-letter audits feed the same
+bounded operational metrics as approval grants without fabricating a webhook
+event.
 
 The policy directory has no built-in defaults. Operators must mount one or
 more files named `*.policy.json`; every file uses `format_version: 1` and
@@ -253,7 +274,7 @@ go build ./cmd/lark-controller
 This slice does not add the service to Docker Compose and must not be deployed.
 Active grant execution, the durable opaque OAuth credential store, the
 outbound Lark token/userinfo adapter, and the public OAuth authorize/callback
-handlers and internal token/userinfo handlers are implemented locally.
-Base-subscription dispatch, employment reconciliation, Compose wiring,
+handlers, internal token/userinfo handlers, and idempotent base-subscription
+dispatch are implemented locally. Employment reconciliation, Compose wiring,
 operational runbooks, and production validation remain follow-up work. Do not
 enable active mode in production before those gates are complete.

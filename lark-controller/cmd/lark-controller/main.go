@@ -56,6 +56,10 @@ func run() error {
 			active,
 		)
 	}
+	baseSubscription, err := policyCatalog.ResolveBaseSubscription()
+	if err != nil {
+		return err
+	}
 	fetcher, err := larkapi.NewApprovalFetcher(larkapi.Config{
 		AppID: loaded.AppID, AppSecret: loaded.AppSecret,
 	})
@@ -105,7 +109,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	oauthHandler, err := prepareOAuthBridge(loaded, store)
+	oauthHandler, err := prepareOAuthBridge(loaded, store, baseSubscription, grantKeyring)
 	if err != nil {
 		return err
 	}
@@ -125,6 +129,7 @@ func run() error {
 		loaded.Mode,
 		store,
 		grantClient,
+		baseSubscription.PolicyVersion,
 		grantKeyring,
 	)
 	if err != nil {
@@ -157,7 +162,12 @@ func run() error {
 	}
 }
 
-func prepareOAuthBridge(loaded config.Config, store *inbox.Store) (*oauthbridge.Handler, error) {
+func prepareOAuthBridge(
+	loaded config.Config,
+	store *inbox.Store,
+	baseSubscription policy.BaseSubscriptionResolution,
+	grantSealer oauthbridge.GrantRequestSealer,
+) (*oauthbridge.Handler, error) {
 	if store == nil {
 		return nil, errors.New("OAuth credential store is required")
 	}
@@ -180,9 +190,15 @@ func prepareOAuthBridge(loaded config.Config, store *inbox.Store) (*oauthbridge.
 		BridgeClientID:     loaded.BridgeClientID,
 		BridgeClientSecret: bridgeClientSecret,
 		NewAPIRedirectURI:  loaded.NewAPIOAuthCallbackAllowlist[0],
+		BaseSubscription: oauthbridge.BaseSubscriptionConfig{
+			PolicyVersion: baseSubscription.PolicyVersion,
+			LevelCode:     baseSubscription.LevelCode,
+			MonthlyQuota:  baseSubscription.MonthlyQuota,
+			CatalogSHA256: baseSubscription.CatalogSHA256,
+		},
 		RateLimitPerMinute: loaded.OAuthRateLimitPerMinute,
 		TrustedProxyCIDRs:  loaded.OAuthTrustedProxyCIDRs,
-	}, store, exchanger)
+	}, store, exchanger, grantSealer)
 }
 
 func prepareGrantClient(loaded config.Config) (worker.GrantClient, error) {
@@ -208,6 +224,7 @@ func activateGrantRuntime(
 	mode config.Mode,
 	store *inbox.Store,
 	client worker.GrantClient,
+	activeBasePolicyVersion string,
 	keyring *newapi.GrantKeyring,
 ) (*worker.ActiveGrantRuntime, error) {
 	if store == nil || keyring == nil {
@@ -224,7 +241,7 @@ func activateGrantRuntime(
 		if err != nil {
 			return nil, err
 		}
-		runtime, err := worker.NewActiveGrantRuntime(store, executor)
+		runtime, err := worker.NewActiveGrantRuntime(store, executor, activeBasePolicyVersion)
 		if err != nil {
 			return nil, err
 		}

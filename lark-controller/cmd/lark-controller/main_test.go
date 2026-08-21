@@ -22,6 +22,7 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthbridge"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthcontract"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
 )
 
@@ -41,7 +42,7 @@ func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
 	if err != nil || grantClient != nil {
 		t.Fatalf("shadow grant client = %v, err=%v", grantClient, err)
 	}
-	grantRuntime, err := activateGrantRuntime(ctx, "shadow", store, grantClient, keyring)
+	grantRuntime, err := activateGrantRuntime(ctx, "shadow", store, grantClient, "employee-v1", keyring)
 	if err != nil || grantRuntime != nil {
 		t.Fatalf("shadow grant runtime = %v, err=%v", grantRuntime, err)
 	}
@@ -64,7 +65,7 @@ func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
 	if err != nil || grantClient == nil {
 		t.Fatalf("prepare active grant client: client=%v err=%v", grantClient, err)
 	}
-	grantRuntime, err = activateGrantRuntime(ctx, "active", store, grantClient, keyring)
+	grantRuntime, err = activateGrantRuntime(ctx, "active", store, grantClient, "employee-v1", keyring)
 	if err != nil || grantRuntime == nil {
 		t.Fatalf("activate grant runtime: runtime=%v err=%v", grantRuntime, err)
 	}
@@ -174,13 +175,20 @@ func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
 	if err := os.WriteFile(bridgeSecretPath, []byte(bridgeSecret+"\n"), 0o600); err != nil {
 		t.Fatalf("write bridge client secret: %v", err)
 	}
+	grantSealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new OAuth grant sealer: %v", err)
+	}
 	handler, err := prepareOAuthBridge(config.Config{
 		AppID: "cli_test", AppSecret: "app-secret", TenantKey: "tenant-test",
 		BridgeClientID:               "bridge-client-id",
 		BridgeClientSecretFile:       bridgeSecretPath,
 		NewAPIOAuthCallbackAllowlist: []string{oauthcontract.NewAPICallbackURI},
 		OAuthRateLimitPerMinute:      30,
-	}, store)
+	}, store, policy.BaseSubscriptionResolution{
+		PolicyVersion: "employee-v1", LevelCode: "basic", LevelRank: 10,
+		MonthlyQuota: 5_000_000, CatalogSHA256: strings.Repeat("a", 64),
+	}, grantSealer)
 	if err != nil {
 		t.Fatalf("prepare OAuth bridge: %v", err)
 	}
@@ -240,10 +248,14 @@ func TestOAuthCallbackCanCompleteBeyondWebhookWriteTimeout(t *testing.T) {
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
 		BridgeClientID: "bridge-client-id", BridgeClientSecret: strings.Repeat("b", 32),
 		NewAPIRedirectURI: oauthcontract.NewAPICallbackURI,
-		CallbackTimeout:   4 * time.Second, RateLimitPerMinute: 30,
+		BaseSubscription: oauthbridge.BaseSubscriptionConfig{
+			PolicyVersion: "employee-v1", LevelCode: "basic", MonthlyQuota: 5_000_000,
+			CatalogSHA256: strings.Repeat("a", 64),
+		},
+		CallbackTimeout: 4 * time.Second, RateLimitPerMinute: 30,
 	}, mainOAuthStore{identity: identity}, mainOAuthProvider{
 		identity: identity, delay: controllerWriteTimeout + 200*time.Millisecond,
-	})
+	}, mustMainGrantSealer(t))
 	if err != nil {
 		t.Fatalf("new OAuth handler: %v", err)
 	}
@@ -314,11 +326,24 @@ func (mainOAuthStore) ExchangeOAuthLoginCode(context.Context, string) (string, e
 	return "opaque-access-handle", nil
 }
 
-func (s mainOAuthStore) ConsumeOAuthAccessHandle(
-	context.Context,
-	string,
+func (s mainOAuthStore) ConsumeOAuthAccessHandleAndStoreBaseGrant(
+	_ context.Context,
+	_ string,
+	plan func(inbox.OAuthIdentity) (inbox.BaseSubscriptionGrantDraft, error),
 ) (inbox.OAuthIdentity, error) {
+	if _, err := plan(s.identity); err != nil {
+		return inbox.OAuthIdentity{}, err
+	}
 	return s.identity, nil
+}
+
+func mustMainGrantSealer(t *testing.T) *newapi.GrantSealer {
+	t.Helper()
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new main OAuth grant sealer: %v", err)
+	}
+	return sealer
 }
 
 type mainOAuthProvider struct {

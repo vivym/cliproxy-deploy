@@ -143,42 +143,21 @@ GROUP BY result_grant_type, response_status`)
 		return OperationalSnapshot{}, err
 	}
 
-	rows, err = tx.QueryContext(ctx, `
-SELECT outcome, COUNT(*) FROM controller_audit
-WHERE action = 'entitlement_grant_retry' GROUP BY outcome`)
+	snapshot.EntitlementGrantRetries, err = entitlementGrantAuditOutcomeCounts(
+		ctx,
+		tx,
+		"entitlement_grant_retry",
+	)
 	if err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("query entitlement grant retry metrics: %w", err)
 	}
-	for rows.Next() {
-		var reason string
-		var count int64
-		if err := rows.Scan(&reason, &count); err != nil {
-			_ = rows.Close()
-			return OperationalSnapshot{}, fmt.Errorf("scan entitlement grant retry metrics: %w", err)
-		}
-		snapshot.EntitlementGrantRetries[reason] = count
-	}
-	if err := closeRows(rows, "entitlement grant retry metrics"); err != nil {
-		return OperationalSnapshot{}, err
-	}
-
-	rows, err = tx.QueryContext(ctx, `
-SELECT outcome, COUNT(*) FROM controller_audit
-WHERE action = 'entitlement_grant_dead_letter' GROUP BY outcome`)
+	snapshot.EntitlementGrantDeadLetters, err = entitlementGrantAuditOutcomeCounts(
+		ctx,
+		tx,
+		"entitlement_grant_dead_letter",
+	)
 	if err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("query entitlement grant dead-letter metrics: %w", err)
-	}
-	for rows.Next() {
-		var reason string
-		var count int64
-		if err := rows.Scan(&reason, &count); err != nil {
-			_ = rows.Close()
-			return OperationalSnapshot{}, fmt.Errorf("scan entitlement grant dead-letter metrics: %w", err)
-		}
-		snapshot.EntitlementGrantDeadLetters[reason] = count
-	}
-	if err := closeRows(rows, "entitlement grant dead-letter metrics"); err != nil {
-		return OperationalSnapshot{}, err
 	}
 
 	rows, err = tx.QueryContext(ctx, `
@@ -200,23 +179,9 @@ WHERE action = 'approval_fetch' GROUP BY outcome`)
 		return OperationalSnapshot{}, err
 	}
 
-	rows, err = tx.QueryContext(ctx, `
-SELECT outcome, COUNT(*) FROM controller_audit
-WHERE action = 'new_api_grant' GROUP BY outcome`)
+	snapshot.NewAPIGrants, err = entitlementGrantAuditOutcomeCounts(ctx, tx, "new_api_grant")
 	if err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("query New API grant metrics: %w", err)
-	}
-	for rows.Next() {
-		var result string
-		var count int64
-		if err := rows.Scan(&result, &count); err != nil {
-			_ = rows.Close()
-			return OperationalSnapshot{}, fmt.Errorf("scan New API grant metrics: %w", err)
-		}
-		snapshot.NewAPIGrants[result] = count
-	}
-	if err := closeRows(rows, "New API grant metrics"); err != nil {
-		return OperationalSnapshot{}, err
 	}
 
 	rows, err = tx.QueryContext(ctx, `
@@ -267,6 +232,38 @@ SELECT COUNT(*) FROM approval_instances WHERE outcome = ?`,
 		return OperationalSnapshot{}, fmt.Errorf("commit operational snapshot: %w", err)
 	}
 	return snapshot, nil
+}
+
+func entitlementGrantAuditOutcomeCounts(
+	ctx context.Context,
+	tx *sql.Tx,
+	action string,
+) (map[string]int64, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT outcome, SUM(total) FROM (
+    SELECT outcome, COUNT(*) AS total FROM controller_audit
+    WHERE action = ? GROUP BY outcome
+    UNION ALL
+    SELECT outcome, COUNT(*) AS total FROM base_subscription_audit
+    WHERE action = ? GROUP BY outcome
+) GROUP BY outcome`, action, action)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var outcome string
+		var count int64
+		if err := rows.Scan(&outcome, &count); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		counts[outcome] = count
+	}
+	if err := closeRows(rows, "entitlement grant audit metrics"); err != nil {
+		return nil, err
+	}
+	return counts, nil
 }
 
 func closeRows(rows *sql.Rows, description string) error {

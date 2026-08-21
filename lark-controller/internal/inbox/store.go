@@ -224,6 +224,26 @@ CREATE TABLE IF NOT EXISTS entitlement_command_shadows (
 );
 CREATE INDEX IF NOT EXISTS idx_entitlement_command_shadows_external_id
     ON entitlement_command_shadows(external_id);
+CREATE TABLE IF NOT EXISTS base_subscription_grants (
+    external_id TEXT PRIMARY KEY,
+    request_sha256 TEXT NOT NULL,
+    subject_sha256 TEXT NOT NULL,
+    policy_version TEXT NOT NULL,
+    catalog_sha256 TEXT NOT NULL,
+    level_code TEXT NOT NULL,
+    monthly_quota INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS base_subscription_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id TEXT NOT NULL REFERENCES base_subscription_grants(external_id) ON DELETE RESTRICT,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_base_subscription_audit_action
+    ON base_subscription_audit(action, outcome);
 CREATE TABLE IF NOT EXISTS entitlement_grant_jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     external_id TEXT NOT NULL UNIQUE,
@@ -733,11 +753,15 @@ INSERT INTO approval_instances (
 		if decision.EntitlementCommand == nil {
 			return errors.New("entitlement grant job requires command shadow")
 		}
+		if decision.Outcome != DecisionOutcomeShadowAuthorityVerified ||
+			decision.EntitlementGrantJob.ExternalID != decision.EntitlementCommand.ExternalID ||
+			decision.EntitlementGrantJob.RequestSHA256 != decision.EntitlementCommand.RequestSHA256 ||
+			decision.EntitlementGrantJob.SubjectSHA256 != decision.EntitlementCommand.SubjectSHA256 {
+			return errors.New("entitlement grant job does not match command shadow")
+		}
 		if _, err := insertEntitlementGrantJob(
 			ctx,
 			tx,
-			decision.Outcome,
-			*decision.EntitlementCommand,
 			*decision.EntitlementGrantJob,
 			createdAt,
 		); err != nil {

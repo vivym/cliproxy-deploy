@@ -12,8 +12,10 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/digest"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/larkapi"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthcontract"
 )
 
@@ -30,9 +32,17 @@ type Config struct {
 	BridgeClientID     string
 	BridgeClientSecret string
 	NewAPIRedirectURI  string
+	BaseSubscription   BaseSubscriptionConfig
 	RateLimitPerMinute int
 	TrustedProxyCIDRs  []netip.Prefix
 	CallbackTimeout    time.Duration
+}
+
+type BaseSubscriptionConfig struct {
+	PolicyVersion string
+	LevelCode     string
+	MonthlyQuota  int64
+	CatalogSHA256 string
 }
 
 type Store interface {
@@ -40,7 +50,11 @@ type Store interface {
 	ConsumeOAuthAuthorizationState(context.Context, string) (inbox.OAuthAuthorizationState, error)
 	CreateOAuthLoginCode(context.Context, inbox.OAuthIdentity) (string, error)
 	ExchangeOAuthLoginCode(context.Context, string) (string, error)
-	ConsumeOAuthAccessHandle(context.Context, string) (inbox.OAuthIdentity, error)
+	ConsumeOAuthAccessHandleAndStoreBaseGrant(
+		context.Context,
+		string,
+		func(inbox.OAuthIdentity) (inbox.BaseSubscriptionGrantDraft, error),
+	) (inbox.OAuthIdentity, error)
 }
 
 type OAuthProvider interface {
@@ -48,10 +62,15 @@ type OAuthProvider interface {
 	Exchange(context.Context, string) (inbox.OAuthIdentity, error)
 }
 
+type GrantRequestSealer interface {
+	Seal(newapi.EntitlementGrantRequest) (newapi.SealedGrantRequest, error)
+}
+
 type Handler struct {
 	config             Config
 	store              Store
 	provider           OAuthProvider
+	grantSealer        GrantRequestSealer
 	authorizeLimiter   *clientRateLimiter
 	stateLimiter       *clientRateLimiter
 	globalStateLimiter *fixedWindowRateLimiter
@@ -60,16 +79,27 @@ type Handler struct {
 	userInfoLimiter    *clientRateLimiter
 }
 
-func NewHandler(config Config, store Store, provider OAuthProvider) (*Handler, error) {
+func NewHandler(
+	config Config,
+	store Store,
+	provider OAuthProvider,
+	grantSealer GrantRequestSealer,
+) (*Handler, error) {
 	if config.BridgeClientID == "" || !validBridgeClientSecret(config.BridgeClientSecret) ||
 		config.NewAPIRedirectURI == "" {
 		return nil, errors.New("OAuth bridge client credentials and New API redirect URI are required")
 	}
+	if config.BaseSubscription.PolicyVersion == "" ||
+		config.BaseSubscription.LevelCode != "basic" ||
+		config.BaseSubscription.MonthlyQuota <= 0 ||
+		!digest.IsCanonicalSHA256(config.BaseSubscription.CatalogSHA256) {
+		return nil, errors.New("active basic subscription policy is required")
+	}
 	if config.NewAPIRedirectURI != oauthcontract.NewAPICallbackURI {
 		return nil, errors.New("New API redirect URI must match the registered callback")
 	}
-	if store == nil || provider == nil {
-		return nil, errors.New("OAuth credential store and provider are required")
+	if store == nil || provider == nil || grantSealer == nil {
+		return nil, errors.New("OAuth credential store, provider, and grant sealer are required")
 	}
 	if config.RateLimitPerMinute == 0 {
 		config.RateLimitPerMinute = defaultRateLimitPerMinute
@@ -92,7 +122,7 @@ func NewHandler(config Config, store Store, provider OAuthProvider) (*Handler, e
 	}
 	config.TrustedProxyCIDRs = trustedProxyCIDRs
 	return &Handler{
-		config: config, store: store, provider: provider,
+		config: config, store: store, provider: provider, grantSealer: grantSealer,
 		authorizeLimiter:   newClientRateLimiter(config.RateLimitPerMinute, time.Minute, trustedProxyCIDRs),
 		stateLimiter:       newClientRateLimiter(maxClientStatesPerTTL, 5*time.Minute, trustedProxyCIDRs),
 		globalStateLimiter: newFixedWindowRateLimiter(maxGlobalStatesPerMinute, time.Minute),

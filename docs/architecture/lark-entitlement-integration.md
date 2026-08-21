@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback 与内部 token/userinfo handlers，基础订阅投递和在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers 和幂等基础订阅投递，在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -433,7 +433,7 @@ Controller 不持久化 Lark `user_access_token` 或 `refresh_token`。登录只
 
 ### 基础订阅时序
 
-Controller 在 userinfo 成功后记录 principal 并投递：
+Controller 从唯一 active policy 解析 `basic`。userinfo 只有在同一个 SQLite 事务中单次消费 access handle、创建或复用基础订阅账本、保存密封 grant job 并写入独立审计后才返回成功。该 job 投递：
 
 ```json
 {
@@ -451,6 +451,12 @@ Controller 在 userinfo 成功后记录 principal 并投递：
   }
 }
 ```
+
+这里不伪造 Lark webhook event。基础订阅使用独立的 `base_subscription_grants` 和 `base_subscription_audit`，因为它没有 webhook `event_key`；grant job 仍复用审批 job 的 release、claim、retry、dead-letter 和 executor runtime。shadow mode 保持 `held_shadow`，active runtime 在 New API 完成 OAuth principal 事务后释放并执行；若 job 先被执行，下面的 `principal_not_ready` 重试覆盖该并发窗口。
+
+同一员工在同一 policy version 重复登录时，只有 request hash、subject hash、policy version、catalog hash、level 和 monthly quota 全部一致才记为 `shadow_replayed`。重放保留首条 job 的 key ID、nonce 和 ciphertext，不重新密封替换。任何 planner、sealer、校验、metadata mismatch 或 SQLite 错误都会回滚 handle 消费，使 New API 能以同一 handle 重试；`subject_sha256` 必须等于实际 OAuth subject 的 SHA-256。
+
+release gate 会放行所有历史审批 job，但基础订阅 job 只允许当前 active policy version。policy snapshot sync 和 active runtime 的 startup/release gate 都会拒绝任何非 active version 的 held/pending/processing/retry base job，因此已经 release 或重启恢复的旧 job 也不能在切换后被发送，旧 policy 有未终结审批 grant 时也不能进入 retired。按上述固定发布流程，这类 base job 必须先 drain；未应用遗留项的 principal/assignment 核验与新版本重建仍属于 policy migration 操作，不能靠共享 worker 猜测或错误释放。
 
 如果 New API 尚未完成 integration principal 事务，权益接口返回可重试的 `principal_not_ready`。Controller 使用指数退避重试，不在 OAuth callback 中阻塞等待用户创建事务。
 
@@ -1081,6 +1087,8 @@ New API fork 同时给 `subscription_plans` 增加 `managed_only boolean NOT NUL
 | `lark_event_inbox` | webhook 去重、规范化 event、处理状态 |
 | `approval_instances` | 回查结果摘要、schema hash、处理决策 |
 | `entitlement_command_shadows` | 脱敏 grant receipt、external ID/request hash 重放账本 |
+| `base_subscription_grants` | userinfo 基础订阅的确定性 external ID、hash、policy/catalog/level/quota 重放账本 |
+| `base_subscription_audit` | 无 webhook event key 的基础订阅 plan/replay/result/retry/dead-letter 审计 |
 | `entitlement_grant_jobs` | AES-256-GCM 密封的 canonical request；shadow 写入 `held_shadow`，active gate 后转为可执行状态 |
 | `employment_checks` | 在职状态证据、连续缺失计数和 disable external ID |
 | `jobs` | retry schedule、attempt、last_error、dead-letter |
@@ -1593,7 +1601,10 @@ AES-256-GCM 密封的 canonical request；密封记录使用 `held_shadow` 状�
 每个非终态 grant job 的 key ID 都存在，缺失时 fail closed；succeeded/dead-letter 历史记录
 不阻止旧 key 退役。active startup 会在配置、credential/client、SQLite、webhook server 和
 listen socket 均准备好后释放历史 held job；active grant runtime 也会在每轮 claim 前释放新产生的
-held job。已接入的 `GrantExecutor` 可解封请求、调用既有 adapter、
+held job。审批 job 不受 active policy 切换影响；base job 只有其 policy version 等于当前 active version
+才会被释放；任何历史非终态 base job 都会让 policy snapshot/startup gate fail closed，等待 drain 或
+显式 migration 处理。旧 policy 的非终态审批 grant 同样会阻止 retirement。
+已接入的 `GrantExecutor` 可解封请求、调用既有 adapter、
 保存 sanitized result、处理 response-loss replay，并按登记 code retry/dead-letter；
 `principal_not_ready` 的 24 小时从 `activated_at` 计算。active result/retry/dead-letter metrics
 及从 `activated_at` 开始的 released-job queue age 已实现。shadow mode 不读取 New API URL 或
@@ -1621,9 +1632,14 @@ body）、transport 和 timeout 同样映射为 `temporarily_unavailable`，其�
 使用 10 秒总 context，并只为自身扩展 response write deadline，不改变 webhook 的 3 秒 ACK 预算。
 内部 token handler 已按 New API Generic OAuth 的 params auth contract 校验固定 client、grant type 和
 redirect URI，再原子地把 60 秒 login code 换成第二个 60 秒 opaque Bearer handle；userinfo handler
-原子消费该 handle，只返回 `sub/username/name`，不返回 email。两个内部 endpoint exact method、独立
+从唯一 active policy 解析 `basic`，并在一个 SQLite 事务中消费该 handle、创建或复用
+`lark:base:<tenant_key>:<open_id>:<policy_version>` 账本、保存 AES-256-GCM 密封的 `held_shadow`
+job、写入独立 base audit，提交后只返回 `sub/username/name`，不返回 email。事务失败保留 handle；稳定
+replay 比较 request/subject/policy/catalog/level/quota 元数据并复用首条密封 payload，漂移 fail closed。
+base job 与审批 job 共用 active release/executor/retry/dead-letter runtime，结果和失败审计汇总到同一组
+bounded metrics，但不伪造 webhook event。两个内部 endpoint exact method、独立
 per-client 限流、稳定错误和 `no-store` 响应均已实现，bridge client secret 只从必需的 secret file
-读取。登录后的基础订阅 job、就业状态 reconciliation、Compose 接入和生产验证仍未实现。
+读取。就业状态 reconciliation、Compose 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的

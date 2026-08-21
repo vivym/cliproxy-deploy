@@ -112,6 +112,90 @@ func TestGrantExecutorAppliesReleasedJobAndStoresReceipt(t *testing.T) {
 	}
 }
 
+func TestGrantExecutorAppliesBaseSubscriptionJobWithoutApprovalEvent(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	identity, err := inbox.NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new OAuth identity: %v", err)
+	}
+	loginCode, err := store.CreateOAuthLoginCode(ctx, identity)
+	if err != nil {
+		t.Fatalf("create OAuth login code: %v", err)
+	}
+	accessHandle, err := store.ExchangeOAuthLoginCode(ctx, loginCode)
+	if err != nil {
+		t.Fatalf("exchange OAuth login code: %v", err)
+	}
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant sealer: %v", err)
+	}
+	_, err = store.ConsumeOAuthAccessHandleAndStoreBaseGrant(
+		ctx,
+		accessHandle,
+		func(got inbox.OAuthIdentity) (inbox.BaseSubscriptionGrantDraft, error) {
+			request, receipt, planErr := newapi.PlanBaseSubscriptionGrant(newapi.BaseSubscriptionGrantInput{
+				Subject: got.Subject, PolicyVersion: "employee-v1", LevelCode: "basic",
+				MonthlyQuota: 5_000_000, CatalogSHA256: strings.Repeat("a", 64),
+			})
+			if planErr != nil {
+				return inbox.BaseSubscriptionGrantDraft{}, planErr
+			}
+			sealed, sealErr := sealer.Seal(request)
+			if sealErr != nil {
+				return inbox.BaseSubscriptionGrantDraft{}, sealErr
+			}
+			return inbox.BaseSubscriptionGrantDraft{
+				ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
+				SubjectSHA256: receipt.SubjectSHA256, PolicyVersion: receipt.PolicyVersion,
+				CatalogSHA256: receipt.CatalogSHA256, LevelCode: receipt.BusinessCode,
+				MonthlyQuota: receipt.MonthlyQuota,
+				GrantJob: inbox.EntitlementGrantJobDraft{
+					ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
+					SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,
+					Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+				},
+			}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("store base subscription job: %v", err)
+	}
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 1 {
+		t.Fatalf("release base subscription job: released=%d err=%v", released, err)
+	}
+	externalID := "lark:base:tenant-test:ou_employee:employee-v1"
+	client := &grantClient{response: newapi.EntitlementGrantResponse{
+		Status: "applied", ExternalID: externalID, UserID: 42,
+		Result: newapi.GrantResult{
+			GrantType: "subscription_level", LevelCode: "basic",
+			SubscriptionID: 71, AssignmentVersion: 1, Transition: "created",
+		},
+	}}
+	executor, err := worker.NewGrantExecutor(store, client, sealer)
+	if err != nil {
+		t.Fatalf("new grant executor: %v", err)
+	}
+	if processed, err := executor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("execute base subscription: processed=%t err=%v", processed, err)
+	}
+	stored, err := store.GetEntitlementGrantJob(ctx, externalID)
+	if err != nil {
+		t.Fatalf("get base subscription result: %v", err)
+	}
+	if client.calls != 1 || client.request.Source != "base_login" ||
+		stored.Status != inbox.EntitlementGrantJobStatusSucceeded || stored.Receipt == nil ||
+		stored.Receipt.LevelCode != "basic" || stored.Receipt.SubscriptionID != 71 {
+		t.Fatalf("base subscription execution: calls=%d request=%+v job=%+v",
+			client.calls, client.request, stored)
+	}
+}
+
 func TestGrantExecutorOpensPreviousKeyAfterRotation(t *testing.T) {
 	ctx := context.Background()
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
@@ -456,7 +540,7 @@ func prepareReleasedGrantJob(
 		t.Fatalf("new grant sealer: %v", err)
 	}
 	prepareHeldGrantJob(t, ctx, store, eventID, sealer)
-	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx); err != nil || released != 1 {
+	if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 1 {
 		t.Fatalf("release held grant: released=%d err=%v", released, err)
 	}
 	return sealer

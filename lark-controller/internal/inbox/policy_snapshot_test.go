@@ -1,6 +1,7 @@
 package inbox_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 )
 
@@ -267,6 +269,137 @@ func TestSyncPolicySnapshotPreservesImmutableHistoryAcrossRotation(t *testing.T)
 	}
 	if err := store.SyncPolicySnapshot(ctx, retired); err != nil {
 		t.Fatalf("retire drained historical policy after trace window: %v", err)
+	}
+}
+
+func TestSyncPolicySnapshotRejectsRotationWithUnfinishedBaseGrant(t *testing.T) {
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	initial := policy.Snapshot{
+		Policies: []policy.PolicySnapshot{
+			policySnapshot("employee-v1", policy.PolicyStateActive, "a"),
+		},
+		Bindings: []policy.ApprovalBindingSnapshot{
+			approvalBindingSnapshot("approval-wallet-v1", "employee-v1", "1", ""),
+		},
+	}
+	if err := store.SyncPolicySnapshot(ctx, initial); err != nil {
+		t.Fatalf("sync initial policy snapshot: %v", err)
+	}
+	identity, err := inbox.NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("new OAuth identity: %v", err)
+	}
+	loginCode, err := store.CreateOAuthLoginCode(ctx, identity)
+	if err != nil {
+		t.Fatalf("create OAuth login code: %v", err)
+	}
+	accessHandle, err := store.ExchangeOAuthLoginCode(ctx, loginCode)
+	if err != nil {
+		t.Fatalf("exchange OAuth login code: %v", err)
+	}
+	keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant keyring: %v", err)
+	}
+	_, err = store.ConsumeOAuthAccessHandleAndStoreBaseGrant(
+		ctx,
+		accessHandle,
+		func(got inbox.OAuthIdentity) (inbox.BaseSubscriptionGrantDraft, error) {
+			request, receipt, err := newapi.PlanBaseSubscriptionGrant(newapi.BaseSubscriptionGrantInput{
+				Subject: got.Subject, PolicyVersion: "employee-v1", LevelCode: "basic",
+				MonthlyQuota: 5_000_000, CatalogSHA256: initial.Policies[0].CatalogSHA256,
+			})
+			if err != nil {
+				return inbox.BaseSubscriptionGrantDraft{}, err
+			}
+			sealed, err := keyring.Seal(request)
+			if err != nil {
+				return inbox.BaseSubscriptionGrantDraft{}, err
+			}
+			return inbox.BaseSubscriptionGrantDraft{
+				ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
+				SubjectSHA256: receipt.SubjectSHA256, PolicyVersion: receipt.PolicyVersion,
+				CatalogSHA256: receipt.CatalogSHA256, LevelCode: receipt.BusinessCode,
+				MonthlyQuota: receipt.MonthlyQuota,
+				GrantJob: inbox.EntitlementGrantJobDraft{
+					ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
+					SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,
+					Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+				},
+			}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("store unfinished base grant: %v", err)
+	}
+
+	cutoff := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	rotated := policy.Snapshot{
+		Policies: []policy.PolicySnapshot{
+			policySnapshot("employee-v1", policy.PolicyStateDraining, "c"),
+			policySnapshot("employee-v2", policy.PolicyStateActive, "b"),
+		},
+		Bindings: []policy.ApprovalBindingSnapshot{
+			approvalBindingSnapshot("approval-wallet-v1", "employee-v1", "1", cutoff),
+			approvalBindingSnapshot("approval-wallet-v2", "employee-v2", "2", ""),
+		},
+	}
+	rotated.Policies[0].CatalogSHA256 = initial.Policies[0].CatalogSHA256
+	rotated.Policies[0].CatalogJSON = initial.Policies[0].CatalogJSON
+	if err := store.SyncPolicySnapshot(ctx, rotated); err == nil ||
+		!strings.Contains(err.Error(), "unfinished base subscription grant") {
+		t.Fatalf("rotate policy with unfinished base grant error = %v", err)
+	}
+}
+
+func TestSyncPolicySnapshotRejectsRetirementWithUnfinishedApprovalGrant(t *testing.T) {
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	initial := policy.Snapshot{
+		Policies: []policy.PolicySnapshot{
+			policySnapshot("employee-v1", policy.PolicyStateActive, "a"),
+		},
+		Bindings: []policy.ApprovalBindingSnapshot{
+			approvalBindingSnapshot("approval-wallet-v1", "employee-v1", "1", ""),
+		},
+	}
+	if err := store.SyncPolicySnapshot(ctx, initial); err != nil {
+		t.Fatalf("sync initial policy snapshot: %v", err)
+	}
+	cutoff := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
+	rotated := policy.Snapshot{
+		Policies: []policy.PolicySnapshot{
+			policySnapshot("employee-v1", policy.PolicyStateDraining, "c"),
+			policySnapshot("employee-v2", policy.PolicyStateActive, "b"),
+		},
+		Bindings: []policy.ApprovalBindingSnapshot{
+			approvalBindingSnapshot("approval-wallet-v1", "employee-v1", "1", cutoff),
+			approvalBindingSnapshot("approval-wallet-v2", "employee-v2", "2", ""),
+		},
+	}
+	rotated.Policies[0].CatalogSHA256 = initial.Policies[0].CatalogSHA256
+	rotated.Policies[0].CatalogJSON = initial.Policies[0].CatalogJSON
+	if err := store.SyncPolicySnapshot(ctx, rotated); err != nil {
+		t.Fatalf("sync rotated policy snapshot: %v", err)
+	}
+	recordHeldGrantJob(t, ctx, store, "pending-grant-retirement")
+	retired := rotated
+	retired.Policies = append([]policy.PolicySnapshot(nil), rotated.Policies...)
+	retired.Policies[0].State = policy.PolicyStateRetired
+	retired.Policies[0].SourceSHA256 = strings.Repeat("d", 64)
+	retired.Policies[0].RetireAfter = time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if err := store.SyncPolicySnapshot(ctx, retired); err == nil ||
+		!strings.Contains(err.Error(), "unfinished approval entitlement grant") {
+		t.Fatalf("retire policy with unfinished approval grant error = %v", err)
 	}
 }
 

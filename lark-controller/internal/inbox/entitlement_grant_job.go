@@ -3,11 +3,12 @@ package inbox
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"sort"
 	"time"
+
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/digest"
 )
 
 type EntitlementGrantJobStatus string
@@ -151,15 +152,11 @@ type EntitlementGrantReceipt struct {
 func insertEntitlementGrantJob(
 	ctx context.Context,
 	tx *sql.Tx,
-	decisionOutcome DecisionOutcome,
-	command EntitlementCommandShadow,
 	draft EntitlementGrantJobDraft,
 	createdAt string,
 ) (int64, error) {
-	if decisionOutcome != DecisionOutcomeShadowAuthorityVerified ||
-		draft.ExternalID != command.ExternalID || draft.RequestSHA256 != command.RequestSHA256 ||
-		draft.SubjectSHA256 != command.SubjectSHA256 || !isSHA256Hex(draft.RequestSHA256) ||
-		!isSHA256Hex(draft.SubjectSHA256) || !isSHA256Hex(draft.KeyID) ||
+	if draft.ExternalID == "" || !digest.IsCanonicalSHA256(draft.RequestSHA256) ||
+		!digest.IsCanonicalSHA256(draft.SubjectSHA256) || !digest.IsCanonicalSHA256(draft.KeyID) ||
 		len(draft.Nonce) != 12 || len(draft.Ciphertext) <= 16 {
 		return 0, errors.New("invalid entitlement grant job")
 	}
@@ -212,17 +209,34 @@ SELECT id, external_id, request_sha256, subject_sha256, key_id, nonce, ciphertex
 FROM entitlement_grant_jobs WHERE external_id = ?`, externalID))
 }
 
-func (s *Store) ReleaseHeldEntitlementGrantJobs(ctx context.Context) (int64, error) {
+func (s *Store) ReleaseHeldEntitlementGrantJobs(
+	ctx context.Context,
+	activeBasePolicyVersion string,
+) (int64, error) {
+	if activeBasePolicyVersion == "" {
+		return 0, errors.New("active base policy version is required")
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := s.database.ExecContext(ctx, `
 UPDATE entitlement_grant_jobs
 SET status = ?, next_attempt_at = ?, activated_at = ?, updated_at = ?
-WHERE status = ?`,
+WHERE status = ? AND (
+    EXISTS (
+        SELECT 1 FROM entitlement_command_shadows
+        WHERE entitlement_command_shadows.external_id = entitlement_grant_jobs.external_id
+    )
+    OR EXISTS (
+        SELECT 1 FROM base_subscription_grants
+        WHERE base_subscription_grants.external_id = entitlement_grant_jobs.external_id
+          AND base_subscription_grants.policy_version = ?
+    )
+)`,
 		EntitlementGrantJobStatusPending,
 		now,
 		now,
 		now,
 		EntitlementGrantJobStatusHeldShadow,
+		activeBasePolicyVersion,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("release held entitlement grant jobs: %w", err)
@@ -340,13 +354,14 @@ WHERE id = ? AND status = ? AND attempts = ?`,
 	if affected != 1 {
 		return fmt.Errorf("complete entitlement grant job affected %d rows", affected)
 	}
-	eventKey, err := entitlementGrantAuditEventKey(ctx, tx, job.ExternalID)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO controller_audit (event_key, action, outcome, created_at)
-VALUES (?, 'new_api_grant', ?, ?)`, eventKey, receipt.Status, now); err != nil {
+	if err := insertEntitlementGrantAudit(
+		ctx,
+		tx,
+		job.ExternalID,
+		"new_api_grant",
+		receipt.Status,
+		now,
+	); err != nil {
 		return fmt.Errorf("store entitlement grant completion audit: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -441,13 +456,14 @@ WHERE id = ? AND status = ? AND attempts = ?`,
 	if affected != 1 {
 		return fmt.Errorf("transition entitlement grant job failure affected %d rows", affected)
 	}
-	eventKey, err := entitlementGrantAuditEventKey(ctx, tx, job.ExternalID)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO controller_audit (event_key, action, outcome, created_at)
-VALUES (?, ?, ?, ?)`, eventKey, auditAction, reason, now.Format(time.RFC3339Nano)); err != nil {
+	if err := insertEntitlementGrantAudit(
+		ctx,
+		tx,
+		job.ExternalID,
+		auditAction,
+		string(reason),
+		now.Format(time.RFC3339Nano),
+	); err != nil {
 		return fmt.Errorf("store entitlement grant failure audit: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -462,7 +478,7 @@ func (s *Store) ValidateEntitlementGrantJobKeyIDs(ctx context.Context, keyIDs []
 	}
 	available := make(map[string]struct{}, len(keyIDs))
 	for _, keyID := range keyIDs {
-		if !isSHA256Hex(keyID) {
+		if !digest.IsCanonicalSHA256(keyID) {
 			return errors.New("grant payload keyring contains an invalid key ID")
 		}
 		if _, duplicate := available[keyID]; duplicate {
@@ -493,17 +509,6 @@ WHERE status NOT IN (?, ?)`,
 		return fmt.Errorf("iterate grant job key IDs: %w", err)
 	}
 	return nil
-}
-
-func isSHA256Hex(value string) bool {
-	if len(value) != 64 {
-		return false
-	}
-	decoded, err := hex.DecodeString(value)
-	if err != nil || len(decoded) != 32 {
-		return false
-	}
-	return hex.EncodeToString(decoded) == value
 }
 
 type entitlementGrantJobScanner interface {
@@ -604,12 +609,40 @@ func knownEntitlementGrantFailure(reason EntitlementGrantFailureReason) bool {
 	return ok
 }
 
-func entitlementGrantAuditEventKey(ctx context.Context, tx *sql.Tx, externalID string) (string, error) {
+func insertEntitlementGrantAudit(
+	ctx context.Context,
+	tx *sql.Tx,
+	externalID string,
+	action string,
+	outcome string,
+	createdAt string,
+) error {
 	var eventKey string
-	if err := tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 SELECT event_key FROM entitlement_command_shadows
-WHERE external_id = ? ORDER BY created_at, event_key LIMIT 1`, externalID).Scan(&eventKey); err != nil {
-		return "", fmt.Errorf("resolve entitlement grant audit event: %w", err)
+WHERE external_id = ? ORDER BY created_at, event_key LIMIT 1`, externalID).Scan(&eventKey)
+	if err == nil {
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO controller_audit (event_key, action, outcome, created_at)
+VALUES (?, ?, ?, ?)`, eventKey, action, outcome, createdAt); err != nil {
+			return err
+		}
+		return nil
 	}
-	return eventKey, nil
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("resolve entitlement grant audit event: %w", err)
+	}
+	var baseExternalID string
+	if err := tx.QueryRowContext(ctx, `
+SELECT external_id FROM base_subscription_grants WHERE external_id = ?`,
+		externalID,
+	).Scan(&baseExternalID); err != nil {
+		return fmt.Errorf("resolve base subscription grant audit: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO base_subscription_audit (external_id, action, outcome, created_at)
+VALUES (?, ?, ?, ?)`, baseExternalID, action, outcome, createdAt); err != nil {
+		return err
+	}
+	return nil
 }

@@ -9,22 +9,29 @@ import (
 )
 
 type ActiveGrantRuntime struct {
-	store    *inbox.Store
-	executor *GrantExecutor
+	store                   *inbox.Store
+	executor                *GrantExecutor
+	activeBasePolicyVersion string
 }
 
 func NewActiveGrantRuntime(
 	store *inbox.Store,
 	executor *GrantExecutor,
+	activeBasePolicyVersion string,
 ) (*ActiveGrantRuntime, error) {
-	if store == nil || executor == nil {
-		return nil, errors.New("store and grant executor are required")
+	if store == nil || executor == nil || activeBasePolicyVersion == "" {
+		return nil, errors.New("store, grant executor, and active base policy version are required")
 	}
-	return &ActiveGrantRuntime{store: store, executor: executor}, nil
+	return &ActiveGrantRuntime{
+		store: store, executor: executor, activeBasePolicyVersion: activeBasePolicyVersion,
+	}, nil
 }
 
 func (r *ActiveGrantRuntime) ReleaseHeldJobs(ctx context.Context) (int64, error) {
-	released, err := r.store.ReleaseHeldEntitlementGrantJobs(ctx)
+	if err := r.store.ValidateActiveBaseGrantPolicy(ctx, r.activeBasePolicyVersion); err != nil {
+		return 0, fmt.Errorf("validate active base grant policy: %w", err)
+	}
+	released, err := r.store.ReleaseHeldEntitlementGrantJobs(ctx, r.activeBasePolicyVersion)
 	if err != nil {
 		return 0, fmt.Errorf("release held jobs for active grant runtime: %w", err)
 	}
