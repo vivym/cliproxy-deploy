@@ -20,6 +20,7 @@ func TestLoadRequiresSecretsAndOnlyAllowsShadowMode(t *testing.T) {
 		"LARK_ACTIVE_POLICY_VERSION":  "employee-v1",
 		"LARK_POLICY_BUNDLE_DIR":      "/policies",
 		"LARK_APPROVAL_BINDINGS_FILE": "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEY_FILE": "/run/secrets/lark_grant_payload_key",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -32,7 +33,8 @@ func TestLoadRequiresSecretsAndOnlyAllowsShadowMode(t *testing.T) {
 		t.Fatalf("readiness max queue age = %s, want 15m", loaded.ReadinessMaxQueueAge)
 	}
 	if loaded.ActivePolicyVersion != "employee-v1" || loaded.PolicyBundleDirectory != "/policies" ||
-		loaded.ApprovalBindingsFile != "/policies/approval-bindings.json" {
+		loaded.ApprovalBindingsFile != "/policies/approval-bindings.json" ||
+		loaded.GrantPayloadKeyFile != "/run/secrets/lark_grant_payload_key" {
 		t.Fatalf("unexpected policy config: %+v", loaded)
 	}
 
@@ -61,6 +63,7 @@ func TestLoadValidatesReadinessQueueAge(t *testing.T) {
 		"LARK_ACTIVE_POLICY_VERSION":   "employee-v1",
 		"LARK_POLICY_BUNDLE_DIR":       "/policies",
 		"LARK_APPROVAL_BINDINGS_FILE":  "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEY_FILE":  "/run/secrets/lark_grant_payload_key",
 		"LARK_READINESS_MAX_QUEUE_AGE": "20m",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })

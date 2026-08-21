@@ -1,6 +1,7 @@
 package worker_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/worker"
 )
@@ -524,6 +526,49 @@ func TestShadowProcessorPersistsResolvedPolicyEvidence(t *testing.T) {
 	}
 }
 
+func TestShadowProcessorWithGrantSealerPersistsHeldCanonicalRequest(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordApprovedEvent(t, ctx, store, "evt-sealed-grant")
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant sealer: %v", err)
+	}
+	processor, err := worker.NewShadowProcessorWithGrantSealer(
+		store,
+		&approvalFetcher{},
+		&approvalResolver{resolution: verifiedWalletResolution()},
+		"zh-CN",
+		sealer,
+	)
+	if err != nil {
+		t.Fatalf("new processor with grant sealer: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process sealed grant: processed=%t err=%v", processed, err)
+	}
+	stored, err := store.GetEntitlementGrantJob(ctx, "lark:wallet-topup:instance-evt-sealed-grant")
+	if err != nil {
+		t.Fatalf("get entitlement grant job: %v", err)
+	}
+	opened, err := sealer.Open(newapi.SealedGrantRequest{
+		KeyID: stored.KeyID, ExternalID: stored.ExternalID,
+		RequestSHA256: stored.RequestSHA256, Nonce: stored.Nonce,
+		Ciphertext: stored.Ciphertext,
+	})
+	if err != nil {
+		t.Fatalf("open entitlement grant job: %v", err)
+	}
+	if opened.ExternalID != stored.ExternalID || opened.Identity.Subject != "tenant-test:ou_requester" ||
+		opened.Grant.Type != "wallet_quota" || opened.Grant.QuotaDelta != 2_500_000 {
+		t.Fatalf("unexpected held request: %+v", opened)
+	}
+}
+
 func TestShadowProcessorReplaysSameEntitlementCommandAcrossDistinctEvents(t *testing.T) {
 	ctx := context.Background()
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
@@ -542,19 +587,37 @@ func TestShadowProcessorReplaysSameEntitlementCommandAcrossDistinctEvents(t *tes
 			t.Fatalf("record %s: %v", eventID, err)
 		}
 	}
-	processor, err := worker.NewShadowProcessor(
+	sealer, err := newapi.NewGrantSealer(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant sealer: %v", err)
+	}
+	processor, err := worker.NewShadowProcessorWithGrantSealer(
 		store,
 		&approvalFetcher{},
 		&approvalResolver{resolution: verifiedWalletResolution()},
 		"zh-CN",
+		sealer,
 	)
 	if err != nil {
 		t.Fatalf("new processor: %v", err)
 	}
-	for range 2 {
-		if processed, err := processor.RunOnce(ctx); err != nil || !processed {
-			t.Fatalf("process command replay: processed=%t err=%v", processed, err)
-		}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process first command: processed=%t err=%v", processed, err)
+	}
+	heldFirst, err := store.GetEntitlementGrantJob(ctx, "lark:wallet-topup:instance-shared")
+	if err != nil {
+		t.Fatalf("get first held grant job: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process command replay: processed=%t err=%v", processed, err)
+	}
+	heldReplay, err := store.GetEntitlementGrantJob(ctx, "lark:wallet-topup:instance-shared")
+	if err != nil {
+		t.Fatalf("get replayed held grant job: %v", err)
+	}
+	if heldReplay.ID != heldFirst.ID || !bytes.Equal(heldReplay.Nonce, heldFirst.Nonce) ||
+		!bytes.Equal(heldReplay.Ciphertext, heldFirst.Ciphertext) {
+		t.Fatalf("replay replaced first held job: first=%+v replay=%+v", heldFirst, heldReplay)
 	}
 	first, err := store.GetEntitlementCommandShadow(ctx, "lark:v2:evt-first")
 	if err != nil {

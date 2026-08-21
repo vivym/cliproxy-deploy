@@ -84,28 +84,29 @@ type Job struct {
 }
 
 type Decision struct {
-	EventKey           string
-	ApprovalCode       string
-	InstanceCode       string
-	EventStatus        string
-	AuthorityStatus    string
-	Outcome            DecisionOutcome
-	PolicyVersion      string
-	ApprovalKind       policy.ApprovalKind
-	SchemaFingerprint  string
-	BusinessCode       string
-	Locale             string
-	CatalogSHA256      string
-	QuotaDelta         int64
-	MonthlyQuota       int64
-	LevelRank          int
-	FailureReason      string
-	OpenIDHash         string
-	FormSHA256         string
-	StartTime          string
-	Reverted           bool
-	CreatedAt          time.Time
-	EntitlementCommand *EntitlementCommandShadow
+	EventKey            string
+	ApprovalCode        string
+	InstanceCode        string
+	EventStatus         string
+	AuthorityStatus     string
+	Outcome             DecisionOutcome
+	PolicyVersion       string
+	ApprovalKind        policy.ApprovalKind
+	SchemaFingerprint   string
+	BusinessCode        string
+	Locale              string
+	CatalogSHA256       string
+	QuotaDelta          int64
+	MonthlyQuota        int64
+	LevelRank           int
+	FailureReason       string
+	OpenIDHash          string
+	FormSHA256          string
+	StartTime           string
+	Reverted            bool
+	CreatedAt           time.Time
+	EntitlementCommand  *EntitlementCommandShadow
+	EntitlementGrantJob *EntitlementGrantJobDraft
 }
 
 func Open(path string) (*Store, error) {
@@ -214,6 +215,23 @@ CREATE TABLE IF NOT EXISTS entitlement_command_shadows (
 );
 CREATE INDEX IF NOT EXISTS idx_entitlement_command_shadows_external_id
     ON entitlement_command_shadows(external_id);
+CREATE TABLE IF NOT EXISTS entitlement_grant_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    external_id TEXT NOT NULL UNIQUE,
+    request_sha256 TEXT NOT NULL,
+    subject_sha256 TEXT NOT NULL,
+    key_id TEXT NOT NULL,
+    nonce BLOB NOT NULL,
+    ciphertext BLOB NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT NOT NULL,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entitlement_grant_jobs_ready
+    ON entitlement_grant_jobs(status, next_attempt_at, id);
 CREATE TABLE IF NOT EXISTS policy_versions (
     policy_version TEXT PRIMARY KEY,
     catalog_sha256 TEXT NOT NULL UNIQUE,
@@ -606,6 +624,21 @@ INSERT INTO approval_instances (
 			createdAt,
 		)
 		if err != nil {
+			return err
+		}
+	}
+	if decision.EntitlementGrantJob != nil {
+		if decision.EntitlementCommand == nil {
+			return errors.New("entitlement grant job requires command shadow")
+		}
+		if _, err := insertEntitlementGrantJob(
+			ctx,
+			tx,
+			decision.Outcome,
+			*decision.EntitlementCommand,
+			*decision.EntitlementGrantJob,
+			createdAt,
+		); err != nil {
 			return err
 		}
 	}

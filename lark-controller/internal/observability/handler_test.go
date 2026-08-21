@@ -87,12 +87,13 @@ func TestReadinessFailsForStalledReadyQueueOrUnavailableStore(t *testing.T) {
 
 func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 	handler, err := observability.NewHandler("shadow", snapshotStore{snapshot: inbox.OperationalSnapshot{
-		WebhookReceived:   map[string]int64{"approval.instance.status_changed_v4": 3},
-		WebhookDuplicates: map[string]int64{"approval.instance.status_changed_v4": 1},
-		InboxStates:       map[inbox.ProcessingState]int64{inbox.ProcessingStatePending: 2},
-		JobStates:         map[string]int64{"retry_wait": 1, "succeeded": 4},
-		ApprovalFetches:   map[string]int64{"success": 4, "retryable_error": 2},
-		NewAPIGrants:      map[string]int64{"shadow_planned": 3, "shadow_replayed": 1, "unexpected": 2},
+		WebhookReceived:           map[string]int64{"approval.instance.status_changed_v4": 3},
+		WebhookDuplicates:         map[string]int64{"approval.instance.status_changed_v4": 1},
+		InboxStates:               map[inbox.ProcessingState]int64{inbox.ProcessingStatePending: 2},
+		JobStates:                 map[string]int64{"retry_wait": 1, "succeeded": 4},
+		EntitlementGrantJobStates: map[string]int64{"held_shadow": 4, "unexpected": 2},
+		ApprovalFetches:           map[string]int64{"success": 4, "retryable_error": 2},
+		NewAPIGrants:              map[string]int64{"shadow_planned": 3, "shadow_replayed": 1, "unexpected": 2},
 		DeadLetters: map[string]int64{
 			"retry_exhausted_rate_limited": 1,
 			"external_id_payload_mismatch": 1,
@@ -118,6 +119,8 @@ func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 		`lark_webhook_duplicate_total{event_type="approval.instance.status_changed_v4"} 1`,
 		`lark_controller_inbox_events{state="pending"} 2`,
 		`lark_controller_jobs{state="retry_wait"} 1`,
+		`lark_new_api_grant_jobs{state="held_shadow"} 4`,
+		`lark_new_api_grant_jobs{state="other"} 2`,
 		`lark_approval_fetch_total{result="retryable_error"} 2`,
 		`lark_new_api_grant_total{result="shadow_planned"} 3`,
 		`lark_new_api_grant_total{result="shadow_replayed"} 1`,

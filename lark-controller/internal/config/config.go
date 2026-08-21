@@ -19,6 +19,7 @@ type Config struct {
 	ActivePolicyVersion   string
 	PolicyBundleDirectory string
 	ApprovalBindingsFile  string
+	GrantPayloadKeyFile   string
 	WorkerPoll            time.Duration
 	ReadinessMaxQueueAge  time.Duration
 }
@@ -40,6 +41,7 @@ func Load(getenv func(string) string) (Config, error) {
 		ActivePolicyVersion:   getenv("LARK_ACTIVE_POLICY_VERSION"),
 		PolicyBundleDirectory: getenv("LARK_POLICY_BUNDLE_DIR"),
 		ApprovalBindingsFile:  getenv("LARK_APPROVAL_BINDINGS_FILE"),
+		GrantPayloadKeyFile:   getenv("LARK_GRANT_PAYLOAD_KEY_FILE"),
 		WorkerPoll:            time.Second,
 		ReadinessMaxQueueAge:  15 * time.Minute,
 	}
@@ -75,6 +77,7 @@ func Load(getenv func(string) string) (Config, error) {
 		"LARK_ACTIVE_POLICY_VERSION":  loaded.ActivePolicyVersion,
 		"LARK_POLICY_BUNDLE_DIR":      loaded.PolicyBundleDirectory,
 		"LARK_APPROVAL_BINDINGS_FILE": loaded.ApprovalBindingsFile,
+		"LARK_GRANT_PAYLOAD_KEY_FILE": loaded.GrantPayloadKeyFile,
 	}
 	for name, value := range required {
 		if value == "" {

@@ -8,16 +8,17 @@ import (
 )
 
 type OperationalSnapshot struct {
-	WebhookReceived          map[string]int64
-	WebhookDuplicates        map[string]int64
-	InboxStates              map[ProcessingState]int64
-	JobStates                map[string]int64
-	ApprovalFetches          map[string]int64
-	NewAPIGrants             map[string]int64
-	DeadLetters              map[string]int64
-	PolicyValidationFailures int64
-	OldestActiveJobAge       time.Duration
-	OldestReadyJobAge        time.Duration
+	WebhookReceived           map[string]int64
+	WebhookDuplicates         map[string]int64
+	InboxStates               map[ProcessingState]int64
+	JobStates                 map[string]int64
+	EntitlementGrantJobStates map[string]int64
+	ApprovalFetches           map[string]int64
+	NewAPIGrants              map[string]int64
+	DeadLetters               map[string]int64
+	PolicyValidationFailures  int64
+	OldestActiveJobAge        time.Duration
+	OldestReadyJobAge         time.Duration
 }
 
 func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, error) {
@@ -27,13 +28,14 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, e
 	}
 	defer func() { _ = tx.Rollback() }()
 	snapshot := OperationalSnapshot{
-		WebhookReceived:   make(map[string]int64),
-		WebhookDuplicates: make(map[string]int64),
-		InboxStates:       make(map[ProcessingState]int64),
-		JobStates:         make(map[string]int64),
-		ApprovalFetches:   make(map[string]int64),
-		NewAPIGrants:      make(map[string]int64),
-		DeadLetters:       make(map[string]int64),
+		WebhookReceived:           make(map[string]int64),
+		WebhookDuplicates:         make(map[string]int64),
+		InboxStates:               make(map[ProcessingState]int64),
+		JobStates:                 make(map[string]int64),
+		EntitlementGrantJobStates: make(map[string]int64),
+		ApprovalFetches:           make(map[string]int64),
+		NewAPIGrants:              make(map[string]int64),
+		DeadLetters:               make(map[string]int64),
 	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT event_type, COUNT(*) + COALESCE(SUM(duplicate_count), 0), COALESCE(SUM(duplicate_count), 0)
@@ -88,6 +90,24 @@ SELECT processing_state, COUNT(*) FROM lark_event_inbox GROUP BY processing_stat
 		snapshot.JobStates[state] = count
 	}
 	if err := closeRows(rows, "job state metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT status, COUNT(*) FROM entitlement_grant_jobs GROUP BY status`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query entitlement grant job state metrics: %w", err)
+	}
+	for rows.Next() {
+		var state string
+		var count int64
+		if err := rows.Scan(&state, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan entitlement grant job state metrics: %w", err)
+		}
+		snapshot.EntitlementGrantJobStates[state] = count
+	}
+	if err := closeRows(rows, "entitlement grant job state metrics"); err != nil {
 		return OperationalSnapshot{}, err
 	}
 

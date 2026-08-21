@@ -84,17 +84,25 @@ func PlanApprovalGrant(input ApprovalGrantInput) (EntitlementGrantRequest, Shado
 	default:
 		return EntitlementGrantRequest{}, ShadowReceipt{}, errors.New("unsupported approval grant kind")
 	}
-	if err := validateGrantRequest(request); err != nil {
-		return EntitlementGrantRequest{}, ShadowReceipt{}, err
-	}
-	payload, err := json.Marshal(request)
+	_, requestSHA256, err := canonicalizeGrantRequest(request)
 	if err != nil {
 		return EntitlementGrantRequest{}, ShadowReceipt{}, err
 	}
 	receipt.ExternalID = request.ExternalID
-	receipt.RequestSHA256 = sha256Hex(payload)
+	receipt.RequestSHA256 = requestSHA256
 	receipt.GrantType = request.Grant.Type
 	return request, receipt, nil
+}
+
+func canonicalizeGrantRequest(request EntitlementGrantRequest) ([]byte, string, error) {
+	if err := validateGrantRequest(request); err != nil {
+		return nil, "", err
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return nil, "", err
+	}
+	return payload, sha256Hex(payload), nil
 }
 
 func sha256Hex(value []byte) string {

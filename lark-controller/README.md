@@ -15,18 +15,20 @@ The current tracer slice is deliberately shadow-only. It:
   from operator-mounted strict JSON files;
 - resolves `radioV2` values by exact display text and persists only sanitized
   shadow evidence;
-- plans the exact New API entitlement-grant contract and atomically stores only
-  its external ID, policy fields, business values, and request/subject hashes;
+- plans the exact New API entitlement-grant contract and atomically stores its
+  sanitized receipt plus an AES-256-GCM sealed canonical request in a durable
+  `held_shadow` grant job;
 - records same-payload external-ID reuse as `shadow_replayed` and dead-letters
   payload mismatches without replacing the first shadow ledger entry;
 - classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
   six-step jittered retry schedule before durable dead-lettering;
 - recovers interrupted jobs with their attempt counters after restart;
 - exposes liveness, readiness, and bounded-label Prometheus metrics for inbox,
-  jobs, approval fetches, New API shadow grants, policy failures, dead letters,
-  and queue age;
-- stores only normalized event data, requester/form hashes, and shadow
-  decisions; and
+  jobs, approval fetches, New API shadow grants, held grant jobs, policy
+  failures, dead letters, and queue age;
+- keeps queryable columns limited to normalized event data, requester/form
+  hashes, and shadow decisions; the complete grant request exists only as
+  authenticated ciphertext; and
 - does not configure, construct, or call the included New API HTTP client.
 
 Required environment variables:
@@ -42,7 +44,17 @@ LARK_TENANT_KEY=...
 LARK_ACTIVE_POLICY_VERSION=...
 LARK_POLICY_BUNDLE_DIR=/policies
 LARK_APPROVAL_BINDINGS_FILE=/policies/approval-bindings.json
+LARK_GRANT_PAYLOAD_KEY_FILE=/run/secrets/lark_grant_payload_key
 ```
+
+The grant payload key file must contain exactly one 64-character lowercase hex
+line, with an optional final line ending. Generate it with
+`openssl rand -hex 32 > /secure/path/lark_grant_payload_key` and keep the file
+out of Git. This slice supports one key at a time: do not replace or delete the
+key while any held job may need to be opened. Keyring-based rotation belongs
+to the future active claimant slice. Startup compares this key's fingerprint
+with every existing held job and fails closed before starting the worker if any
+record was sealed with a different key.
 
 Optional variables:
 
@@ -80,7 +92,8 @@ idempotent. The principal response intentionally contains no New API user ID,
 wallet balance, token, or subscription details. This module is contract-tested
 with local HTTP servers but is not wired into `cmd/lark-controller`; shadow
 mode has no New API URL or credential setting and performs no New API network
-request.
+request. `held_shadow` jobs are intentionally excluded from the event-worker
+claim path and from ready-queue age.
 
 The policy directory has no built-in defaults. Operators must mount one or
 more files named `*.policy.json`; every file uses `format_version: 1` and

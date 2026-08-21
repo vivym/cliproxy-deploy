@@ -3,6 +3,7 @@ package inbox_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -129,9 +130,14 @@ func TestOperationalSnapshotReportsNewAPIGrantShadows(t *testing.T) {
 		AuthorityStatus: "APPROVED", Outcome: inbox.DecisionOutcomeShadowAuthorityVerified,
 		EntitlementCommand: &inbox.EntitlementCommandShadow{
 			ExternalID:    "lark:wallet-topup:instance-evt-command",
-			RequestSHA256: "request-sha", SubjectSHA256: "subject-sha",
+			RequestSHA256: strings.Repeat("a", 64), SubjectSHA256: strings.Repeat("b", 64),
 			Source: "lark_approval", PolicyVersion: "employee-v1", CatalogSHA256: "catalog-sha",
 			GrantType: "wallet_quota", BusinessCode: "topup_5", QuotaDelta: 2_500_000,
+		},
+		EntitlementGrantJob: &inbox.EntitlementGrantJobDraft{
+			ExternalID:    "lark:wallet-topup:instance-evt-command",
+			RequestSHA256: strings.Repeat("a", 64), SubjectSHA256: strings.Repeat("b", 64),
+			KeyID: strings.Repeat("c", 64), Nonce: make([]byte, 12), Ciphertext: make([]byte, 17),
 		},
 	}); err != nil {
 		t.Fatalf("complete command shadow: %v", err)
@@ -142,6 +148,14 @@ func TestOperationalSnapshotReportsNewAPIGrantShadows(t *testing.T) {
 	}
 	if snapshot.NewAPIGrants["shadow_planned"] != 1 {
 		t.Fatalf("unexpected New API grant counters: %v", snapshot.NewAPIGrants)
+	}
+	if snapshot.EntitlementGrantJobStates["held_shadow"] != 1 ||
+		snapshot.OldestActiveJobAge != 0 || snapshot.OldestReadyJobAge != 0 {
+		t.Fatalf("unexpected held grant job state: states=%v active=%s ready=%s",
+			snapshot.EntitlementGrantJobStates,
+			snapshot.OldestActiveJobAge,
+			snapshot.OldestReadyJobAge,
+		)
 	}
 }
 

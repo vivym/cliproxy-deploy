@@ -14,6 +14,7 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/config"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/larkapi"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/observability"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
@@ -74,7 +75,30 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	processor, err := worker.NewShadowProcessor(store, fetcher, policyCatalog, loaded.Locale)
+	grantPayloadKey, err := newapi.LoadGrantPayloadKeyFile(loaded.GrantPayloadKeyFile)
+	if err != nil {
+		return err
+	}
+	grantSealer, err := newapi.NewGrantSealer(grantPayloadKey)
+	for index := range grantPayloadKey {
+		grantPayloadKey[index] = 0
+	}
+	if err != nil {
+		return err
+	}
+	if err := store.ValidateEntitlementGrantJobKeyID(
+		context.Background(),
+		grantSealer.KeyID(),
+	); err != nil {
+		return err
+	}
+	processor, err := worker.NewShadowProcessorWithGrantSealer(
+		store,
+		fetcher,
+		policyCatalog,
+		loaded.Locale,
+		grantSealer,
+	)
 	if err != nil {
 		return err
 	}

@@ -1047,6 +1047,8 @@ New API fork 同时给 `subscription_plans` 增加 `managed_only boolean NOT NUL
 | `approval_policy_bindings` | approval code、locale、schema fingerprint 和 definition manifest |
 | `lark_event_inbox` | webhook 去重、规范化 event、处理状态 |
 | `approval_instances` | 回查结果摘要、schema hash、处理决策 |
+| `entitlement_command_shadows` | 脱敏 grant receipt、external ID/request hash 重放账本 |
+| `entitlement_grant_jobs` | AES-256-GCM 密封的 canonical request；当前保持 `held_shadow` |
 | `employment_checks` | 在职状态证据、连续缺失计数和 disable external ID |
 | `jobs` | retry schedule、attempt、last_error、dead-letter |
 | `controller_audit` | Controller 决策轨迹 |
@@ -1242,6 +1244,7 @@ LARK_TENANT_KEY_ALLOWLIST
 LARK_ACTIVE_POLICY_VERSION
 LARK_POLICY_BUNDLE_DIR
 LARK_APPROVAL_BINDINGS_FILE
+LARK_GRANT_PAYLOAD_KEY_FILE
 LARK_INTEGRATION_SECRET_FILE
 NEW_API_INTERNAL_BASE_URL
 NEW_API_BRIDGE_CLIENT_ID
@@ -1532,9 +1535,13 @@ MySQL/PostgreSQL migration 测试仍需要外部 DSN，仓库全量套件仍保�
 authoritative Approval v4 fetch、versioned policy/manifest 解析、固定 locale 与 exact
 display-text mapping、有限重试/dead-letter/reversal pending、重启恢复、SQLite audit
 snapshot，以及 `/healthz`、`/readyz`、`/metrics` 已实现。Controller 现在还会生成精确的
-New API grant canonical request，并在同一 SQLite 事务只保存 external ID、policy/business
-字段、request hash 和 subject hash；同 payload 的 external ID 重放记为 `shadow_replayed`，
-不同 payload 进入 `external_id_payload_mismatch` dead-letter。Controller compatibility receipt
+New API grant canonical request，并在同一 SQLite 事务保存 sanitized shadow receipt 与
+AES-256-GCM 密封的 canonical request；密封记录使用 `held_shadow` 状态，现有 claimant
+不会领取，也不计入 ready-queue age。同 payload 的 external ID 重放复用首条密封记录并记为
+`shadow_replayed`，不同 payload 进入 `external_id_payload_mismatch` dead-letter。密钥通过
+`LARK_GRANT_PAYLOAD_KEY_FILE` 读取一行 64 字符小写 hex，当前只支持单 key，active claimant
+切片必须先补 keyring/rotation 方案；启动时若已有 held job 的 key ID 与当前 key 不同，必须在
+worker 启动前 fail closed，防止形成无法由单 key 解密的混合账本。Controller compatibility receipt
 `166bbeb` 与 New API Gin router receipt `f2ef0d95` 已共同固定 nested error envelope、subscription
 result 和分页 active Lark principal wire contract；`cmd/lark-controller` 仍不读取 New API
 URL/credential、不构造 client，也不发送请求。principals contract 不返回 New API user ID、

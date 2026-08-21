@@ -63,6 +63,7 @@ type ShadowProcessor struct {
 	store       *inbox.Store
 	fetcher     ApprovalFetcher
 	resolver    ApprovalResolver
+	grantSealer *newapi.GrantSealer
 	locale      string
 	retryPolicy RetryPolicy
 }
@@ -136,6 +137,25 @@ func NewShadowProcessor(
 			return nil, err
 		}
 	}
+	return processor, nil
+}
+
+func NewShadowProcessorWithGrantSealer(
+	store *inbox.Store,
+	fetcher ApprovalFetcher,
+	resolver ApprovalResolver,
+	locale string,
+	grantSealer *newapi.GrantSealer,
+	options ...ProcessorOption,
+) (*ShadowProcessor, error) {
+	if grantSealer == nil {
+		return nil, errors.New("grant payload sealer is required")
+	}
+	processor, err := NewShadowProcessor(store, fetcher, resolver, locale, options...)
+	if err != nil {
+		return nil, err
+	}
+	processor.grantSealer = grantSealer
 	return processor, nil
 }
 
@@ -222,7 +242,7 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 			decision.QuotaDelta = resolved.QuotaDelta
 			decision.MonthlyQuota = resolved.MonthlyQuota
 			decision.LevelRank = resolved.LevelRank
-			_, receipt, planErr := newapi.PlanApprovalGrant(newapi.ApprovalGrantInput{
+			request, receipt, planErr := newapi.PlanApprovalGrant(newapi.ApprovalGrantInput{
 				TenantKey: job.Event.TenantKey, OpenID: instance.OpenID,
 				PolicyVersion: resolved.PolicyVersion, ApprovalKind: string(resolved.ApprovalKind),
 				BusinessCode: resolved.BusinessCode, QuotaDelta: resolved.QuotaDelta,
@@ -235,12 +255,25 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 				decision.Outcome = inbox.DecisionOutcomeDeadLetterCommandPlanning
 				decision.FailureReason = "invalid_command_plan"
 			} else {
-				decision.EntitlementCommand = &inbox.EntitlementCommandShadow{
+				command := &inbox.EntitlementCommandShadow{
 					ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
 					SubjectSHA256: receipt.SubjectSHA256, Source: "lark_approval",
 					PolicyVersion: receipt.PolicyVersion, CatalogSHA256: receipt.CatalogSHA256,
 					GrantType: receipt.GrantType, BusinessCode: receipt.BusinessCode,
 					QuotaDelta: receipt.QuotaDelta, MonthlyQuota: receipt.MonthlyQuota,
+				}
+				if p.grantSealer == nil {
+					decision.EntitlementCommand = command
+				} else if sealed, sealErr := p.grantSealer.Seal(request); sealErr != nil {
+					decision.Outcome = inbox.DecisionOutcomeDeadLetterCommandPlanning
+					decision.FailureReason = "invalid_command_plan"
+				} else {
+					decision.EntitlementCommand = command
+					decision.EntitlementGrantJob = &inbox.EntitlementGrantJobDraft{
+						ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
+						SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,
+						Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+					}
 				}
 			}
 		}
@@ -250,6 +283,7 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 			decision.Outcome = inbox.DecisionOutcomeDeadLetterCommandPlanning
 			decision.FailureReason = "external_id_payload_mismatch"
 			decision.EntitlementCommand = nil
+			decision.EntitlementGrantJob = nil
 			if completeErr := p.store.CompleteDecision(ctx, job, decision); completeErr != nil {
 				return true, fmt.Errorf("dead-letter conflicting entitlement command: %w", completeErr)
 			}
