@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime 与 opaque OAuth credential store，OAuth HTTP bridge/在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、opaque OAuth credential store 与 Lark token/userinfo adapter，OAuth HTTP handlers/在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1564,8 +1564,14 @@ Controller compatibility receipt
 result 和分页 active Lark principal wire contract；active mode 现在读取专用 integration
 credential、构造 client/executor 并执行幂等 entitlement write，shadow mode 保持零 New API
 调用。principals contract 不返回 New API user ID、wallet、token 或 subscription 明细。
-OAuth authorize/callback/token/userinfo HTTP handlers、Lark token/userinfo exchange、登录后的基础
-订阅 job、就业状态 reconciliation、Compose 接入和生产验证仍未实现。
+Lark OAuth v3 adapter 已按 JSON contract 交换 authorization code，并立即以 user bearer token
+读取 userinfo；返回身份仅包含 `tenant_key:open_id` subject、确定性 username 和按 Unicode code
+point 截断至 20 字符的 display name。token/userinfo 响应均限制为 64 KiB，错误只暴露固定 reason，
+不返回、不持久化也不记录 access/refresh token 或上游错误描述。adapter 只接受已登记的固定
+Controller callback 和 HTTPS upstream origin（测试可使用 loopback HTTP），并拒绝所有 redirect，
+避免 App Secret、authorization code 或 bearer token 被重放到其他 endpoint。OAuth
+authorize/callback/token/userinfo HTTP handlers、登录后的基础订阅 job、就业状态 reconciliation、
+Compose 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的

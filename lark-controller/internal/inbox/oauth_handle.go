@@ -39,6 +39,22 @@ type OAuthIdentity struct {
 	Name     string
 }
 
+func NewOAuthIdentity(subject, name string) (OAuthIdentity, error) {
+	username, err := OAuthUsername(subject)
+	if err != nil || name == "" || !utf8.ValidString(name) || strings.ContainsAny(name, "\r\n") {
+		return OAuthIdentity{}, errors.New("valid Lark OAuth identity is required")
+	}
+	displayName := []rune(name)
+	if len(displayName) > maxOAuthDisplayNameRunes {
+		displayName = displayName[:maxOAuthDisplayNameRunes]
+	}
+	identity := OAuthIdentity{Subject: subject, Username: username, Name: string(displayName)}
+	if !validOAuthIdentity(identity) {
+		return OAuthIdentity{}, errors.New("valid Lark OAuth identity is required")
+	}
+	return identity, nil
+}
+
 func (s *Store) CreateOAuthAuthorizationState(
 	ctx context.Context,
 	state OAuthAuthorizationState,

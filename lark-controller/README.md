@@ -26,6 +26,16 @@ The controller supports a locally verified `shadow` mode and an explicit
 - persists 256-bit OAuth state, login-code, and access-handle credentials only
   by SHA-256 digest, with atomic single-use consumption and fixed five-minute
   or 60-second expiry windows;
+- exchanges Lark OAuth v3 authorization codes with the required JSON contract,
+  immediately reads userinfo with the user bearer token, and returns only the
+  normalized `tenant_key:open_id` identity, deterministic username, and a
+  20-code-point display name;
+- bounds both OAuth responses at 64 KiB and exposes only stable failure reasons;
+  it never returns, persists, or logs Lark access/refresh tokens or response
+  descriptions;
+- requires the registered Controller callback, permits only HTTPS upstream
+  origins (plus loopback HTTP for tests), and refuses redirects so credentials
+  cannot be replayed to another endpoint;
 - classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
   six-step jittered retry schedule before durable dead-lettering;
 - recovers interrupted jobs with their attempt counters after restart;
@@ -193,7 +203,8 @@ go build ./cmd/lark-controller
 
 This slice does not add the service to Docker Compose and must not be deployed.
 Active grant execution and the durable opaque OAuth credential store are
-implemented locally, but the OAuth HTTP bridge, Lark token/userinfo exchange,
-base-subscription dispatch, employment reconciliation, Compose wiring,
-operational runbooks, and production validation remain follow-up work. Do not
-enable active mode in production before those gates are complete.
+implemented locally, as is the outbound Lark token/userinfo adapter. The OAuth
+authorize/callback/token/userinfo HTTP handlers, base-subscription dispatch,
+employment reconciliation, Compose wiring, operational runbooks, and
+production validation remain follow-up work. Do not enable active mode in
+production before those gates are complete.

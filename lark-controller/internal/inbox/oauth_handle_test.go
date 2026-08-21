@@ -170,11 +170,22 @@ func TestOAuthIdentityUsesTenantOpenIDAndDeterministicUsername(t *testing.T) {
 	if username != "lark_te7ozrid4egv6gj" {
 		t.Fatalf("OAuth username = %q", username)
 	}
-	validIdentity := OAuthIdentity{
-		Subject: "tenant-test:ou_employee", Username: username, Name: "Employee",
+	validIdentity, err := NewOAuthIdentity("tenant-test:ou_employee", "Employee")
+	if err != nil {
+		t.Fatalf("normalize valid OAuth identity: %v", err)
 	}
 	if _, err := store.CreateOAuthLoginCode(ctx, validIdentity); err != nil {
 		t.Fatalf("create login code for valid identity: %v", err)
+	}
+	truncated, err := NewOAuthIdentity(
+		"tenant-test:ou_employee",
+		"一二三四五六七八九十一二三四五六七八九十末",
+	)
+	if err != nil || truncated.Name != "一二三四五六七八九十一二三四五六七八九十" {
+		t.Fatalf("normalized Unicode display name = %+v, error = %v", truncated, err)
+	}
+	if _, err := NewOAuthIdentity("tenant-test:ou_employee", "Employee\nInjected"); err == nil {
+		t.Fatal("OAuth identity constructor accepted a display name with a newline")
 	}
 
 	for name, identity := range map[string]OAuthIdentity{
