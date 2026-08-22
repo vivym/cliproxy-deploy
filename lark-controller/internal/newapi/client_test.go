@@ -275,8 +275,11 @@ func TestClientRejectsInvalidPrincipalDisableResult(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new client: %v", err)
 			}
-			if _, err := client.DisablePrincipal(context.Background(), request); err == nil {
-				t.Fatal("invalid principal disable result was accepted")
+			_, err = client.DisablePrincipal(context.Background(), request)
+			var requestError *newapi.RequestError
+			if !errors.As(err, &requestError) || requestError.Reason != "invalid_response" ||
+				requestError.Retryable {
+				t.Fatalf("error = %v, want terminal invalid_response", err)
 			}
 		})
 	}

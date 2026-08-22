@@ -217,14 +217,16 @@ func (c *Client) DisablePrincipal(
 	}
 	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return PrincipalDisableResponse{}, decodeAPIError(response)
+		return PrincipalDisableResponse{}, decodePrincipalDisableAPIError(response)
 	}
 	var result PrincipalDisableResponse
 	if err := decodeStrictJSON(response.Body, &result); err != nil {
 		return PrincipalDisableResponse{}, classifyResponseDecodeError(ctx, err)
 	}
 	if err := validatePrincipalDisableResponse(request, result); err != nil {
-		return PrincipalDisableResponse{}, err
+		return PrincipalDisableResponse{}, &RequestError{
+			Reason: "invalid_response", Retryable: false,
+		}
 	}
 	return result, nil
 }
@@ -339,46 +341,12 @@ func validatePrincipalDisableResponse(
 	if response.ExternalID != request.ExternalID {
 		return errors.New("New API principal disable response does not match request")
 	}
-	switch response.Status {
-	case "applied":
-		if response.Outcome != "disabled" || response.PrincipalVersion <= 0 ||
-			response.AuthVersion <= 0 {
-			return errors.New("New API principal disable response is incomplete")
-		}
-	case "noop":
-		switch response.Outcome {
-		case "already_disabled":
-			if response.PrincipalVersion <= 0 || response.AuthVersion != 0 {
-				return errors.New("New API principal disable response is incomplete")
-			}
-		case "principal_absent":
-			if response.PrincipalVersion != 0 || response.AuthVersion != 0 {
-				return errors.New("New API principal disable response is incomplete")
-			}
-		default:
-			return errors.New("New API principal disable response has invalid outcome")
-		}
-	case "replayed":
-		switch response.Outcome {
-		case "disabled":
-			if response.PrincipalVersion <= 0 || response.AuthVersion <= 0 {
-				return errors.New("New API principal disable response is incomplete")
-			}
-		case "already_disabled":
-			if response.PrincipalVersion <= 0 || response.AuthVersion != 0 {
-				return errors.New("New API principal disable response is incomplete")
-			}
-		case "principal_absent":
-			if response.PrincipalVersion != 0 || response.AuthVersion != 0 {
-				return errors.New("New API principal disable response is incomplete")
-			}
-		default:
-			return errors.New("New API principal disable response has invalid outcome")
-		}
-	default:
-		return errors.New("New API principal disable response has invalid status")
-	}
-	return nil
+	return ValidatePrincipalDisableResult(
+		response.Status,
+		response.Outcome,
+		response.PrincipalVersion,
+		response.AuthVersion,
+	)
 }
 
 func validIdentifier(value string, maxLength int) bool {
@@ -488,6 +456,18 @@ func decodeAPIError(response *http.Response) error {
 	}
 	retryable := response.StatusCode == http.StatusNotFound && code == "principal_not_ready"
 	return &APIError{StatusCode: response.StatusCode, Code: code, Retryable: retryable}
+}
+
+func decodePrincipalDisableAPIError(response *http.Response) error {
+	decoded := decodeAPIError(response)
+	if response.StatusCode == http.StatusRequestTimeout ||
+		response.StatusCode == http.StatusTooManyRequests ||
+		(response.StatusCode >= http.StatusInternalServerError && response.StatusCode < 600) {
+		return &APIError{
+			StatusCode: response.StatusCode, Code: "temporarily_unavailable", Retryable: true,
+		}
+	}
+	return decoded
 }
 
 func normalizeAPIErrorCode(code string) string {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/digest"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 )
 
 type PrincipalDisableJobStatus string
@@ -512,31 +513,12 @@ WHERE status NOT IN (?, ?)`,
 }
 
 func validPrincipalDisableReceipt(receipt PrincipalDisableReceipt) bool {
-	if receipt.ExternalID == "" {
-		return false
-	}
-	switch receipt.Status {
-	case "applied":
-		return receipt.Outcome == "disabled" && receipt.PrincipalVersion > 0 &&
-			receipt.AuthVersion > 0
-	case "noop":
-		switch receipt.Outcome {
-		case "already_disabled":
-			return receipt.PrincipalVersion > 0 && receipt.AuthVersion == 0
-		case "principal_absent":
-			return receipt.PrincipalVersion == 0 && receipt.AuthVersion == 0
-		}
-	case "replayed":
-		switch receipt.Outcome {
-		case "disabled":
-			return receipt.PrincipalVersion > 0 && receipt.AuthVersion > 0
-		case "already_disabled":
-			return receipt.PrincipalVersion > 0 && receipt.AuthVersion == 0
-		case "principal_absent":
-			return receipt.PrincipalVersion == 0 && receipt.AuthVersion == 0
-		}
-	}
-	return false
+	return receipt.ExternalID != "" && newapi.ValidatePrincipalDisableResult(
+		receipt.Status,
+		receipt.Outcome,
+		receipt.PrincipalVersion,
+		receipt.AuthVersion,
+	) == nil
 }
 
 func insertPrincipalDisableAudit(

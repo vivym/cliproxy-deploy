@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -108,6 +110,108 @@ func TestPrincipalDisableExecutorRetriesResponseLossWithoutReplacingRequest(t *t
 		job.LastError != "transport_error" || job.Attempts != 1 ||
 		job.NextAttemptAt.Before(job.UpdatedAt.Add(4*time.Second)) {
 		t.Fatalf("principal disable was not scheduled for stable replay: %+v", job)
+	}
+}
+
+func TestPrincipalDisableExecutorRetriesTransientHTTPStatuses(t *testing.T) {
+	for _, statusCode := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout,
+	} {
+		t.Run(http.StatusText(statusCode), func(t *testing.T) {
+			ctx := context.Background()
+			store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+			if err != nil {
+				t.Fatalf("new keyring: %v", err)
+			}
+			request := prepareHeldPrincipalDisableJob(t, ctx, store, keyring, "evt-transient-http")
+			if released, err := store.ReleaseHeldPrincipalDisableJobs(ctx); err != nil || released != 1 {
+				t.Fatalf("release held principal disable: released=%d err=%v", released, err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.WriteHeader(statusCode)
+				_, _ = response.Write([]byte("unstructured upstream failure"))
+			}))
+			defer server.Close()
+			client, err := newapi.NewClient(newapi.Config{
+				BaseURL:           server.URL,
+				IntegrationSecret: "worker-test-not-a-real-integration-secret",
+				HTTPClient:        server.Client(),
+			})
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			executor, err := worker.NewPrincipalDisableExecutor(store, client, keyring)
+			if err != nil {
+				t.Fatalf("new principal disable executor: %v", err)
+			}
+			if processed, err := executor.RunOnce(ctx); err != nil || !processed {
+				t.Fatalf("run principal disable: processed=%t err=%v", processed, err)
+			}
+			job, err := store.GetPrincipalDisableJob(ctx, request.ExternalID)
+			if err != nil {
+				t.Fatalf("get retrying principal disable: %v", err)
+			}
+			if job.Status != inbox.PrincipalDisableJobStatusRetryWait ||
+				job.LastError != "temporarily_unavailable" || job.Attempts != 1 {
+				t.Fatalf("HTTP %d principal disable was not retried: %+v", statusCode, job)
+			}
+		})
+	}
+}
+
+func TestPrincipalDisableExecutorDeadLettersInvalidSuccessResponse(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new keyring: %v", err)
+	}
+	request := prepareHeldPrincipalDisableJob(t, ctx, store, keyring, "evt-invalid-success")
+	if released, err := store.ReleaseHeldPrincipalDisableJobs(ctx); err != nil || released != 1 {
+		t.Fatalf("release held principal disable: released=%d err=%v", released, err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{"status":"noop","external_id":"` +
+			request.ExternalID + `","outcome":"disabled","principal_version":4,"auth_version":7}`))
+	}))
+	defer server.Close()
+	client, err := newapi.NewClient(newapi.Config{
+		BaseURL:           server.URL,
+		IntegrationSecret: "worker-test-not-a-real-integration-secret",
+		HTTPClient:        server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	executor, err := worker.NewPrincipalDisableExecutor(store, client, keyring)
+	if err != nil {
+		t.Fatalf("new principal disable executor: %v", err)
+	}
+	if processed, err := executor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("run principal disable: processed=%t err=%v", processed, err)
+	}
+	job, err := store.GetPrincipalDisableJob(ctx, request.ExternalID)
+	if err != nil {
+		t.Fatalf("get dead-lettered principal disable: %v", err)
+	}
+	if job.Status != inbox.PrincipalDisableJobStatusDeadLetter ||
+		job.LastError != "invalid_response" || job.Attempts != 1 {
+		t.Fatalf("invalid success response was not classified stably: %+v", job)
 	}
 }
 

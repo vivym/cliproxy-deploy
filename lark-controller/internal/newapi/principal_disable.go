@@ -52,3 +52,35 @@ func canonicalizePrincipalDisableRequest(
 	}
 	return payload, sha256Hex(payload), nil
 }
+
+func ValidatePrincipalDisableResult(
+	status string,
+	outcome string,
+	principalVersion int64,
+	authVersion int64,
+) error {
+	switch status {
+	case "applied":
+		if outcome == "disabled" && principalVersion > 0 && authVersion > 0 {
+			return nil
+		}
+	case "noop":
+		if outcome == "already_disabled" && principalVersion > 0 && authVersion == 0 {
+			return nil
+		}
+		if outcome == "principal_absent" && principalVersion == 0 && authVersion == 0 {
+			return nil
+		}
+	case "replayed":
+		if outcome == "disabled" && principalVersion > 0 && authVersion > 0 {
+			return nil
+		}
+		if outcome == "already_disabled" && principalVersion > 0 && authVersion == 0 {
+			return nil
+		}
+		if outcome == "principal_absent" && principalVersion == 0 && authVersion == 0 {
+			return nil
+		}
+	}
+	return errors.New("invalid New API principal disable result")
+}
