@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -99,6 +100,74 @@ func TestDuplicateEventIDRejectsDifferentPayload(t *testing.T) {
 	}
 }
 
+func TestContactUserDeletedEventCreatesHeldSealedDisableJob(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "controller.sqlite"))
+	handler := newEncryptedHandler(t, store)
+	body, headers := encryptedV2Request(t, map[string]any{
+		"schema": "2.0",
+		"header": map[string]any{
+			"event_id": "evt-resigned-1", "event_type": "contact.user.deleted_v3",
+			"app_id": "cli_test", "tenant_key": "tenant-test", "token": "verification-token",
+		},
+		"event": map[string]any{
+			"object": map[string]any{"open_id": "ou-resigned", "name": "must-not-persist"},
+		},
+	})
+	response := postRaw(t, handler, body, headers)
+	if response.Code != http.StatusOK {
+		t.Fatalf("contact event status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	firstJob, err := store.GetPrincipalDisableJob(context.Background(), "lark:disable:evt-resigned-1")
+	if err != nil {
+		t.Fatalf("get first principal disable job: %v", err)
+	}
+	duplicate := postRaw(t, handler, body, headers)
+	if duplicate.Code != http.StatusOK {
+		t.Fatalf("duplicate contact event status = %d, want %d; body=%s", duplicate.Code, http.StatusOK, duplicate.Body.String())
+	}
+	recorded, err := store.Get(context.Background(), "lark:v2:evt-resigned-1")
+	if err != nil {
+		t.Fatalf("get recorded contact event: %v", err)
+	}
+	if recorded.EventType != "contact.user.deleted_v3" ||
+		strings.Contains(recorded.PayloadJSON, "ou-resigned") ||
+		strings.Contains(recorded.PayloadJSON, "must-not-persist") || recorded.DuplicateCount != 1 {
+		t.Fatalf("contact event retained plaintext identity: %+v", recorded)
+	}
+	job, err := store.GetPrincipalDisableJob(context.Background(), "lark:disable:evt-resigned-1")
+	if err != nil {
+		t.Fatalf("get principal disable job: %v", err)
+	}
+	if job.Status != inbox.PrincipalDisableJobStatusHeldShadow || job.SubjectSHA256 == "" ||
+		len(job.Nonce) != 12 || len(job.Ciphertext) == 0 {
+		t.Fatalf("incomplete held principal disable job: %+v", job)
+	}
+	if !bytes.Equal(job.Nonce, firstJob.Nonce) || !bytes.Equal(job.Ciphertext, firstJob.Ciphertext) ||
+		job.KeyID != firstJob.KeyID || job.RequestSHA256 != firstJob.RequestSHA256 {
+		t.Fatal("duplicate contact event replaced the first sealed disable request")
+	}
+}
+
+func TestContactUserDeletedEventRequiresOpenID(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "controller.sqlite"))
+	handler := newEncryptedHandler(t, store)
+	body, headers := encryptedV2Request(t, map[string]any{
+		"schema": "2.0",
+		"header": map[string]any{
+			"event_id": "evt-resigned-missing-id", "event_type": "contact.user.deleted_v3",
+			"app_id": "cli_test", "tenant_key": "tenant-test", "token": "verification-token",
+		},
+		"event": map[string]any{"object": map[string]any{"name": "ignored"}},
+	})
+	response := postRaw(t, handler, body, headers)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_event") {
+		t.Fatalf("missing open_id response: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if _, err := store.Get(context.Background(), "lark:v2:evt-resigned-missing-id"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("invalid contact event was persisted: %v", err)
+	}
+}
+
 func TestInboxContentionReturnsBeforeLarkAcknowledgementDeadline(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")
 	store := openStore(t, databasePath)
@@ -121,10 +190,11 @@ func TestInboxContentionReturnsBeforeLarkAcknowledgementDeadline(t *testing.T) {
 	t.Cleanup(func() { _, _ = lockConnection.ExecContext(context.Background(), "ROLLBACK") })
 
 	handler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: "verification-token",
-		AppID:             "cli_test",
-		TenantKey:         "tenant-test",
-		InboxTimeout:      200 * time.Millisecond,
+		VerificationToken:      "verification-token",
+		AppID:                  "cli_test",
+		TenantKey:              "tenant-test",
+		InboxTimeout:           200 * time.Millisecond,
+		PrincipalDisableSealer: testPrincipalDisableSealer(t),
 	}, store)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -169,10 +239,11 @@ func openStore(t *testing.T, path string) *inbox.Store {
 func newEncryptedHandler(t *testing.T, recorder webhook.Recorder) http.Handler {
 	t.Helper()
 	handler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: "verification-token",
-		EncryptKey:        "event-encryption-key",
-		AppID:             "cli_test",
-		TenantKey:         "tenant-test",
+		VerificationToken:      "verification-token",
+		EncryptKey:             "event-encryption-key",
+		AppID:                  "cli_test",
+		TenantKey:              "tenant-test",
+		PrincipalDisableSealer: testPrincipalDisableSealer(t),
 	}, recorder)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)

@@ -88,6 +88,14 @@ func (h *Handler) metrics(response http.ResponseWriter, request *http.Request) {
 		boundedCounts(snapshot.EntitlementGrantRetries, allowedEntitlementGrantFailureReasons))
 	writeCounterMap(&output, "entitlement_dead_letter_total", "reason",
 		boundedCounts(snapshot.EntitlementGrantDeadLetters, allowedEntitlementGrantFailureReasons))
+	writeGaugeMap(&output, "lark_principal_disable_jobs", "state",
+		boundedCounts(snapshot.PrincipalDisableJobStates, allowedPrincipalDisableJobStates))
+	writeCounterMap(&output, "principal_disable_total", "result",
+		boundedCounts(snapshot.PrincipalDisableResults, allowedPrincipalDisableResults))
+	writeCounterMap(&output, "principal_disable_retry_total", "reason",
+		boundedCounts(snapshot.PrincipalDisableRetries, allowedPrincipalDisableFailureReasons))
+	writeCounterMap(&output, "principal_disable_dead_letter_total", "reason",
+		boundedCounts(snapshot.PrincipalDisableDeadLetters, allowedPrincipalDisableFailureReasons))
 	writeCounterMap(&output, "lark_approval_fetch_total", "result",
 		boundedCounts(snapshot.ApprovalFetches, allowedFetchResults))
 	writeCounterMap(&output, "lark_new_api_grant_total", "result",
@@ -222,18 +230,31 @@ func entitlementGrantFailureReasonLabels() map[string]struct{} {
 	return result
 }
 
+func principalDisableFailureReasonLabels() map[string]struct{} {
+	reasons := inbox.PrincipalDisableFailureReasons()
+	result := make(map[string]struct{}, len(reasons))
+	for _, reason := range reasons {
+		result[string(reason)] = struct{}{}
+	}
+	return result
+}
+
 var (
 	allowedEventTypes = labels(
 		"approval.instance.status_changed_v4",
 		"approval.task.status_changed_v4",
 		"approval_instance",
+		"contact.user.deleted_v3",
 	)
-	allowedInboxStates                    = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter")
+	allowedInboxStates                    = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter", "principal_disabled")
 	allowedJobStates                      = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "dead_letter")
 	allowedEntitlementGrantJobStates      = labels("held_shadow", "pending", "processing", "retry_wait", "succeeded", "dead_letter")
 	allowedEntitlementGrantTypes          = labels("wallet_quota", "subscription_level")
 	allowedEntitlementGrantStatuses       = labels("applied", "replayed", "noop", "ignored_stale")
 	allowedEntitlementGrantFailureReasons = entitlementGrantFailureReasonLabels()
+	allowedPrincipalDisableJobStates      = labels("held_shadow", "pending", "processing", "retry_wait", "succeeded", "dead_letter")
+	allowedPrincipalDisableResults        = labels("applied", "replayed", "noop")
+	allowedPrincipalDisableFailureReasons = principalDisableFailureReasonLabels()
 	allowedFetchResults                   = labels("success", "retryable_error", "terminal_error")
 	allowedNewAPIGrantResults             = labels(
 		"shadow_planned",

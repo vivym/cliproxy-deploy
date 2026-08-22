@@ -101,10 +101,11 @@ func run() error {
 		return err
 	}
 	eventHandler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: loaded.VerificationToken,
-		EncryptKey:        loaded.EventEncryptKey,
-		AppID:             loaded.AppID,
-		TenantKey:         loaded.TenantKey,
+		VerificationToken:      loaded.VerificationToken,
+		EncryptKey:             loaded.EventEncryptKey,
+		AppID:                  loaded.AppID,
+		TenantKey:              loaded.TenantKey,
+		PrincipalDisableSealer: grantKeyring,
 	}, store)
 	if err != nil {
 		return err
@@ -135,12 +136,25 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	principalDisableRuntime, err := activatePrincipalDisableRuntime(
+		context.Background(),
+		loaded.Mode,
+		store,
+		grantClient,
+		grantKeyring,
+	)
+	if err != nil {
+		return err
+	}
 
 	rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go runWorker(rootContext, "lark event", processor, loaded.WorkerPoll)
 	if grantRuntime != nil {
 		go runWorker(rootContext, "New API grant", grantRuntime, loaded.WorkerPoll)
+	}
+	if principalDisableRuntime != nil {
+		go runWorker(rootContext, "New API principal disable", principalDisableRuntime, loaded.WorkerPoll)
 	}
 
 	serveResult := make(chan error, 1)
@@ -201,7 +215,12 @@ func prepareOAuthBridge(
 	}, store, exchanger, grantSealer)
 }
 
-func prepareGrantClient(loaded config.Config) (worker.GrantClient, error) {
+type integrationClient interface {
+	worker.GrantClient
+	worker.PrincipalDisableClient
+}
+
+func prepareGrantClient(loaded config.Config) (integrationClient, error) {
 	switch loaded.Mode {
 	case config.ModeShadow:
 		return nil, nil
@@ -219,6 +238,40 @@ func prepareGrantClient(loaded config.Config) (worker.GrantClient, error) {
 	}
 }
 
+func activatePrincipalDisableRuntime(
+	ctx context.Context,
+	mode config.Mode,
+	store *inbox.Store,
+	client worker.PrincipalDisableClient,
+	keyring *newapi.GrantKeyring,
+) (*worker.ActivePrincipalDisableRuntime, error) {
+	if store == nil || keyring == nil {
+		return nil, errors.New("store and grant keyring are required")
+	}
+	if err := validateIntegrationPayloadKeyIDs(ctx, store, keyring); err != nil {
+		return nil, err
+	}
+	switch mode {
+	case config.ModeShadow:
+		return nil, nil
+	case config.ModeActive:
+		executor, err := worker.NewPrincipalDisableExecutor(store, client, keyring)
+		if err != nil {
+			return nil, err
+		}
+		runtime, err := worker.NewActivePrincipalDisableRuntime(store, executor)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := runtime.ReleaseHeldJobs(ctx); err != nil {
+			return nil, err
+		}
+		return runtime, nil
+	default:
+		return nil, errors.New("controller mode must be shadow or active")
+	}
+}
+
 func activateGrantRuntime(
 	ctx context.Context,
 	mode config.Mode,
@@ -230,7 +283,7 @@ func activateGrantRuntime(
 	if store == nil || keyring == nil {
 		return nil, errors.New("store and grant keyring are required")
 	}
-	if err := store.ValidateEntitlementGrantJobKeyIDs(ctx, keyring.KeyIDs()); err != nil {
+	if err := validateIntegrationPayloadKeyIDs(ctx, store, keyring); err != nil {
 		return nil, err
 	}
 	switch mode {
@@ -252,6 +305,18 @@ func activateGrantRuntime(
 	default:
 		return nil, errors.New("controller mode must be shadow or active")
 	}
+}
+
+func validateIntegrationPayloadKeyIDs(
+	ctx context.Context,
+	store *inbox.Store,
+	keyring *newapi.GrantKeyring,
+) error {
+	keyIDs := keyring.KeyIDs()
+	if err := store.ValidateEntitlementGrantJobKeyIDs(ctx, keyIDs); err != nil {
+		return err
+	}
+	return store.ValidatePrincipalDisableJobKeyIDs(ctx, keyIDs)
 }
 
 func newControllerHTTPServer(address string, handler http.Handler) *http.Server {

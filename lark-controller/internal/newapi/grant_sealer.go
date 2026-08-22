@@ -23,6 +23,14 @@ type SealedGrantRequest struct {
 	Ciphertext    []byte
 }
 
+type SealedPrincipalDisableRequest struct {
+	KeyID         string
+	ExternalID    string
+	RequestSHA256 string
+	Nonce         []byte
+	Ciphertext    []byte
+}
+
 type GrantSealer struct {
 	aead  cipher.AEAD
 	keyID string
@@ -105,6 +113,28 @@ func (k *GrantKeyring) Open(sealed SealedGrantRequest) (EntitlementGrantRequest,
 		return EntitlementGrantRequest{}, errors.New("sealed grant payload uses an unavailable key")
 	}
 	return sealer.Open(sealed)
+}
+
+func (k *GrantKeyring) SealPrincipalDisable(
+	request PrincipalDisableRequest,
+) (SealedPrincipalDisableRequest, error) {
+	if k == nil || k.primary == nil {
+		return SealedPrincipalDisableRequest{}, errors.New("grant payload keyring is required")
+	}
+	return k.primary.SealPrincipalDisable(request)
+}
+
+func (k *GrantKeyring) OpenPrincipalDisable(
+	sealed SealedPrincipalDisableRequest,
+) (PrincipalDisableRequest, error) {
+	if k == nil || k.sealers == nil {
+		return PrincipalDisableRequest{}, errors.New("grant payload keyring is required")
+	}
+	sealer, ok := k.sealers[sealed.KeyID]
+	if !ok {
+		return PrincipalDisableRequest{}, errors.New("sealed principal disable payload uses an unavailable key")
+	}
+	return sealer.OpenPrincipalDisable(sealed)
 }
 
 func (s *GrantSealer) KeyID() string {
@@ -252,6 +282,71 @@ func (s *GrantSealer) Open(sealed SealedGrantRequest) (EntitlementGrantRequest, 
 	return request, nil
 }
 
+func (s *GrantSealer) SealPrincipalDisable(
+	request PrincipalDisableRequest,
+) (SealedPrincipalDisableRequest, error) {
+	if s == nil || s.aead == nil {
+		return SealedPrincipalDisableRequest{}, errors.New("grant payload sealer is required")
+	}
+	payload, requestSHA256, err := canonicalizePrincipalDisableRequest(request)
+	if err != nil {
+		return SealedPrincipalDisableRequest{}, errors.New("invalid principal disable payload")
+	}
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return SealedPrincipalDisableRequest{}, errors.New("generate principal disable payload nonce")
+	}
+	sealed := SealedPrincipalDisableRequest{
+		KeyID: s.keyID, ExternalID: request.ExternalID,
+		RequestSHA256: requestSHA256, Nonce: nonce,
+	}
+	sealed.Ciphertext = s.aead.Seal(
+		nil,
+		sealed.Nonce,
+		payload,
+		principalDisablePayloadAAD(sealed.ExternalID, sealed.RequestSHA256),
+	)
+	return sealed, nil
+}
+
+func (s *GrantSealer) OpenPrincipalDisable(
+	sealed SealedPrincipalDisableRequest,
+) (PrincipalDisableRequest, error) {
+	if s == nil || s.aead == nil {
+		return PrincipalDisableRequest{}, errors.New("grant payload sealer is required")
+	}
+	if sealed.KeyID != s.keyID || sealed.ExternalID == "" ||
+		len(sealed.RequestSHA256) != sha256.Size*2 || len(sealed.Nonce) != s.aead.NonceSize() ||
+		len(sealed.Ciphertext) < s.aead.Overhead() {
+		return PrincipalDisableRequest{}, errors.New("invalid sealed principal disable payload")
+	}
+	if _, err := hex.DecodeString(sealed.RequestSHA256); err != nil {
+		return PrincipalDisableRequest{}, errors.New("invalid sealed principal disable payload")
+	}
+	payload, err := s.aead.Open(
+		nil,
+		sealed.Nonce,
+		sealed.Ciphertext,
+		principalDisablePayloadAAD(sealed.ExternalID, sealed.RequestSHA256),
+	)
+	if err != nil {
+		return PrincipalDisableRequest{}, errors.New("authenticate sealed principal disable payload")
+	}
+	var request PrincipalDisableRequest
+	if err := decodeStrictJSON(bytes.NewReader(payload), &request); err != nil {
+		return PrincipalDisableRequest{}, errors.New("decode sealed principal disable payload")
+	}
+	canonical, requestSHA256, err := canonicalizePrincipalDisableRequest(request)
+	if err != nil {
+		return PrincipalDisableRequest{}, errors.New("invalid sealed principal disable payload")
+	}
+	if !bytes.Equal(payload, canonical) || request.ExternalID != sealed.ExternalID ||
+		requestSHA256 != sealed.RequestSHA256 {
+		return PrincipalDisableRequest{}, errors.New("sealed principal disable payload metadata mismatch")
+	}
+	return request, nil
+}
+
 func grantPayloadAAD(externalID, requestSHA256 string) []byte {
 	aad := make([]byte, 8+len(externalID)+len(requestSHA256))
 	binary.BigEndian.PutUint32(aad[:4], uint32(len(externalID)))
@@ -259,5 +354,14 @@ func grantPayloadAAD(externalID, requestSHA256 string) []byte {
 	offset := 4 + len(externalID)
 	binary.BigEndian.PutUint32(aad[offset:offset+4], uint32(len(requestSHA256)))
 	copy(aad[offset+4:], requestSHA256)
+	return aad
+}
+
+func principalDisablePayloadAAD(externalID, requestSHA256 string) []byte {
+	const domain = "principal_disable\x00"
+	base := grantPayloadAAD(externalID, requestSHA256)
+	aad := make([]byte, len(domain)+len(base))
+	copy(aad, domain)
+	copy(aad[len(domain):], base)
 	return aad
 }

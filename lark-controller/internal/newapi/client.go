@@ -13,14 +13,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
-	grantPath          = "/api/integrations/v1/entitlement-grants"
-	principalsPath     = "/api/integrations/v1/principals"
-	maxResponseBytes   = 1 << 20
-	minimumSecretBytes = 32
-	defaultTimeout     = 5 * time.Second
+	grantPath            = "/api/integrations/v1/entitlement-grants"
+	principalsPath       = "/api/integrations/v1/principals"
+	principalDisablePath = "/api/integrations/v1/principals/disable"
+	maxResponseBytes     = 1 << 20
+	minimumSecretBytes   = 32
+	defaultTimeout       = 5 * time.Second
 )
 
 type Config struct {
@@ -80,6 +82,21 @@ type EntitlementGrantResponse struct {
 	ExternalID string      `json:"external_id"`
 	UserID     int64       `json:"user_id"`
 	Result     GrantResult `json:"result"`
+}
+
+type PrincipalDisableRequest struct {
+	ExternalID string   `json:"external_id"`
+	Source     string   `json:"source"`
+	Identity   Identity `json:"identity"`
+	Reason     string   `json:"reason"`
+}
+
+type PrincipalDisableResponse struct {
+	Status           string `json:"status"`
+	ExternalID       string `json:"external_id"`
+	Outcome          string `json:"outcome"`
+	PrincipalVersion int64  `json:"principal_version,omitempty"`
+	AuthVersion      int64  `json:"auth_version,omitempty"`
 }
 
 type Principal struct {
@@ -172,6 +189,46 @@ func (c *Client) Grant(ctx context.Context, request EntitlementGrantRequest) (En
 	return result, nil
 }
 
+func (c *Client) DisablePrincipal(
+	ctx context.Context,
+	request PrincipalDisableRequest,
+) (PrincipalDisableResponse, error) {
+	if err := validatePrincipalDisableRequest(request); err != nil {
+		return PrincipalDisableResponse{}, err
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return PrincipalDisableResponse{}, fmt.Errorf("encode New API principal disable request: %w", err)
+	}
+	httpRequest, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+principalDisablePath,
+		bytes.NewReader(payload),
+	)
+	if err != nil {
+		return PrincipalDisableResponse{}, fmt.Errorf("create New API principal disable request: %w", err)
+	}
+	httpRequest.Header.Set("Authorization", "Bearer "+c.integrationSecret)
+	httpRequest.Header.Set("Content-Type", "application/json")
+	response, err := c.httpClient.Do(httpRequest)
+	if err != nil {
+		return PrincipalDisableResponse{}, classifyTransportError(ctx, err)
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return PrincipalDisableResponse{}, decodeAPIError(response)
+	}
+	var result PrincipalDisableResponse
+	if err := decodeStrictJSON(response.Body, &result); err != nil {
+		return PrincipalDisableResponse{}, classifyResponseDecodeError(ctx, err)
+	}
+	if err := validatePrincipalDisableResponse(request, result); err != nil {
+		return PrincipalDisableResponse{}, err
+	}
+	return result, nil
+}
+
 func (c *Client) ListActiveLarkPrincipals(
 	ctx context.Context,
 	cursor string,
@@ -249,6 +306,91 @@ func validateGrantRequest(request EntitlementGrantRequest) error {
 		return errors.New("unsupported New API entitlement grant type")
 	}
 	return nil
+}
+
+func validatePrincipalDisableRequest(request PrincipalDisableRequest) error {
+	if !validIdentifier(request.ExternalID, 255) ||
+		request.Identity.ProviderSlug != "lark" ||
+		!validIdentifier(request.Identity.Subject, 255) ||
+		!validIdentifier(request.Reason, 128) {
+		return errors.New("invalid New API principal disable request")
+	}
+	switch request.Source {
+	case "contact_event":
+		if !strings.HasPrefix(request.ExternalID, "lark:disable:") ||
+			len(request.ExternalID) == len("lark:disable:") {
+			return errors.New("invalid New API principal disable request")
+		}
+	case "employment_reconciliation":
+		if !strings.HasPrefix(request.ExternalID, "lark:disable-reconcile:") ||
+			len(request.ExternalID) == len("lark:disable-reconcile:") {
+			return errors.New("invalid New API principal disable request")
+		}
+	default:
+		return errors.New("invalid New API principal disable request")
+	}
+	return nil
+}
+
+func validatePrincipalDisableResponse(
+	request PrincipalDisableRequest,
+	response PrincipalDisableResponse,
+) error {
+	if response.ExternalID != request.ExternalID {
+		return errors.New("New API principal disable response does not match request")
+	}
+	switch response.Status {
+	case "applied":
+		if response.Outcome != "disabled" || response.PrincipalVersion <= 0 ||
+			response.AuthVersion <= 0 {
+			return errors.New("New API principal disable response is incomplete")
+		}
+	case "noop":
+		switch response.Outcome {
+		case "already_disabled":
+			if response.PrincipalVersion <= 0 || response.AuthVersion != 0 {
+				return errors.New("New API principal disable response is incomplete")
+			}
+		case "principal_absent":
+			if response.PrincipalVersion != 0 || response.AuthVersion != 0 {
+				return errors.New("New API principal disable response is incomplete")
+			}
+		default:
+			return errors.New("New API principal disable response has invalid outcome")
+		}
+	case "replayed":
+		switch response.Outcome {
+		case "disabled":
+			if response.PrincipalVersion <= 0 || response.AuthVersion <= 0 {
+				return errors.New("New API principal disable response is incomplete")
+			}
+		case "already_disabled":
+			if response.PrincipalVersion <= 0 || response.AuthVersion != 0 {
+				return errors.New("New API principal disable response is incomplete")
+			}
+		case "principal_absent":
+			if response.PrincipalVersion != 0 || response.AuthVersion != 0 {
+				return errors.New("New API principal disable response is incomplete")
+			}
+		default:
+			return errors.New("New API principal disable response has invalid outcome")
+		}
+	default:
+		return errors.New("New API principal disable response has invalid status")
+	}
+	return nil
+}
+
+func validIdentifier(value string, maxLength int) bool {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > maxLength {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateGrantResponse(

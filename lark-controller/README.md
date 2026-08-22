@@ -4,9 +4,12 @@ This module is the isolated Lark integration controller described in
 `../docs/architecture/lark-entitlement-integration.md`.
 
 The controller supports a locally verified `shadow` mode and an explicit
-`active` grant mode. It:
+`active` integration-write mode. It:
 
 - verifies and decrypts Lark v2 webhooks and validates v1 callbacks;
+- accepts `contact.user.deleted_v3`, persists only a subject hash in the
+  ordinary inbox payload, and atomically creates a sealed principal-disable
+  job before acknowledging the event;
 - validates the configured Verification Token, application ID, and tenant key;
 - durably deduplicates v1 `uuid` and v2 `event_id` values in single-replica
   SQLite WAL storage;
@@ -20,7 +23,8 @@ The controller supports a locally verified `shadow` mode and an explicit
   sanitized receipt plus an AES-256-GCM sealed canonical request in a durable
   `held_shadow` grant job;
 - loads a rotation-safe payload keyring whose first key seals new jobs and whose
-  remaining keys decrypt jobs created before rotation;
+  remaining keys decrypt grant and principal-disable jobs created before
+  rotation;
 - records same-payload external-ID reuse as `shadow_replayed` and dead-letters
   payload mismatches without replacing the first shadow ledger entry;
 - persists 256-bit OAuth state, login-code, and access-handle credentials only
@@ -64,11 +68,12 @@ The controller supports a locally verified `shadow` mode and an explicit
 - recovers interrupted jobs with their attempt counters after restart;
 - activates held jobs only after the active startup gate has validated the
   keyring, New API credential/client, SQLite state, webhook server, and listen
-  socket, then decrypts canonical requests, persists sanitized results, and
-  applies the documented retry/dead-letter matrix;
+  socket, then decrypts canonical grant and principal-disable requests,
+  persists sanitized results, and applies the documented retry/dead-letter
+  matrices;
 - exposes liveness, readiness, and bounded-label Prometheus metrics for inbox,
   jobs, approval fetches, New API shadow grants, held grant jobs, policy
-  failures, dead letters, and queue age;
+  failures, principal disable jobs, dead letters, and queue age;
 - keeps queryable columns limited to normalized event data, hashes, decisions,
   stable failure reasons, and sanitized New API receipts; the complete grant
   request exists only as authenticated ciphertext; and
@@ -188,22 +193,31 @@ is excluded. Dead letters remain visible in metrics but do not disable webhook
 ingestion.
 
 `internal/newapi` implements the versioned HTTP contracts for entitlement
-grants and paginated active-Lark-principal enumeration. The grant adapter uses
-only the dedicated integration bearer credential, validates bounded responses,
-and classifies response loss as retryable because the external ID is
-idempotent. The principal response intentionally contains no New API user ID,
-wallet balance, token, or subscription details. In shadow mode,
+grants, principal disable, and paginated active-Lark-principal enumeration.
+Both write adapters use only the dedicated integration bearer credential,
+validate bounded responses, and classify response loss as retryable because
+the external ID is idempotent. The principal response intentionally contains
+no New API user ID, wallet balance, token, or subscription details. In shadow mode,
 `cmd/lark-controller` neither loads the integration credential nor constructs
 the client/executor, so it performs no New API request. In active mode, startup
 preflights the credential and client before opening SQLite, then binds the HTTP
-listener and validates every nonterminal job key before releasing the held
-approval backlog and only the base jobs for the current active policy. The
-active grant runtime applies the same filter to newly created held jobs before
-claiming them. Policy snapshot sync and the runtime startup/release gate reject
-any nonterminal base job from a non-active policy, including an already released
-or restart-recovered job; a policy switch cannot proceed until the documented
-drain or explicit migration is complete. `held_shadow` jobs remain excluded
-from the event-worker claim path and from ready-queue age.
+listener and validates every nonterminal grant and principal-disable job key
+before releasing the held approval/disable backlog and only the base jobs for
+the current active policy. The active runtimes apply the same gates to newly
+created held jobs before claiming them. Policy snapshot sync and the grant
+runtime startup/release gate reject any nonterminal base job from a non-active
+policy, including an already released or restart-recovered job; a policy switch
+cannot proceed until the documented drain or explicit migration is complete.
+`held_shadow` jobs remain excluded from ready-queue age.
+
+Principal-disable jobs use an independent durable ledger and audit table. A
+real-time contact event binds its optional inbox event key, while the job model
+also permits a future reconciliation command without fabricating a webhook
+event. Duplicate delivery preserves the first key ID, nonce, and ciphertext.
+Active execution calls the idempotent New API disable endpoint with
+`lark:disable:<event_id>`, retries transport/temporary failures with the same
+request, recovers claimed jobs after restart, and persists only the bounded
+status, outcome, principal version, and auth version receipt.
 
 The active policy must define a positive `basic` level before the OAuth bridge
 can start. Userinfo handle deletion, the base-subscription ledger row, the
@@ -272,9 +286,10 @@ go build ./cmd/lark-controller
 ```
 
 This slice does not add the service to Docker Compose and must not be deployed.
-Active grant execution, the durable opaque OAuth credential store, the
-outbound Lark token/userinfo adapter, and the public OAuth authorize/callback
-handlers, internal token/userinfo handlers, and idempotent base-subscription
-dispatch are implemented locally. Employment reconciliation, Compose wiring,
-operational runbooks, and production validation remain follow-up work. Do not
-enable active mode in production before those gates are complete.
+Active grant and real-time principal-disable execution, the durable opaque
+OAuth credential store, the outbound Lark token/userinfo adapter, and the
+public OAuth authorize/callback handlers, internal token/userinfo handlers,
+and idempotent base-subscription dispatch are implemented locally. Employment
+reconciliation, Compose wiring, operational runbooks, and production
+validation remain follow-up work. Do not enable active mode in production
+before those gates are complete.

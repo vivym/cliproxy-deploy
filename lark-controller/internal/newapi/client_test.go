@@ -145,6 +145,143 @@ func TestClientSendsEntitlementGrantContract(t *testing.T) {
 	}
 }
 
+func TestClientSendsPrincipalDisableContract(t *testing.T) {
+	wantRequest := newapi.PrincipalDisableRequest{
+		ExternalID: "lark:disable:evt-resigned-1",
+		Source:     "contact_event",
+		Identity: newapi.Identity{
+			ProviderSlug: "lark",
+			Subject:      "tenant-1:ou-resigned",
+		},
+		Reason: "contact.user.deleted_v3",
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/api/integrations/v1/principals/disable" {
+			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
+		}
+		if request.Header.Get("Authorization") != "Bearer "+integrationSecret {
+			t.Fatal("authorization header is missing")
+		}
+		if request.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("content type = %q", request.Header.Get("Content-Type"))
+		}
+		var got newapi.PrincipalDisableRequest
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if !reflect.DeepEqual(got, wantRequest) {
+			t.Fatalf("request = %+v, want %+v", got, wantRequest)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write([]byte(`{
+            "status":"applied",
+            "external_id":"lark:disable:evt-resigned-1",
+            "outcome":"disabled",
+            "principal_version":4,
+            "auth_version":7
+        }`))
+	}))
+	defer server.Close()
+
+	client, err := newapi.NewClient(newapi.Config{
+		BaseURL: server.URL, IntegrationSecret: integrationSecret, HTTPClient: server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	result, err := client.DisablePrincipal(context.Background(), wantRequest)
+	if err != nil {
+		t.Fatalf("disable principal: %v", err)
+	}
+	if result.Status != "applied" || result.ExternalID != wantRequest.ExternalID ||
+		result.Outcome != "disabled" || result.PrincipalVersion != 4 || result.AuthVersion != 7 {
+		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestClientClassifiesPrincipalDisableResponseLossAsRetryable(t *testing.T) {
+	httpClient := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(io.MultiReader(
+				strings.NewReader(`{"status":"applied"`),
+				failingReader{err: io.ErrUnexpectedEOF},
+			)),
+		}, nil
+	})}
+	client, err := newapi.NewClient(newapi.Config{
+		BaseURL: "http://new-api:3001", IntegrationSecret: integrationSecret, HTTPClient: httpClient,
+	})
+	if err != nil {
+		t.Fatalf("new client: %v", err)
+	}
+	request, _, err := newapi.PlanContactEventPrincipalDisable(
+		"tenant-1",
+		"ou-resigned",
+		"evt-response-loss",
+	)
+	if err != nil {
+		t.Fatalf("plan principal disable: %v", err)
+	}
+	_, err = client.DisablePrincipal(context.Background(), request)
+	var requestError *newapi.RequestError
+	if !errors.As(err, &requestError) || requestError.Reason != "transport_error" ||
+		!requestError.Retryable {
+		t.Fatalf("error = %v, want retryable transport error", err)
+	}
+}
+
+func TestClientRejectsInvalidPrincipalDisableResult(t *testing.T) {
+	request, _, err := newapi.PlanContactEventPrincipalDisable(
+		"tenant-1",
+		"ou-resigned",
+		"evt-invalid-result",
+	)
+	if err != nil {
+		t.Fatalf("plan principal disable: %v", err)
+	}
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "noop cannot claim a new disable",
+			body: `{"status":"noop","external_id":"lark:disable:evt-invalid-result","outcome":"disabled","principal_version":4,"auth_version":7}`,
+		},
+		{
+			name: "applied cannot claim an absent principal",
+			body: `{"status":"applied","external_id":"lark:disable:evt-invalid-result","outcome":"principal_absent"}`,
+		},
+		{
+			name: "disabled replay requires versions",
+			body: `{"status":"replayed","external_id":"lark:disable:evt-invalid-result","outcome":"disabled"}`,
+		},
+		{
+			name: "external id must match",
+			body: `{"status":"noop","external_id":"lark:disable:other","outcome":"principal_absent"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.Header().Set("Content-Type", "application/json")
+				_, _ = response.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			client, err := newapi.NewClient(newapi.Config{
+				BaseURL: server.URL, IntegrationSecret: integrationSecret, HTTPClient: server.Client(),
+			})
+			if err != nil {
+				t.Fatalf("new client: %v", err)
+			}
+			if _, err := client.DisablePrincipal(context.Background(), request); err == nil {
+				t.Fatal("invalid principal disable result was accepted")
+			}
+		})
+	}
+}
+
 func TestClientClassifiesOnlyDocumentedRetryableErrors(t *testing.T) {
 	tests := []struct {
 		name         string

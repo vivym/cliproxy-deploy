@@ -9,11 +9,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"time"
 
 	larkevent "github.com/larksuite/oapi-sdk-go/v3/event"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 )
 
 const (
@@ -23,16 +25,21 @@ const (
 )
 
 type Config struct {
-	VerificationToken string
-	EncryptKey        string
-	AppID             string
-	TenantKey         string
-	BodyLimit         int64
-	InboxTimeout      time.Duration
+	VerificationToken      string
+	EncryptKey             string
+	AppID                  string
+	TenantKey              string
+	BodyLimit              int64
+	InboxTimeout           time.Duration
+	PrincipalDisableSealer PrincipalDisableSealer
 }
 
 type Recorder interface {
 	Record(context.Context, inbox.Event) (duplicate bool, err error)
+}
+
+type PrincipalDisableSealer interface {
+	SealPrincipalDisable(newapi.PrincipalDisableRequest) (newapi.SealedPrincipalDisableRequest, error)
 }
 
 type Handler struct {
@@ -47,6 +54,9 @@ func NewHandler(config Config, recorder Recorder) (*Handler, error) {
 	if recorder == nil {
 		return nil, errors.New("event recorder is required")
 	}
+	if isNilPrincipalDisableSealer(config.PrincipalDisableSealer) {
+		return nil, errors.New("principal disable payload sealer is required")
+	}
 	if config.BodyLimit == 0 {
 		config.BodyLimit = defaultBodyLimit
 	}
@@ -60,6 +70,19 @@ func NewHandler(config Config, recorder Recorder) (*Handler, error) {
 		return nil, errors.New("inbox timeout must be positive and less than 3 seconds")
 	}
 	return &Handler{config: config, recorder: recorder}, nil
+}
+
+func isNilPrincipalDisableSealer(sealer PrincipalDisableSealer) bool {
+	if sealer == nil {
+		return true
+	}
+	value := reflect.ValueOf(sealer)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func (h *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
@@ -142,6 +165,12 @@ type approvalEventPayload struct {
 	RevertedInstanceCode string `json:"reverted_instance_code,omitempty"`
 }
 
+type contactUserDeletedPayload struct {
+	Object struct {
+		OpenID string `json:"open_id"`
+	} `json:"object"`
+}
+
 func (h *Handler) verifyAndDecrypt(request *http.Request, body []byte) ([]byte, error) {
 	if h.config.EncryptKey == "" {
 		return body, nil
@@ -199,6 +228,9 @@ func (h *Handler) recordV2Event(ctx context.Context, envelope eventEnvelope) err
 	if len(envelope.Event) == 0 || string(envelope.Event) == "null" {
 		return errors.New("missing v2 event body")
 	}
+	if envelope.Header.EventType == "contact.user.deleted_v3" {
+		return h.recordContactUserDeleted(ctx, envelope)
+	}
 	var approval approvalEventPayload
 	if err := json.Unmarshal(envelope.Event, &approval); err != nil {
 		return err
@@ -218,6 +250,52 @@ func (h *Handler) recordV2Event(ctx context.Context, envelope eventEnvelope) err
 		InstanceCode:  approval.InstanceCode,
 		Status:        approval.Status,
 		PayloadJSON:   string(normalized),
+	})
+	if err != nil {
+		if errors.Is(err, inbox.ErrEventPayloadMismatch) {
+			return err
+		}
+		return fmt.Errorf("%w: %v", errInboxUnavailable, err)
+	}
+	return nil
+}
+
+func (h *Handler) recordContactUserDeleted(ctx context.Context, envelope eventEnvelope) error {
+	var deleted contactUserDeletedPayload
+	if err := json.Unmarshal(envelope.Event, &deleted); err != nil || deleted.Object.OpenID == "" {
+		return errors.New("invalid contact user deleted event")
+	}
+	request, receipt, err := newapi.PlanContactEventPrincipalDisable(
+		envelope.Header.TenantKey,
+		deleted.Object.OpenID,
+		envelope.Header.EventID,
+	)
+	if err != nil {
+		return err
+	}
+	sealed, err := h.config.PrincipalDisableSealer.SealPrincipalDisable(request)
+	if err != nil {
+		return fmt.Errorf("%w: seal principal disable request", errInboxUnavailable)
+	}
+	normalized, err := json.Marshal(struct {
+		SubjectSHA256 string `json:"subject_sha256"`
+	}{SubjectSHA256: receipt.SubjectSHA256})
+	if err != nil {
+		return err
+	}
+	_, err = h.recorder.Record(ctx, inbox.Event{
+		Key:           "lark:v2:" + envelope.Header.EventID,
+		SchemaVersion: envelope.Schema,
+		EventID:       envelope.Header.EventID,
+		EventType:     envelope.Header.EventType,
+		AppID:         envelope.Header.AppID,
+		TenantKey:     envelope.Header.TenantKey,
+		PayloadJSON:   string(normalized),
+		PrincipalDisableJob: &inbox.PrincipalDisableJobDraft{
+			ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
+			SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,
+			Nonce: sealed.Nonce, Ciphertext: sealed.Ciphertext,
+		},
 	})
 	if err != nil {
 		if errors.Is(err, inbox.ErrEventPayloadMismatch) {

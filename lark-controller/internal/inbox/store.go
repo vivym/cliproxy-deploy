@@ -20,30 +20,32 @@ import (
 const sqliteBusyTimeout = 500 * time.Millisecond
 
 type Event struct {
-	Key             string
-	SchemaVersion   string
-	EventID         string
-	EventType       string
-	AppID           string
-	TenantKey       string
-	ApprovalCode    string
-	InstanceCode    string
-	Status          string
-	PayloadJSON     string
-	ProcessingState ProcessingState
-	DuplicateCount  int64
-	ReceivedAt      time.Time
-	LastSeenAt      time.Time
+	Key                 string
+	SchemaVersion       string
+	EventID             string
+	EventType           string
+	AppID               string
+	TenantKey           string
+	ApprovalCode        string
+	InstanceCode        string
+	Status              string
+	PayloadJSON         string
+	ProcessingState     ProcessingState
+	DuplicateCount      int64
+	ReceivedAt          time.Time
+	LastSeenAt          time.Time
+	PrincipalDisableJob *PrincipalDisableJobDraft
 }
 
 type ProcessingState string
 
 const (
-	ProcessingStatePending         ProcessingState = "pending"
-	ProcessingStateProcessing      ProcessingState = "processing"
-	ProcessingStateShadowRecorded  ProcessingState = "shadow_recorded"
-	ProcessingStateReversalPending ProcessingState = "reversal_pending"
-	ProcessingStateDeadLetter      ProcessingState = "dead_letter"
+	ProcessingStatePending           ProcessingState = "pending"
+	ProcessingStateProcessing        ProcessingState = "processing"
+	ProcessingStateShadowRecorded    ProcessingState = "shadow_recorded"
+	ProcessingStateReversalPending   ProcessingState = "reversal_pending"
+	ProcessingStateDeadLetter        ProcessingState = "dead_letter"
+	ProcessingStatePrincipalDisabled ProcessingState = "principal_disabled"
 )
 
 type DecisionOutcome string
@@ -271,6 +273,40 @@ CREATE TABLE IF NOT EXISTS entitlement_grant_jobs (
 );
 	CREATE INDEX IF NOT EXISTS idx_entitlement_grant_jobs_ready
 	    ON entitlement_grant_jobs(status, next_attempt_at, id);
+	CREATE TABLE IF NOT EXISTS principal_disable_jobs (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    event_key TEXT UNIQUE REFERENCES lark_event_inbox(event_key) ON DELETE RESTRICT,
+	    external_id TEXT NOT NULL UNIQUE,
+	    request_sha256 TEXT NOT NULL,
+	    subject_sha256 TEXT NOT NULL,
+	    key_id TEXT NOT NULL,
+	    nonce BLOB NOT NULL,
+	    ciphertext BLOB NOT NULL,
+	    status TEXT NOT NULL,
+	    attempts INTEGER NOT NULL DEFAULT 0,
+	    next_attempt_at TEXT NOT NULL,
+	    last_error TEXT NOT NULL DEFAULT '',
+	    activated_at TEXT NOT NULL DEFAULT '',
+	    response_status TEXT NOT NULL DEFAULT '',
+	    response_outcome TEXT NOT NULL DEFAULT '',
+	    response_principal_version INTEGER NOT NULL DEFAULT 0,
+	    response_auth_version INTEGER NOT NULL DEFAULT 0,
+	    completed_at TEXT NOT NULL DEFAULT '',
+	    created_at TEXT NOT NULL,
+	    updated_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_principal_disable_jobs_ready
+	    ON principal_disable_jobs(status, next_attempt_at, id);
+	CREATE TABLE IF NOT EXISTS principal_disable_audit (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    external_id TEXT NOT NULL REFERENCES principal_disable_jobs(external_id) ON DELETE RESTRICT,
+	    event_key TEXT REFERENCES lark_event_inbox(event_key) ON DELETE RESTRICT,
+	    action TEXT NOT NULL,
+	    outcome TEXT NOT NULL,
+	    created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_principal_disable_audit_action
+	    ON principal_disable_audit(action, outcome);
 	CREATE TABLE IF NOT EXISTS oauth_states (
 	    state_hash BLOB PRIMARY KEY CHECK(length(state_hash) = 32),
 	    new_api_state TEXT NOT NULL,
@@ -331,6 +367,14 @@ WHERE processing_state = 'processing'
   AND event_key IN (SELECT event_key FROM jobs WHERE status = 'pending');
 UPDATE entitlement_grant_jobs SET status = 'pending', updated_at = next_attempt_at
 WHERE status = 'processing';
+UPDATE principal_disable_jobs SET status = 'pending', updated_at = next_attempt_at
+WHERE status = 'processing';
+UPDATE lark_event_inbox SET processing_state = 'pending'
+WHERE processing_state = 'processing'
+  AND event_key IN (
+      SELECT event_key FROM principal_disable_jobs
+      WHERE status = 'pending' AND event_key IS NOT NULL
+  );
 `
 	if _, err := s.database.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate inbox: %w", err)
@@ -520,6 +564,11 @@ func (s *Store) Record(ctx context.Context, event Event) (bool, error) {
 		event.AppID == "" || event.TenantKey == "" || event.PayloadJSON == "" {
 		return false, errors.New("incomplete inbox event")
 	}
+	isPrincipalDisable := event.PrincipalDisableJob != nil
+	if (event.EventType == "contact.user.deleted_v3") != isPrincipalDisable ||
+		(isPrincipalDisable && event.SchemaVersion != "2.0") {
+		return false, errors.New("principal disable event does not match its durable job")
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	payloadHash, err := hashEvent(event)
 	if err != nil {
@@ -537,10 +586,14 @@ ON CONFLICT(event_key) DO NOTHING`
 		return false, fmt.Errorf("begin inbox transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	initialState := ProcessingStatePending
+	if isPrincipalDisable {
+		initialState = ProcessingStateShadowRecorded
+	}
 	result, err := tx.ExecContext(ctx, insertEvent,
 		event.Key, event.SchemaVersion, event.EventID, event.EventType,
 		event.AppID, event.TenantKey, event.ApprovalCode, event.InstanceCode,
-		event.Status, event.PayloadJSON, payloadHash, ProcessingStatePending, now, now,
+		event.Status, event.PayloadJSON, payloadHash, initialState, now, now,
 	)
 	if err != nil {
 		return false, fmt.Errorf("record inbox event: %w", err)
@@ -551,11 +604,23 @@ ON CONFLICT(event_key) DO NOTHING`
 	}
 	duplicate := affected == 0
 	if !duplicate {
-		const insertJob = `
+		if isPrincipalDisable {
+			if _, err := insertPrincipalDisableJob(
+				ctx,
+				tx,
+				event.Key,
+				*event.PrincipalDisableJob,
+				now,
+			); err != nil {
+				return false, err
+			}
+		} else {
+			const insertJob = `
 INSERT INTO jobs (event_key, job_type, status, next_attempt_at, created_at, updated_at)
 VALUES (?, 'process_lark_event', ?, ?, ?, ?)`
-		if _, err := tx.ExecContext(ctx, insertJob, event.Key, jobStatusPending, now, now, now); err != nil {
-			return false, fmt.Errorf("create inbox job: %w", err)
+			if _, err := tx.ExecContext(ctx, insertJob, event.Key, jobStatusPending, now, now, now); err != nil {
+				return false, fmt.Errorf("create inbox job: %w", err)
+			}
 		}
 	} else {
 		var storedHash string
@@ -582,21 +647,34 @@ WHERE event_key = ?`, now, event.Key); err != nil {
 }
 
 func hashEvent(event Event) (string, error) {
+	disableExternalID := ""
+	disableRequestSHA256 := ""
+	disableSubjectSHA256 := ""
+	if event.PrincipalDisableJob != nil {
+		disableExternalID = event.PrincipalDisableJob.ExternalID
+		disableRequestSHA256 = event.PrincipalDisableJob.RequestSHA256
+		disableSubjectSHA256 = event.PrincipalDisableJob.SubjectSHA256
+	}
 	canonical, err := json.Marshal(struct {
-		SchemaVersion string `json:"schema_version"`
-		EventID       string `json:"event_id"`
-		EventType     string `json:"event_type"`
-		AppID         string `json:"app_id"`
-		TenantKey     string `json:"tenant_key"`
-		ApprovalCode  string `json:"approval_code"`
-		InstanceCode  string `json:"instance_code"`
-		Status        string `json:"status"`
-		PayloadJSON   string `json:"payload_json"`
+		SchemaVersion        string `json:"schema_version"`
+		EventID              string `json:"event_id"`
+		EventType            string `json:"event_type"`
+		AppID                string `json:"app_id"`
+		TenantKey            string `json:"tenant_key"`
+		ApprovalCode         string `json:"approval_code"`
+		InstanceCode         string `json:"instance_code"`
+		Status               string `json:"status"`
+		PayloadJSON          string `json:"payload_json"`
+		DisableExternalID    string `json:"disable_external_id"`
+		DisableRequestSHA256 string `json:"disable_request_sha256"`
+		DisableSubjectSHA256 string `json:"disable_subject_sha256"`
 	}{
 		SchemaVersion: event.SchemaVersion, EventID: event.EventID,
 		EventType: event.EventType, AppID: event.AppID, TenantKey: event.TenantKey,
 		ApprovalCode: event.ApprovalCode, InstanceCode: event.InstanceCode,
 		Status: event.Status, PayloadJSON: event.PayloadJSON,
+		DisableExternalID: disableExternalID, DisableRequestSHA256: disableRequestSHA256,
+		DisableSubjectSHA256: disableSubjectSHA256,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode inbox event hash: %w", err)

@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers 和幂等基础订阅投递，在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers 和幂等基础订阅投递，每日在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1090,6 +1090,8 @@ New API fork 同时给 `subscription_plans` 增加 `managed_only boolean NOT NUL
 | `base_subscription_grants` | userinfo 基础订阅的确定性 external ID、hash、policy/catalog/level/quota 重放账本 |
 | `base_subscription_audit` | 无 webhook event key 的基础订阅 plan/replay/result/retry/dead-letter 审计 |
 | `entitlement_grant_jobs` | AES-256-GCM 密封的 canonical request；shadow 写入 `held_shadow`，active gate 后转为可执行状态 |
+| `principal_disable_jobs` | AES-256-GCM 密封的 disable command；实时事件可选关联 inbox，reconciliation 不伪造 event |
+| `principal_disable_audit` | disable shadow/retry/result/dead-letter 脱敏审计，不依赖 webhook event key |
 | `employment_checks` | 在职状态证据、连续缺失计数和 disable external ID |
 | `jobs` | retry schedule、attempt、last_error、dead-letter |
 | `controller_audit` | Controller 决策轨迹 |
@@ -1398,6 +1400,9 @@ integration_outbox_delivery_total{event_type,result}
 oauth_login_total{result}
 oauth_handle_reuse_total
 principal_disable_total{result}
+principal_disable_retry_total{reason}
+principal_disable_dead_letter_total{reason}
+lark_principal_disable_jobs{state}
 employment_reconciliation_total{result}
 auth_deny_fence_age_seconds
 ```
@@ -1639,7 +1644,14 @@ replay 比较 request/subject/policy/catalog/level/quota 元数据并复用首�
 base job 与审批 job 共用 active release/executor/retry/dead-letter runtime，结果和失败审计汇总到同一组
 bounded metrics，但不伪造 webhook event。两个内部 endpoint exact method、独立
 per-client 限流、稳定错误和 `no-store` 响应均已实现，bridge client secret 只从必需的 secret file
-读取。就业状态 reconciliation、Compose 接入和生产验证仍未实现。
+读取。`contact.user.deleted_v3` 已按 v2 `event_id` 去重；普通 inbox payload 只保存 subject hash，
+完整 `contact_event` disable request 使用同一 AES-256-GCM keyring 做带 domain separation 的密封，
+并在 ACK 前与独立 `principal_disable_jobs`/audit ledger 原子提交为 `held_shadow`。重复事件保留首条
+key ID、nonce 和 ciphertext。shadow mode 不 release；active startup/runtime 校验所有非终态 grant
+和 disable job key 后显式 release，使用同一 external ID 处理 response-loss replay、有限重试、
+dead-letter、重启恢复及脱敏结果审计。disable ledger 的 `event_key` 是可选关联，使后续
+`employment_reconciliation` 能复用执行器而无需伪造 webhook。每日在职 reconciliation、Compose
+接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的

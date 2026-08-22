@@ -16,6 +16,10 @@ type OperationalSnapshot struct {
 	EntitlementGrantResults     map[EntitlementGrantResultKey]int64
 	EntitlementGrantRetries     map[string]int64
 	EntitlementGrantDeadLetters map[string]int64
+	PrincipalDisableJobStates   map[string]int64
+	PrincipalDisableResults     map[string]int64
+	PrincipalDisableRetries     map[string]int64
+	PrincipalDisableDeadLetters map[string]int64
 	ApprovalFetches             map[string]int64
 	NewAPIGrants                map[string]int64
 	DeadLetters                 map[string]int64
@@ -44,6 +48,10 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, e
 		EntitlementGrantResults:     make(map[EntitlementGrantResultKey]int64),
 		EntitlementGrantRetries:     make(map[string]int64),
 		EntitlementGrantDeadLetters: make(map[string]int64),
+		PrincipalDisableJobStates:   make(map[string]int64),
+		PrincipalDisableResults:     make(map[string]int64),
+		PrincipalDisableRetries:     make(map[string]int64),
+		PrincipalDisableDeadLetters: make(map[string]int64),
 		ApprovalFetches:             make(map[string]int64),
 		NewAPIGrants:                make(map[string]int64),
 		DeadLetters:                 make(map[string]int64),
@@ -161,6 +169,60 @@ GROUP BY result_grant_type, response_status`)
 	}
 
 	rows, err = tx.QueryContext(ctx, `
+SELECT status, COUNT(*) FROM principal_disable_jobs GROUP BY status`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query principal disable job state metrics: %w", err)
+	}
+	for rows.Next() {
+		var state string
+		var count int64
+		if err := rows.Scan(&state, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan principal disable job state metrics: %w", err)
+		}
+		snapshot.PrincipalDisableJobStates[state] = count
+	}
+	if err := closeRows(rows, "principal disable job state metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT response_status, COUNT(*) FROM principal_disable_jobs
+WHERE status = 'succeeded' GROUP BY response_status`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query principal disable result metrics: %w", err)
+	}
+	for rows.Next() {
+		var result string
+		var count int64
+		if err := rows.Scan(&result, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan principal disable result metrics: %w", err)
+		}
+		snapshot.PrincipalDisableResults[result] = count
+	}
+	if err := closeRows(rows, "principal disable result metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	snapshot.PrincipalDisableRetries, err = principalDisableAuditOutcomeCounts(
+		ctx,
+		tx,
+		"principal_disable_retry",
+	)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query principal disable retry metrics: %w", err)
+	}
+	snapshot.PrincipalDisableDeadLetters, err = principalDisableAuditOutcomeCounts(
+		ctx,
+		tx,
+		"principal_disable_dead_letter",
+	)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query principal disable dead-letter metrics: %w", err)
+	}
+
+	rows, err = tx.QueryContext(ctx, `
 SELECT outcome, COUNT(*) FROM controller_audit
 WHERE action = 'approval_fetch' GROUP BY outcome`)
 	if err != nil {
@@ -228,10 +290,47 @@ SELECT COUNT(*) FROM approval_instances WHERE outcome = ?`,
 		return OperationalSnapshot{}, err
 	}
 	snapshot.OldestReadyJobAge = max(snapshot.OldestReadyJobAge, oldestReadyGrantAge)
+	oldestActiveDisableAge, err := oldestPrincipalDisableJobAge(ctx, tx, now, false)
+	if err != nil {
+		return OperationalSnapshot{}, err
+	}
+	snapshot.OldestActiveJobAge = max(snapshot.OldestActiveJobAge, oldestActiveDisableAge)
+	oldestReadyDisableAge, err := oldestPrincipalDisableJobAge(ctx, tx, now, true)
+	if err != nil {
+		return OperationalSnapshot{}, err
+	}
+	snapshot.OldestReadyJobAge = max(snapshot.OldestReadyJobAge, oldestReadyDisableAge)
 	if err := tx.Commit(); err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("commit operational snapshot: %w", err)
 	}
 	return snapshot, nil
+}
+
+func principalDisableAuditOutcomeCounts(
+	ctx context.Context,
+	tx *sql.Tx,
+	action string,
+) (map[string]int64, error) {
+	rows, err := tx.QueryContext(ctx, `
+SELECT outcome, COUNT(*) FROM principal_disable_audit
+WHERE action = ? GROUP BY outcome`, action)
+	if err != nil {
+		return nil, err
+	}
+	counts := make(map[string]int64)
+	for rows.Next() {
+		var outcome string
+		var count int64
+		if err := rows.Scan(&outcome, &count); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		counts[outcome] = count
+	}
+	if err := closeRows(rows, "controller audit metrics"); err != nil {
+		return nil, err
+	}
+	return counts, nil
 }
 
 func entitlementGrantAuditOutcomeCounts(
@@ -341,4 +440,39 @@ WHERE status IN ('pending', 'processing', 'retry_wait')`
 		return 0, nil
 	}
 	return now.Sub(createdAt), nil
+}
+
+func oldestPrincipalDisableJobAge(
+	ctx context.Context,
+	tx *sql.Tx,
+	now time.Time,
+	readyOnly bool,
+) (time.Duration, error) {
+	timestampExpression := "activated_at"
+	if readyOnly {
+		timestampExpression = "CASE WHEN status = 'retry_wait' THEN next_attempt_at ELSE activated_at END"
+	}
+	query := `
+SELECT MIN(` + timestampExpression + `) FROM principal_disable_jobs
+WHERE status IN ('pending', 'processing', 'retry_wait')`
+	args := []any{}
+	if readyOnly {
+		query += ` AND (status != 'retry_wait' OR julianday(next_attempt_at) <= julianday(?))`
+		args = append(args, now.Format(time.RFC3339Nano))
+	}
+	var oldest sql.NullString
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&oldest); err != nil {
+		return 0, fmt.Errorf("query oldest principal disable job age: %w", err)
+	}
+	if !oldest.Valid {
+		return 0, nil
+	}
+	activatedAt, err := time.Parse(time.RFC3339Nano, oldest.String)
+	if err != nil {
+		return 0, fmt.Errorf("parse oldest principal disable job age: %w", err)
+	}
+	if activatedAt.After(now) {
+		return 0, nil
+	}
+	return now.Sub(activatedAt), nil
 }

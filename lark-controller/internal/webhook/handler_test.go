@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
 )
 
@@ -24,12 +25,32 @@ func (r *eventRecorder) Record(context.Context, inbox.Event) (bool, error) {
 	return false, r.err
 }
 
+func TestHandlerRequiresPrincipalDisableSealer(t *testing.T) {
+	var typedNil *newapi.GrantKeyring
+	for name, sealer := range map[string]webhook.PrincipalDisableSealer{
+		"nil interface": nil,
+		"typed nil":     typedNil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := webhook.NewHandler(webhook.Config{
+				VerificationToken:      "verification-token",
+				AppID:                  "cli_test",
+				TenantKey:              "tenant-test",
+				PrincipalDisableSealer: sealer,
+			}, &eventRecorder{}); err == nil {
+				t.Fatal("handler accepted a nil principal disable sealer")
+			}
+		})
+	}
+}
+
 func TestURLVerificationRequiresConfiguredToken(t *testing.T) {
 	recorder := &eventRecorder{}
 	handler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: "verification-token",
-		AppID:             "cli_test",
-		TenantKey:         "tenant-test",
+		VerificationToken:      "verification-token",
+		AppID:                  "cli_test",
+		TenantKey:              "tenant-test",
+		PrincipalDisableSealer: testPrincipalDisableSealer(t),
 	}, recorder)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -70,9 +91,10 @@ func TestURLVerificationRequiresConfiguredToken(t *testing.T) {
 func TestURLVerificationRejectsUnknownSchema(t *testing.T) {
 	recorder := &eventRecorder{}
 	handler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: "verification-token",
-		AppID:             "cli_test",
-		TenantKey:         "tenant-test",
+		VerificationToken:      "verification-token",
+		AppID:                  "cli_test",
+		TenantKey:              "tenant-test",
+		PrincipalDisableSealer: testPrincipalDisableSealer(t),
 	}, recorder)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -93,9 +115,10 @@ func TestURLVerificationRejectsUnknownSchema(t *testing.T) {
 
 func TestEventReturnsRetryableFailureUntilInboxCommitSucceeds(t *testing.T) {
 	handler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: "verification-token",
-		AppID:             "cli_test",
-		TenantKey:         "tenant-test",
+		VerificationToken:      "verification-token",
+		AppID:                  "cli_test",
+		TenantKey:              "tenant-test",
+		PrincipalDisableSealer: testPrincipalDisableSealer(t),
 	}, &eventRecorder{err: errors.New("database unavailable")})
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -117,6 +140,15 @@ func TestEventReturnsRetryableFailureUntilInboxCommitSucceeds(t *testing.T) {
 		strings.Contains(response.Body.String(), "database unavailable") {
 		t.Fatalf("unexpected inbox failure body: %s", response.Body.String())
 	}
+}
+
+func testPrincipalDisableSealer(t *testing.T) *newapi.GrantKeyring {
+	t.Helper()
+	keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new principal disable keyring: %v", err)
+	}
+	return keyring
 }
 
 func postJSON(t *testing.T, handler http.Handler, payload any) *httptest.ResponseRecorder {

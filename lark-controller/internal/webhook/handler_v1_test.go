@@ -13,9 +13,10 @@ import (
 func TestV1ApprovalEventUsesTopLevelUUIDForDurableDeduplication(t *testing.T) {
 	store := openStore(t, filepath.Join(t.TempDir(), "controller.sqlite"))
 	handler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: "verification-token",
-		AppID:             "cli_test",
-		TenantKey:         "tenant-test",
+		VerificationToken:      "verification-token",
+		AppID:                  "cli_test",
+		TenantKey:              "tenant-test",
+		PrincipalDisableSealer: testPrincipalDisableSealer(t),
 	}, store)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -59,9 +60,10 @@ func TestV1ApprovalEventUsesTopLevelUUIDForDurableDeduplication(t *testing.T) {
 func TestV1EventRejectsNonCallbackEnvelopeWithoutRecording(t *testing.T) {
 	recorder := &eventRecorder{}
 	handler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: "verification-token",
-		AppID:             "cli_test",
-		TenantKey:         "tenant-test",
+		VerificationToken:      "verification-token",
+		AppID:                  "cli_test",
+		TenantKey:              "tenant-test",
+		PrincipalDisableSealer: testPrincipalDisableSealer(t),
 	}, recorder)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
@@ -90,9 +92,10 @@ func TestV1EventRejectsNonCallbackEnvelopeWithoutRecording(t *testing.T) {
 func TestEventRejectsUnknownSchemaWithoutRecording(t *testing.T) {
 	recorder := &eventRecorder{}
 	handler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: "verification-token",
-		AppID:             "cli_test",
-		TenantKey:         "tenant-test",
+		VerificationToken:      "verification-token",
+		AppID:                  "cli_test",
+		TenantKey:              "tenant-test",
+		PrincipalDisableSealer: testPrincipalDisableSealer(t),
 	}, recorder)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)

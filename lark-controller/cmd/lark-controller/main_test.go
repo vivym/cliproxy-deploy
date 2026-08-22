@@ -46,6 +46,10 @@ func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
 	if err != nil || grantRuntime != nil {
 		t.Fatalf("shadow grant runtime = %v, err=%v", grantRuntime, err)
 	}
+	disableRuntime, err := activatePrincipalDisableRuntime(ctx, "shadow", store, grantClient, keyring)
+	if err != nil || disableRuntime != nil {
+		t.Fatalf("shadow principal disable runtime = %v, err=%v", disableRuntime, err)
+	}
 
 	secretPath := filepath.Join(t.TempDir(), "lark-integration.secret")
 	if err := os.WriteFile(secretPath, []byte("too-short\n"), 0o600); err != nil {
@@ -68,6 +72,10 @@ func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
 	grantRuntime, err = activateGrantRuntime(ctx, "active", store, grantClient, "employee-v1", keyring)
 	if err != nil || grantRuntime == nil {
 		t.Fatalf("activate grant runtime: runtime=%v err=%v", grantRuntime, err)
+	}
+	disableRuntime, err = activatePrincipalDisableRuntime(ctx, "active", store, grantClient, keyring)
+	if err != nil || disableRuntime == nil {
+		t.Fatalf("activate principal disable runtime: runtime=%v err=%v", disableRuntime, err)
 	}
 }
 
@@ -96,11 +104,16 @@ func TestWebhookAcknowledgementBudgetIncludesHeaderReadAndInboxContention(t *tes
 		t.Fatalf("lock database for writing: %v", err)
 	}
 	t.Cleanup(func() { _, _ = lockConnection.ExecContext(context.Background(), "ROLLBACK") })
+	keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new principal disable keyring: %v", err)
+	}
 
 	eventHandler, err := webhook.NewHandler(webhook.Config{
-		VerificationToken: "verification-token",
-		AppID:             "cli_test",
-		TenantKey:         "tenant-test",
+		VerificationToken:      "verification-token",
+		AppID:                  "cli_test",
+		TenantKey:              "tenant-test",
+		PrincipalDisableSealer: keyring,
 	}, store)
 	if err != nil {
 		t.Fatalf("new handler: %v", err)
