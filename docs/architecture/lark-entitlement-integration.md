@@ -1726,9 +1726,16 @@ New API 检查：
 当前本地实现收据：fork 从上游 `v0.13.2` 的 peeled commit
 `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d` 开始，bigint、wallet grant、managed
 subscription、managed OAuth、principal disable 和 operator correction 六个 tracer slice 均已实现，常驻 wire contract
-固定于 `f2ef0d95`，correction contract 在当前本地 worktree 验证。`go test ./service ./router ./middleware ./model ./controller` 已通过；真实
-MySQL/PostgreSQL migration 测试仍需要外部 DSN，仓库全量套件仍保留 WP2 baseline 记录的
-4 个非集成失败。这些是本地验证收据，不代表镜像已构建、Compose 已接入或生产已验收。
+固定于 `f2ef0d95`，correction boundary 固定于 `f1be0d7a`，确定性 Bun dependency source
+构建修复固定于 `dbfcf0c7`。`go test ./service ./router ./middleware ./model ./controller`
+已通过；`controller/token_test.go` 和 `model/integration_migration_test.go` 的迁移门禁也已在
+SQLite、MySQL 8.0 和 PostgreSQL 16 上通过。`dbfcf0c7` 源码已完成本地完整镜像构建，
+`linux/arm64` local image ID 为
+`sha256:68f25465624a0e736a2bfacf58adad608b0e2777f4f89be0272a174bf952e973`。
+仓库全量 `go test ./...` 仍重现 4 个非 Lark 基线失败：Claude file-content 转换 3 个，
+stream ticker 零间隔 panic 1 个；对应 `relay/channel/claude` 和 `relay/helper` 路径相对上述
+peeled upstream commit 无 diff。这些是本地验证收据，不是 multi-arch registry manifest
+digest，也不代表镜像已发布或生产已验收。
 
 ### WP3：Controller
 
@@ -1875,6 +1882,13 @@ job 年龄，未来的 `retry_wait` 不会被误判为卡死。
 - [x] 本地 verify 已检查公网 integration path 为 `404`、New API 容器内无凭证访问 `:3001` 为 `401`、Controller `readyz` 和 OAuth 灰度门禁。
 - [ ] 在获准的生产维护窗口从 `edge`、`new-api-data` 和 `lark-integration` 各自独立 probe，完成公网与所有相邻网络验收。
 - [x] 增加 Compose 灰度、secret/policy/rotation 配置、host-side correction maintenance lock 和回滚 runbook；Lark 后台实租户配置、dead-letter 和 reversal 演练仍待执行。
+
+当前本地 `linux/arm64` 构建收据如下；它们都是 local image ID，不是可发布的 registry
+manifest digest：
+
+- New API fork `dbfcf0c7`：`sha256:68f25465624a0e736a2bfacf58adad608b0e2777f4f89be0272a174bf952e973`
+- Controller `f55103e`：`sha256:9f5a2401242ed2cd90daadcc5249037323250d9f6f90384bdbd93570469d538e`
+- correction CLI `f55103e`：`sha256:840befffed905094ab3e99d33aaab90c57023f9251800bc41c53c90b5613c8aa`
 
 ### WP5：灰度上线
 
