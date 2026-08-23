@@ -24,6 +24,14 @@ The controller supports a locally verified `shadow` mode and an explicit
   SQLite WAL storage;
 - fetches authoritative Approval v4 instances for `APPROVED`,
   `OVERTIME_RECOVER`, and `REVERTED` events;
+- in both modes, scans every active or draining approval binding in at-most-
+  10-hour creation windows, persists a monotonic cursor per `approval_code`,
+  overlaps resumed scans by ten minutes, and creates deterministic internal
+  inbox events only from authoritative `APPROVED` or `reverted=true` evidence;
+- rechecks grant-backed approvals under non-retired policies for late
+  reversals, routes them through the same deny fence and manual-correction
+  semantics as webhook reversals, and keeps internal reconciliation events out
+  of `lark_webhook_*` counters;
 - loads immutable historical policy catalogs and approval definition manifests
   from operator-mounted strict JSON files;
 - resolves `radioV2` values by exact display text and persists only sanitized
@@ -96,7 +104,7 @@ The controller supports a locally verified `shadow` mode and an explicit
 - exposes liveness, readiness, and bounded-label Prometheus metrics for inbox,
   jobs, approval fetches, approval reversals, New API shadow grants, held grant
   jobs, policy failures, principal disable jobs, processing recovery, dead
-  letters, and queue age;
+  letters, approval/employment reconciliation, and queue age;
 - keeps queryable columns limited to normalized event data, hashes, decisions,
   stable failure reasons, and sanitized New API receipts; the complete grant
   request exists only as authenticated ciphertext; and
@@ -171,6 +179,8 @@ LARK_PROCESSING_RECOVERY_INTERVAL=1m
 LARK_OAUTH_RATE_LIMIT_PER_MINUTE=30
 LARK_OAUTH_TRUSTED_PROXY_CIDRS=172.31.20.0/24
 LARK_RECONCILIATION_INTERVAL=24h
+LARK_APPROVAL_RECONCILIATION_INTERVAL=15m
+LARK_APPROVAL_RECONCILIATION_LOOKBACK=72h
 ```
 
 The configured OAuth rate limit is applied independently to authorize,
@@ -200,6 +210,27 @@ be between `24h` and `168h`. A failed run is retried after at least 15 minutes;
 a longer Lark `Retry-After` is honored up to the normal reconciliation interval.
 Completed runs are idempotent by UTC evidence date, and Prometheus exposes
 their append-only outcomes through `employment_reconciliation_total{result}`.
+
+Approval reconciliation runs in both modes. Its interval defaults to `15m`
+and accepts `1m..24h`; its initial lookback defaults to `72h` and accepts
+`1h..720h`. Lark list requests use at-most-10-hour windows and pages of at most
+100 instance codes. A cursor advances only after its complete window succeeds,
+while a ten-minute overlap makes restarts and boundary deliveries replay-safe.
+Active bindings scan through the current run time, draining bindings stop at
+`accept_instance_started_before`, and retired bindings are excluded. Existing
+validated grants remain recheck targets until a confirmed reversal is recorded
+or their policy is retired. Pagination loops, duplicate instance codes,
+authority mismatches, malformed responses, `429`, and `5xx` fail closed and
+append only bounded audit results. Approval and employment reconciliation share
+one process-wide request pacer, so their aggregate Lark request starts remain
+at least 100ms apart. Failures retry after at least five minutes and honor a
+longer `Retry-After` up to 24 hours. Prometheus exposes the audit through
+`approval_reconciliation_total{result}` and exposes per-binding progress through
+`approval_reconciliation_cursor_initialized{approval_code}` and
+`approval_reconciliation_cursor_lag_seconds{approval_code}`. A failed binding
+does not block later bindings or grant rechecks; its next window stays pinned to
+the last successful cursor. A tenant-wide rate limit still stops the current
+run so the scheduler can honor `Retry-After`.
 
 The internal token endpoint accepts only `POST` with an at-most-16-KiB
 `application/x-www-form-urlencoded` body containing exactly one non-empty
@@ -279,9 +310,12 @@ Outstanding manual work is exposed as
 `lark_approval_reversal_pending{reason}`. The checked-in
 `monitoring/lark-controller-alerts.yml` rule turns any durable pending reversal
 into `LarkApprovalReversalPending`; the deployment must load that rule and route
-the alert through Alertmanager to an operator destination. The rule and metric
-are implemented locally, but production Prometheus/Alertmanager wiring has not
-been performed.
+the alert through Alertmanager to an operator destination. The same file emits
+`LarkApprovalReconciliationFailed` when a bounded reconciliation failure result
+increases and `LarkApprovalReconciliationCursorStalled` when a non-retired
+binding has no cursor or remains more than 26 hours behind its active/current
+or draining/cutoff target. The rules and metrics are implemented locally, but
+production Prometheus/Alertmanager wiring has not been performed.
 
 Principal-disable jobs use an independent durable ledger and audit table. A
 real-time contact event binds its optional inbox event key, while the job model
@@ -369,7 +403,7 @@ OAuth credential store, the outbound Lark token/userinfo adapter, and the
 public OAuth authorize/callback handlers, internal token/userinfo handlers,
 and idempotent base-subscription dispatch are implemented locally. Employment
 reconciliation, runtime stale-claim recovery, and event-driven approval
-reversal fencing are also implemented locally. Periodic approval
-reconciliation, operator correction workflows, Compose wiring, operational
-runbooks, and production validation remain follow-up work. Do not enable active
-mode in production before those gates are complete.
+reversal fencing are also implemented locally. Periodic approval reconciliation
+is now implemented locally; operator correction workflows, Compose wiring,
+operational runbooks, and production validation remain follow-up work. Do not
+enable active mode in production before those gates are complete.

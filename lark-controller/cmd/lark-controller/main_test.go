@@ -53,7 +53,7 @@ func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
 		t.Fatalf("shadow principal disable runtime = %v, err=%v", disableRuntime, err)
 	}
 	reconciler, err := activateEmploymentReconciliation(
-		"shadow", store, grantClient, nil, keyring, "tenant-test", "ou_health",
+		"shadow", store, grantClient, nil, keyring, "tenant-test", "ou_health", nil,
 	)
 	if err != nil || reconciler != nil {
 		t.Fatalf("shadow employment reconciler = %v, err=%v", reconciler, err)
@@ -93,6 +93,7 @@ func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
 		keyring,
 		"tenant-test",
 		"ou_health",
+		nil,
 	)
 	if err != nil || reconciler == nil {
 		t.Fatalf("activate employment reconciler: reconciler=%v err=%v", reconciler, err)
@@ -149,6 +150,89 @@ func TestScheduledWorkerDelayHonorsBoundedEmploymentRetryAfter(t *testing.T) {
 				t.Fatalf("scheduled worker delay = %s, want %s", got, test.want)
 			}
 		})
+	}
+}
+
+func TestScheduledWorkerDelayHonorsBoundedApprovalRetryAfter(t *testing.T) {
+	interval := 15 * time.Minute
+	retryInterval := 5 * time.Minute
+	tests := []struct {
+		name     string
+		interval time.Duration
+		err      error
+		want     time.Duration
+	}{
+		{name: "generic failure", interval: interval, err: errors.New("failure"), want: retryInterval},
+		{name: "retry floor exceeds success interval", interval: time.Minute, err: errors.New("failure"), want: retryInterval},
+		{
+			name: "short retry after", interval: interval,
+			err: &worker.ApprovalFetchError{
+				Reason: worker.ApprovalFetchRateLimited, Retryable: true, RetryAfter: time.Minute,
+			},
+			want: retryInterval,
+		},
+		{
+			name: "long retry after", interval: interval,
+			err: &worker.ApprovalFetchError{
+				Reason: worker.ApprovalFetchRateLimited, Retryable: true, RetryAfter: time.Hour,
+			},
+			want: time.Hour,
+		},
+		{
+			name: "bounded retry after", interval: interval,
+			err: &worker.ApprovalFetchError{
+				Reason: worker.ApprovalFetchRateLimited, Retryable: true, RetryAfter: 48 * time.Hour,
+			},
+			want: 24 * time.Hour,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := scheduledWorkerDelay(test.err, test.interval, retryInterval); got != test.want {
+				t.Fatalf("scheduled worker delay = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestApprovalReconciliationBindingsExcludeRetiredAndBoundDraining(t *testing.T) {
+	cutoff := "2026-08-23T12:00:00Z"
+	bindings, err := approvalReconciliationBindings(policy.Snapshot{
+		Policies: []policy.PolicySnapshot{
+			{PolicyVersion: "active", State: policy.PolicyStateActive},
+			{PolicyVersion: "draining", State: policy.PolicyStateDraining},
+			{PolicyVersion: "retired", State: policy.PolicyStateRetired},
+		},
+		Bindings: []policy.ApprovalBindingSnapshot{
+			{ApprovalCode: "approval-active", PolicyVersion: "active"},
+			{
+				ApprovalCode: "approval-draining", PolicyVersion: "draining",
+				AcceptInstanceStartedBefore: cutoff,
+			},
+			{
+				ApprovalCode: "approval-retired", PolicyVersion: "retired",
+				AcceptInstanceStartedBefore: "2026-08-22T12:00:00Z",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("build approval reconciliation bindings: %v", err)
+	}
+	wantCutoff, _ := time.Parse(time.RFC3339, cutoff)
+	if len(bindings) != 2 || bindings[0].ApprovalCode != "approval-active" ||
+		!bindings[0].ScanUntil.IsZero() || bindings[1].ApprovalCode != "approval-draining" ||
+		!bindings[1].ScanUntil.Equal(wantCutoff) {
+		t.Fatalf("approval reconciliation bindings = %+v", bindings)
+	}
+	if _, err := approvalReconciliationBindings(policy.Snapshot{
+		Policies: []policy.PolicySnapshot{{
+			PolicyVersion: "draining", State: policy.PolicyStateDraining,
+		}},
+		Bindings: []policy.ApprovalBindingSnapshot{{
+			ApprovalCode: "approval-draining", PolicyVersion: "draining",
+		}},
+	}); err == nil || !strings.Contains(err.Error(), "valid scan cutoff") {
+		t.Fatalf("missing draining cutoff error = %v", err)
 	}
 }
 

@@ -9,3 +9,19 @@ groups:
         annotations:
           summary: Lark approval reversal requires operator review
           description: The controller has at least one durable approval reversal awaiting manual correction.
+      - alert: LarkApprovalReconciliationFailed
+        expr: sum(increase(approval_reconciliation_total{result!="success"}[30m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Lark approval reconciliation failed
+          description: The controller failed to complete at least one approval reconciliation window in the last 30 minutes.
+      - alert: LarkApprovalReconciliationCursorStalled
+        expr: approval_reconciliation_cursor_initialized == 0 or approval_reconciliation_cursor_lag_seconds > 93600
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: Lark approval reconciliation cursor is stalled
+          description: A non-retired approval binding has no successful cursor or remains more than 26 hours behind its active or draining scan target.

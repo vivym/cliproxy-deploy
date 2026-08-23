@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -428,6 +429,152 @@ func TestApprovalFetcherRejectsPartiallyPopulatedSuccessResponse(t *testing.T) {
 	var failure *worker.ApprovalFetchError
 	if !errors.As(err, &failure) || failure.Reason != worker.ApprovalFetchInvalidResponse || failure.Retryable {
 		t.Fatalf("failure = %+v err=%v, want terminal invalid response", failure, err)
+	}
+}
+
+func TestApprovalFetcherListsInstanceCodesWithBoundedWindowAndPagination(t *testing.T) {
+	windowStart := time.Date(2026, 8, 23, 1, 2, 3, 456_000_000, time.UTC)
+	windowEnd := windowStart.Add(10 * time.Hour)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeTestJSON(t, response, map[string]any{
+				"code": 0, "msg": "ok", "tenant_access_token": "tenant-token", "expire": 7200,
+			})
+		case "/open-apis/approval/v4/instances":
+			if request.Header.Get("Authorization") != "Bearer tenant-token" {
+				t.Fatalf("authorization = %q, want tenant token", request.Header.Get("Authorization"))
+			}
+			query := request.URL.Query()
+			if query.Get("approval_code") != "approval-wallet-v1" ||
+				query.Get("start_time") != fmt.Sprint(windowStart.UnixMilli()) ||
+				query.Get("end_time") != fmt.Sprint(windowEnd.UnixMilli()) ||
+				query.Get("page_token") != "page-1" || query.Get("page_size") != "2" {
+				t.Fatalf("unexpected list query: %s", request.URL.RawQuery)
+			}
+			writeTestJSON(t, response, map[string]any{
+				"code": 0, "msg": "ok", "data": map[string]any{
+					"instance_code_list": []string{"instance-001", "instance-002"},
+					"page_token":         "page-2",
+					"has_more":           true,
+				},
+			})
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	fetcher, err := larkapi.NewApprovalFetcher(larkapi.Config{
+		AppID: "cli_test", AppSecret: "app-secret", BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("new approval fetcher: %v", err)
+	}
+	page, err := fetcher.ListInstanceCodes(
+		context.Background(), "approval-wallet-v1", windowStart, windowEnd, "page-1", 2,
+	)
+	if err != nil {
+		t.Fatalf("list approval instances: %v", err)
+	}
+	if fmt.Sprint(page.InstanceCodes) != "[instance-001 instance-002]" ||
+		page.NextPageToken != "page-2" || !page.HasMore {
+		t.Fatalf("unexpected approval instance page: %+v", page)
+	}
+}
+
+func TestApprovalFetcherRejectsMalformedInstanceListResponses(t *testing.T) {
+	tests := []struct {
+		name string
+		data any
+	}{
+		{name: "missing data"},
+		{name: "missing has more", data: map[string]any{"instance_code_list": []string{}}},
+		{name: "missing next token", data: map[string]any{
+			"instance_code_list": []string{"instance-001"}, "has_more": true,
+		}},
+		{name: "invalid terminal token", data: map[string]any{
+			"instance_code_list": []string{}, "page_token": " bad ", "has_more": false,
+		}},
+		{name: "empty instance code", data: map[string]any{
+			"instance_code_list": []string{""}, "has_more": false,
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				if request.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+					writeTestJSON(t, response, map[string]any{
+						"code": 0, "msg": "ok", "tenant_access_token": "tenant-token", "expire": 7200,
+					})
+					return
+				}
+				writeTestJSON(t, response, map[string]any{"code": 0, "msg": "ok", "data": test.data})
+			}))
+			defer server.Close()
+			fetcher, err := larkapi.NewApprovalFetcher(larkapi.Config{
+				AppID: "cli_test", AppSecret: "app-secret", BaseURL: server.URL,
+			})
+			if err != nil {
+				t.Fatalf("new approval fetcher: %v", err)
+			}
+			_, err = fetcher.ListInstanceCodes(
+				context.Background(),
+				"approval-wallet-v1",
+				time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC),
+				time.Date(2026, 8, 23, 1, 0, 0, 0, time.UTC),
+				"",
+				100,
+			)
+			var failure *worker.ApprovalFetchError
+			if !errors.As(err, &failure) || failure.Reason != worker.ApprovalFetchInvalidResponse || failure.Retryable {
+				t.Fatalf("failure = %+v err=%v, want terminal invalid response", failure, err)
+			}
+		})
+	}
+}
+
+func TestApprovalFetcherRejectsInvalidInstanceListRequestBeforeNetwork(t *testing.T) {
+	fetcher, err := larkapi.NewApprovalFetcher(larkapi.Config{
+		AppID: "cli_test", AppSecret: "app-secret", BaseURL: "http://127.0.0.1:1",
+	})
+	if err != nil {
+		t.Fatalf("new approval fetcher: %v", err)
+	}
+	start := time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)
+	if _, err := fetcher.ListInstanceCodes(
+		context.Background(), "approval-wallet-v1", start, start.Add(10*time.Hour+time.Millisecond), "", 100,
+	); err == nil || !strings.Contains(err.Error(), "invalid approval instance list request") {
+		t.Fatalf("oversized list window error = %v", err)
+	}
+}
+
+func TestApprovalFetcherClassifiesInstanceListBusinessRateLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal" {
+			writeTestJSON(t, response, map[string]any{
+				"code": 0, "msg": "ok", "tenant_access_token": "tenant-token", "expire": 7200,
+			})
+			return
+		}
+		response.Header().Set("Retry-After", "17")
+		writeTestJSON(t, response, map[string]any{"code": 99991400, "msg": "rate limited"})
+	}))
+	defer server.Close()
+	fetcher, err := larkapi.NewApprovalFetcher(larkapi.Config{
+		AppID: "cli_test", AppSecret: "app-secret", BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("new approval fetcher: %v", err)
+	}
+	start := time.Date(2026, 8, 23, 0, 0, 0, 0, time.UTC)
+	_, err = fetcher.ListInstanceCodes(
+		context.Background(), "approval-wallet-v1", start, start.Add(time.Hour), "", 100,
+	)
+	var failure *worker.ApprovalFetchError
+	if !errors.As(err, &failure) || failure.Reason != worker.ApprovalFetchRateLimited ||
+		!failure.Retryable || failure.RetryAfter != 17*time.Second {
+		t.Fatalf("list rate-limit failure = %+v err=%v", failure, err)
 	}
 }
 

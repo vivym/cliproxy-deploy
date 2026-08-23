@@ -39,6 +39,10 @@ func TestLoadRequiresCommonSecretsAndDefaultsToShadowMode(t *testing.T) {
 		loaded.ProcessingRecoveryInterval != time.Minute {
 		t.Fatalf("unexpected processing recovery defaults: %+v", loaded)
 	}
+	if loaded.ApprovalReconcileInterval != 15*time.Minute ||
+		loaded.ApprovalReconcileLookback != 72*time.Hour {
+		t.Fatalf("unexpected approval reconciliation defaults: %+v", loaded)
+	}
 	if loaded.OAuthRateLimitPerMinute != 30 || len(loaded.OAuthTrustedProxyCIDRs) != 0 ||
 		loaded.BridgeClientID != "bridge-client-id" ||
 		loaded.BridgeClientSecretFile != "/run/secrets/new_api_bridge_client_secret" ||
@@ -63,6 +67,56 @@ func TestLoadRequiresCommonSecretsAndDefaultsToShadowMode(t *testing.T) {
 	_, err = config.Load(func(key string) string { return values[key] })
 	if err == nil || strings.Contains(err.Error(), "app-secret") {
 		t.Fatalf("missing secret error = %v, want non-secret validation error", err)
+	}
+}
+
+func TestLoadValidatesApprovalReconciliationDurations(t *testing.T) {
+	values := map[string]string{
+		"LARK_CONTROLLER_DB_PATH":               "/data/controller.sqlite",
+		"LARK_APP_ID":                           "cli_test",
+		"LARK_APP_SECRET":                       "app-secret",
+		"LARK_VERIFICATION_TOKEN":               "verification-token",
+		"LARK_EVENT_ENCRYPT_KEY":                "event-encryption-key",
+		"LARK_TENANT_KEY":                       "tenant-test",
+		"LARK_ACTIVE_POLICY_VERSION":            "employee-v1",
+		"LARK_POLICY_BUNDLE_DIR":                "/policies",
+		"LARK_APPROVAL_BINDINGS_FILE":           "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE":       "/run/secrets/lark_grant_payload_keyring",
+		"NEW_API_BRIDGE_CLIENT_ID":              "bridge-client-id",
+		"NEW_API_BRIDGE_CLIENT_SECRET_FILE":     "/run/secrets/new_api_bridge_client_secret",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":      "https://ai.x2r.store/oauth/lark",
+		"LARK_APPROVAL_RECONCILIATION_INTERVAL": "30m",
+		"LARK_APPROVAL_RECONCILIATION_LOOKBACK": "168h",
+	}
+	loaded, err := config.Load(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatalf("load approval reconciliation config: %v", err)
+	}
+	if loaded.ApprovalReconcileInterval != 30*time.Minute ||
+		loaded.ApprovalReconcileLookback != 168*time.Hour {
+		t.Fatalf("unexpected approval reconciliation config: %+v", loaded)
+	}
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{name: "LARK_APPROVAL_RECONCILIATION_INTERVAL", value: "59s"},
+		{name: "LARK_APPROVAL_RECONCILIATION_INTERVAL", value: "25h"},
+		{name: "LARK_APPROVAL_RECONCILIATION_INTERVAL", value: "later"},
+		{name: "LARK_APPROVAL_RECONCILIATION_LOOKBACK", value: "59m"},
+		{name: "LARK_APPROVAL_RECONCILIATION_LOOKBACK", value: "721h"},
+		{name: "LARK_APPROVAL_RECONCILIATION_LOOKBACK", value: "later"},
+	}
+	for _, test := range tests {
+		t.Run(test.name+"="+test.value, func(t *testing.T) {
+			original := values[test.name]
+			values[test.name] = test.value
+			_, err := config.Load(func(key string) string { return values[key] })
+			values[test.name] = original
+			if err == nil || !strings.Contains(err.Error(), test.name) {
+				t.Fatalf("invalid %s=%q error = %v", test.name, test.value, err)
+			}
+		})
 	}
 }
 

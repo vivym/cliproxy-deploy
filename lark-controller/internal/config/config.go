@@ -15,17 +15,23 @@ import (
 type Mode string
 
 const (
-	ModeShadow                        Mode = "shadow"
-	ModeActive                        Mode = "active"
-	defaultOAuthRateLimitPerMinute         = 30
-	maxOAuthRateLimitPerMinute             = 10_000
-	defaultReconciliationInterval          = 24 * time.Hour
-	maxReconciliationInterval              = 7 * 24 * time.Hour
-	defaultProcessingLeaseTimeout          = 5 * time.Minute
-	defaultProcessingRecoveryInterval      = time.Minute
-	minProcessingLeaseTimeout              = time.Minute
-	maxProcessingLeaseTimeout              = time.Hour
-	minProcessingRecoveryInterval          = 10 * time.Second
+	ModeShadow                            Mode = "shadow"
+	ModeActive                            Mode = "active"
+	defaultOAuthRateLimitPerMinute             = 30
+	maxOAuthRateLimitPerMinute                 = 10_000
+	defaultReconciliationInterval              = 24 * time.Hour
+	maxReconciliationInterval                  = 7 * 24 * time.Hour
+	defaultApprovalReconciliationInterval      = 15 * time.Minute
+	minApprovalReconciliationInterval          = time.Minute
+	maxApprovalReconciliationInterval          = 24 * time.Hour
+	defaultApprovalReconciliationLookback      = 72 * time.Hour
+	minApprovalReconciliationLookback          = time.Hour
+	maxApprovalReconciliationLookback          = 30 * 24 * time.Hour
+	defaultProcessingLeaseTimeout              = 5 * time.Minute
+	defaultProcessingRecoveryInterval          = time.Minute
+	minProcessingLeaseTimeout                  = time.Minute
+	maxProcessingLeaseTimeout                  = time.Hour
+	minProcessingRecoveryInterval              = 10 * time.Second
 )
 
 type Config struct {
@@ -46,6 +52,8 @@ type Config struct {
 	IntegrationSecretFile        string
 	ReconciliationHealthOpenID   string
 	ReconciliationInterval       time.Duration
+	ApprovalReconcileInterval    time.Duration
+	ApprovalReconcileLookback    time.Duration
 	BridgeClientID               string
 	BridgeClientSecretFile       string
 	NewAPIOAuthCallbackAllowlist []string
@@ -81,6 +89,8 @@ func Load(getenv func(string) string) (Config, error) {
 		ReadinessMaxQueueAge:       15 * time.Minute,
 		OAuthRateLimitPerMinute:    defaultOAuthRateLimitPerMinute,
 		ReconciliationInterval:     defaultReconciliationInterval,
+		ApprovalReconcileInterval:  defaultApprovalReconciliationInterval,
+		ApprovalReconcileLookback:  defaultApprovalReconciliationLookback,
 		ProcessingLeaseTimeout:     defaultProcessingLeaseTimeout,
 		ProcessingRecoveryInterval: defaultProcessingRecoveryInterval,
 	}
@@ -142,6 +152,22 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if loaded.ProcessingLeaseTimeout+loaded.ProcessingRecoveryInterval >= loaded.ReadinessMaxQueueAge {
 		return Config{}, errors.New("LARK_READINESS_MAX_QUEUE_AGE must exceed the processing lease plus recovery interval")
+	}
+	if raw := getenv("LARK_APPROVAL_RECONCILIATION_INTERVAL"); raw != "" {
+		interval, err := time.ParseDuration(raw)
+		if err != nil || interval < minApprovalReconciliationInterval ||
+			interval > maxApprovalReconciliationInterval {
+			return Config{}, errors.New("LARK_APPROVAL_RECONCILIATION_INTERVAL must be between 1m and 24h")
+		}
+		loaded.ApprovalReconcileInterval = interval
+	}
+	if raw := getenv("LARK_APPROVAL_RECONCILIATION_LOOKBACK"); raw != "" {
+		lookback, err := time.ParseDuration(raw)
+		if err != nil || lookback < minApprovalReconciliationLookback ||
+			lookback > maxApprovalReconciliationLookback {
+			return Config{}, errors.New("LARK_APPROVAL_RECONCILIATION_LOOKBACK must be between 1h and 720h")
+		}
+		loaded.ApprovalReconcileLookback = lookback
 	}
 	required := map[string]string{
 		"LARK_CONTROLLER_DB_PATH":           loaded.DatabasePath,

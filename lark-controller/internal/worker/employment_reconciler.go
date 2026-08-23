@@ -73,6 +73,7 @@ type EmploymentReconcilerConfig struct {
 	HealthOpenID           string
 	PageLimit              int
 	MinimumCheckInterval   time.Duration
+	RequestPacer           RequestPacer
 	Now                    func() time.Time
 }
 
@@ -97,6 +98,13 @@ func NewEmploymentReconciler(config EmploymentReconcilerConfig) (*EmploymentReco
 	if config.MinimumCheckInterval < 0 {
 		return nil, errors.New("employment reconciliation check interval must not be negative")
 	}
+	if isNilDependency(config.RequestPacer) {
+		var err error
+		config.RequestPacer, err = NewRequestPacer(config.MinimumCheckInterval)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -113,7 +121,7 @@ func (r *EmploymentReconciler) RunOnce(ctx context.Context) (bool, error) {
 	checks := make([]inbox.EmploymentCheck, 0)
 	checkEmployment := pacedEmploymentChecks(
 		r.config.EmploymentChecker.CheckEmployment,
-		r.config.MinimumCheckInterval,
+		r.config.RequestPacer,
 	)
 	if err := r.requireHealthyProbe(ctx, checkEmployment); err != nil {
 		return r.fail(ctx, evidenceDate, startedAt, "health_probe_failed", checks, err)
@@ -237,20 +245,12 @@ type employmentCheckFunc func(context.Context, string) (EmploymentCheckResult, e
 
 func pacedEmploymentChecks(
 	check employmentCheckFunc,
-	minimumInterval time.Duration,
+	pacer RequestPacer,
 ) employmentCheckFunc {
-	nextCheckAt := time.Time{}
 	return func(ctx context.Context, openID string) (EmploymentCheckResult, error) {
-		if wait := time.Until(nextCheckAt); wait > 0 {
-			timer := time.NewTimer(wait)
-			defer timer.Stop()
-			select {
-			case <-ctx.Done():
-				return EmploymentCheckResult{}, ctx.Err()
-			case <-timer.C:
-			}
+		if err := pacer.Wait(ctx); err != nil {
+			return EmploymentCheckResult{}, err
 		}
-		nextCheckAt = time.Now().Add(minimumInterval)
 		return check(ctx, openID)
 	}
 }

@@ -105,6 +105,15 @@ func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 		EmploymentReconciliations: map[string]int64{
 			"success": 2, "health_probe_failed": 1, "unexpected": 3,
 		},
+		ApprovalReconciliations: map[string]int64{
+			"success": 4, "rate_limited": 1, "unexpected": 2,
+		},
+		ApprovalCursorInitialized: map[string]int64{
+			"approval-wallet-v1": 1, "approval-level-v2": 0,
+		},
+		ApprovalCursorLagSeconds: map[string]int64{
+			"approval-wallet-v1": 42, "approval-level-v2": 0,
+		},
 		ProcessingRecoveries: map[string]int64{
 			"approval": 2, "entitlement_grant": 1, "unexpected": 4,
 		},
@@ -158,6 +167,14 @@ func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 		`employment_reconciliation_total{result="health_probe_failed"} 1`,
 		`employment_reconciliation_total{result="other"} 3`,
 		`employment_reconciliation_total{result="success"} 2`,
+		`approval_reconciliation_total{result="other"} 2`,
+		`approval_reconciliation_total{result="incomplete_scan"} 0`,
+		`approval_reconciliation_total{result="rate_limited"} 1`,
+		`approval_reconciliation_total{result="success"} 4`,
+		`approval_reconciliation_cursor_initialized{approval_code="approval-level-v2"} 0`,
+		`approval_reconciliation_cursor_initialized{approval_code="approval-wallet-v1"} 1`,
+		`approval_reconciliation_cursor_lag_seconds{approval_code="approval-level-v2"} 0`,
+		`approval_reconciliation_cursor_lag_seconds{approval_code="approval-wallet-v1"} 42`,
 		`lark_controller_processing_recovered_total{queue="approval"} 2`,
 		`lark_controller_processing_recovered_total{queue="entitlement_grant"} 1`,
 		`lark_controller_processing_recovered_total{queue="other"} 4`,

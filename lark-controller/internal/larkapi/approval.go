@@ -94,6 +94,69 @@ func (f *ApprovalFetcher) Fetch(ctx context.Context, instanceCode, locale string
 	}, nil
 }
 
+func (f *ApprovalFetcher) ListInstanceCodes(
+	ctx context.Context,
+	approvalCode string,
+	windowStart time.Time,
+	windowEnd time.Time,
+	pageToken string,
+	pageSize int,
+) (worker.ApprovalInstancePage, error) {
+	startMilliseconds := windowStart.UnixMilli()
+	endMilliseconds := windowEnd.UnixMilli()
+	if !validListValue(approvalCode, 512) ||
+		(pageToken != "" && !validListValue(pageToken, 2048)) ||
+		windowStart.IsZero() || windowEnd.IsZero() || !windowStart.Before(windowEnd) ||
+		windowEnd.Sub(windowStart) > 10*time.Hour || endMilliseconds <= startMilliseconds ||
+		pageSize < 1 || pageSize > 100 {
+		return worker.ApprovalInstancePage{}, errors.New("invalid approval instance list request")
+	}
+	builder := larkapproval.NewListInstanceReqBuilder().
+		ApprovalCode(approvalCode).
+		StartTime(strconv.FormatInt(startMilliseconds, 10)).
+		EndTime(strconv.FormatInt(endMilliseconds, 10)).
+		PageSize(pageSize)
+	if pageToken != "" {
+		builder.PageToken(pageToken)
+	}
+	response, err := f.client.Approval.Instance.List(ctx, builder.Build())
+	if err != nil {
+		return worker.ApprovalInstancePage{}, classifyRequestFailure(ctx, err)
+	}
+	if !response.Success() {
+		return worker.ApprovalInstancePage{}, classifyAPIResponseFailure(
+			response.Code,
+			response.ApiResp,
+		)
+	}
+	if response.Data == nil || response.Data.HasMore == nil {
+		return worker.ApprovalInstancePage{}, &worker.ApprovalFetchError{
+			Reason: worker.ApprovalFetchInvalidResponse,
+		}
+	}
+	page := worker.ApprovalInstancePage{
+		InstanceCodes: append([]string(nil), response.Data.InstanceCodeList...),
+		HasMore:       *response.Data.HasMore,
+	}
+	if response.Data.PageToken != nil {
+		page.NextPageToken = *response.Data.PageToken
+	}
+	if (page.NextPageToken != "" && !validListValue(page.NextPageToken, 2048)) ||
+		(page.HasMore && page.NextPageToken == "") {
+		return worker.ApprovalInstancePage{}, &worker.ApprovalFetchError{
+			Reason: worker.ApprovalFetchInvalidResponse,
+		}
+	}
+	for _, instanceCode := range page.InstanceCodes {
+		if !validListValue(instanceCode, 512) {
+			return worker.ApprovalInstancePage{}, &worker.ApprovalFetchError{
+				Reason: worker.ApprovalFetchInvalidResponse,
+			}
+		}
+	}
+	return page, nil
+}
+
 func (c *classifiedHTTPClient) Do(request *http.Request) (*http.Response, error) {
 	response, err := c.delegate.Do(request)
 	if err != nil {
@@ -180,15 +243,19 @@ func classifyCodeFailure(code int) error {
 }
 
 func classifyResponseFailure(response *larkapproval.GetInstanceResp) error {
+	return classifyAPIResponseFailure(response.Code, response.ApiResp)
+}
+
+func classifyAPIResponseFailure(code int, response *larkcore.ApiResp) error {
 	statusCode := 0
 	retryAfter := time.Duration(0)
-	if response.ApiResp != nil {
+	if response != nil {
 		statusCode = response.StatusCode
 		retryAfter = parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
 	}
 	reason := worker.ApprovalFetchClientError
 	retryable := false
-	if response.Code == larkRateLimitCode {
+	if code == larkRateLimitCode {
 		reason = worker.ApprovalFetchRateLimited
 		retryable = true
 	} else if httpReason, httpRetryable := classifyHTTPStatus(statusCode); httpRetryable {
@@ -197,7 +264,7 @@ func classifyResponseFailure(response *larkapproval.GetInstanceResp) error {
 	}
 	return &worker.ApprovalFetchError{
 		Reason: reason, Retryable: retryable, RetryAfter: retryAfter,
-		StatusCode: statusCode, LarkCode: response.Code,
+		StatusCode: statusCode, LarkCode: code,
 	}
 }
 
@@ -241,4 +308,8 @@ func stringValue(pointer *string) string {
 		return ""
 	}
 	return *pointer
+}
+
+func validListValue(value string, maximumLength int) bool {
+	return value != "" && len(value) <= maximumLength && value == strings.TrimSpace(value)
 }

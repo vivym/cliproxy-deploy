@@ -21,6 +21,9 @@ type OperationalSnapshot struct {
 	PrincipalDisableRetries     map[string]int64
 	PrincipalDisableDeadLetters map[string]int64
 	EmploymentReconciliations   map[string]int64
+	ApprovalReconciliations     map[string]int64
+	ApprovalCursorInitialized   map[string]int64
+	ApprovalCursorLagSeconds    map[string]int64
 	ProcessingRecoveries        map[string]int64
 	ApprovalFetches             map[string]int64
 	ApprovalReversals           map[string]int64
@@ -38,6 +41,7 @@ type EntitlementGrantResultKey struct {
 }
 
 func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, error) {
+	now := time.Now().UTC()
 	tx, err := s.database.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("begin operational snapshot: %w", err)
@@ -57,6 +61,9 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, e
 		PrincipalDisableRetries:     make(map[string]int64),
 		PrincipalDisableDeadLetters: make(map[string]int64),
 		EmploymentReconciliations:   make(map[string]int64),
+		ApprovalReconciliations:     make(map[string]int64),
+		ApprovalCursorInitialized:   make(map[string]int64),
+		ApprovalCursorLagSeconds:    make(map[string]int64),
 		ProcessingRecoveries:        make(map[string]int64),
 		ApprovalFetches:             make(map[string]int64),
 		ApprovalReversals:           make(map[string]int64),
@@ -66,7 +73,7 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, e
 	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT event_type, COUNT(*) + COALESCE(SUM(duplicate_count), 0), COALESCE(SUM(duplicate_count), 0)
-FROM lark_event_inbox GROUP BY event_type`)
+FROM lark_event_inbox WHERE event_origin = ? GROUP BY event_type`, EventOriginWebhook)
 	if err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("query webhook metrics: %w", err)
 	}
@@ -249,6 +256,102 @@ SELECT result, COUNT(*) FROM employment_reconciliation_audit GROUP BY result`)
 	}
 
 	rows, err = tx.QueryContext(ctx, `
+SELECT result, COUNT(*) FROM approval_reconciliation_audit GROUP BY result`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query approval reconciliation metrics: %w", err)
+	}
+	for rows.Next() {
+		var result string
+		var count int64
+		if err := rows.Scan(&result, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan approval reconciliation metrics: %w", err)
+		}
+		snapshot.ApprovalReconciliations[result] = count
+	}
+	if err := closeRows(rows, "approval reconciliation metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT binding.approval_code, policy.state,
+       binding.accept_instance_started_before, cursor.scanned_through
+FROM approval_policy_bindings binding
+JOIN policy_versions policy ON policy.policy_version = binding.policy_version
+LEFT JOIN approval_reconciliation_cursors cursor
+       ON cursor.approval_code = binding.approval_code
+WHERE policy.state IN ('active', 'draining')
+ORDER BY binding.approval_code`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query approval reconciliation cursors: %w", err)
+	}
+	for rows.Next() {
+		var approvalCode string
+		var state string
+		var scanCutoff string
+		var scannedThrough sql.NullString
+		if err := rows.Scan(&approvalCode, &state, &scanCutoff, &scannedThrough); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan approval reconciliation cursor: %w", err)
+		}
+		if _, duplicate := snapshot.ApprovalCursorInitialized[approvalCode]; duplicate {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf(
+				"duplicate non-retired approval reconciliation binding %q",
+				approvalCode,
+			)
+		}
+		target := now
+		switch state {
+		case "active":
+			if scanCutoff != "" {
+				_ = rows.Close()
+				return OperationalSnapshot{}, fmt.Errorf(
+					"active approval reconciliation binding %q has a scan cutoff",
+					approvalCode,
+				)
+			}
+		case "draining":
+			parsed, parseErr := time.Parse(time.RFC3339, scanCutoff)
+			if parseErr != nil {
+				_ = rows.Close()
+				return OperationalSnapshot{}, fmt.Errorf(
+					"parse approval reconciliation cutoff for %q: %w",
+					approvalCode,
+					parseErr,
+				)
+			}
+			target = parsed
+		default:
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf(
+				"invalid approval reconciliation policy state %q",
+				state,
+			)
+		}
+		snapshot.ApprovalCursorInitialized[approvalCode] = 0
+		snapshot.ApprovalCursorLagSeconds[approvalCode] = 0
+		if scannedThrough.Valid {
+			cursor, parseErr := time.Parse(time.RFC3339Nano, scannedThrough.String)
+			if parseErr != nil {
+				_ = rows.Close()
+				return OperationalSnapshot{}, fmt.Errorf(
+					"parse approval reconciliation cursor for %q: %w",
+					approvalCode,
+					parseErr,
+				)
+			}
+			snapshot.ApprovalCursorInitialized[approvalCode] = 1
+			if target.After(cursor) {
+				snapshot.ApprovalCursorLagSeconds[approvalCode] = int64(target.Sub(cursor).Seconds())
+			}
+		}
+	}
+	if err := closeRows(rows, "approval reconciliation cursors"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
 SELECT queue, SUM(recovered_count) FROM processing_recovery_audit GROUP BY queue`)
 	if err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("query processing recovery metrics: %w", err)
@@ -355,7 +458,6 @@ SELECT COUNT(*) FROM approval_instances WHERE outcome = ?`,
 	).Scan(&snapshot.PolicyValidationFailures); err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("query policy validation metrics: %w", err)
 	}
-	now := time.Now().UTC()
 	snapshot.OldestActiveJobAge, err = oldestJobAge(ctx, tx, now, false)
 	if err != nil {
 		return OperationalSnapshot{}, err

@@ -28,7 +28,9 @@ const (
 	controllerReadHeaderTimeout = 500 * time.Millisecond
 	controllerReadTimeout       = 2 * time.Second
 	controllerWriteTimeout      = 2300 * time.Millisecond
-	employmentCheckInterval     = 100 * time.Millisecond
+	larkRequestInterval         = 100 * time.Millisecond
+	approvalReconciliationRetry = 5 * time.Minute
+	maxApprovalRetryDelay       = 24 * time.Hour
 )
 
 func main() {
@@ -67,6 +69,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	larkRequestPacer, err := worker.NewRequestPacer(larkRequestInterval)
+	if err != nil {
+		return err
+	}
 	grantKeyring, err := newapi.LoadGrantPayloadKeyringFile(loaded.GrantPayloadKeyringFile)
 	if err != nil {
 		return err
@@ -80,7 +86,8 @@ func run() error {
 		return err
 	}
 	defer func() { _ = store.Close() }()
-	if err := store.SyncPolicySnapshot(context.Background(), policyCatalog.Snapshot()); err != nil {
+	policySnapshot := policyCatalog.Snapshot()
+	if err := store.SyncPolicySnapshot(context.Background(), policySnapshot); err != nil {
 		return err
 	}
 	operationalHandler, err := observability.NewHandler(
@@ -159,6 +166,22 @@ func run() error {
 		grantKeyring,
 		loaded.TenantKey,
 		loaded.ReconciliationHealthOpenID,
+		larkRequestPacer,
+	)
+	if err != nil {
+		return err
+	}
+	approvalReconciler, err := activateApprovalReconciliation(
+		loaded.Mode,
+		store,
+		fetcher,
+		fetcher,
+		policySnapshot,
+		loaded.AppID,
+		loaded.TenantKey,
+		loaded.Locale,
+		loaded.ApprovalReconcileLookback,
+		larkRequestPacer,
 	)
 	if err != nil {
 		return err
@@ -189,6 +212,13 @@ func run() error {
 			15*time.Minute,
 		)
 	}
+	go runScheduledWorker(
+		rootContext,
+		"Lark approval reconciliation",
+		approvalReconciler,
+		loaded.ApprovalReconcileInterval,
+		approvalReconciliationRetry,
+	)
 	go runScheduledWorker(
 		rootContext,
 		"controller processing recovery",
@@ -300,6 +330,7 @@ func activateEmploymentReconciliation(
 	sealer worker.PrincipalDisableSealer,
 	tenantKey string,
 	healthOpenID string,
+	requestPacer worker.RequestPacer,
 ) (*worker.EmploymentReconciler, error) {
 	switch mode {
 	case config.ModeShadow:
@@ -309,11 +340,81 @@ func activateEmploymentReconciliation(
 			Store: store, PrincipalLister: principalLister,
 			EmploymentChecker: employmentChecker, PrincipalDisableSealer: sealer,
 			TenantKey: tenantKey, HealthOpenID: healthOpenID,
-			MinimumCheckInterval: employmentCheckInterval,
+			RequestPacer: requestPacer,
 		})
 	default:
 		return nil, errors.New("controller mode must be shadow or active")
 	}
+}
+
+func activateApprovalReconciliation(
+	mode config.Mode,
+	store *inbox.Store,
+	instanceLister worker.ApprovalInstanceLister,
+	instanceFetcher worker.ApprovalFetcher,
+	snapshot policy.Snapshot,
+	appID string,
+	tenantKey string,
+	locale string,
+	lookback time.Duration,
+	requestPacer worker.RequestPacer,
+) (*worker.ApprovalReconciler, error) {
+	if mode != config.ModeShadow && mode != config.ModeActive {
+		return nil, errors.New("controller mode must be shadow or active")
+	}
+	bindings, err := approvalReconciliationBindings(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	return worker.NewApprovalReconciler(worker.ApprovalReconcilerConfig{
+		Store: store, InstanceLister: instanceLister, InstanceFetcher: instanceFetcher,
+		Bindings: bindings, AppID: appID, TenantKey: tenantKey, Locale: locale,
+		InitialLookback: lookback, RequestPacer: requestPacer,
+	})
+}
+
+func approvalReconciliationBindings(
+	snapshot policy.Snapshot,
+) ([]worker.ApprovalReconciliationBinding, error) {
+	policyStates := make(map[string]policy.PolicyState, len(snapshot.Policies))
+	for _, item := range snapshot.Policies {
+		if item.PolicyVersion == "" {
+			return nil, errors.New("approval reconciliation policy version is required")
+		}
+		if _, duplicate := policyStates[item.PolicyVersion]; duplicate {
+			return nil, fmt.Errorf("duplicate approval reconciliation policy %q", item.PolicyVersion)
+		}
+		policyStates[item.PolicyVersion] = item.State
+	}
+	bindings := make([]worker.ApprovalReconciliationBinding, 0, len(snapshot.Bindings))
+	for _, binding := range snapshot.Bindings {
+		state, exists := policyStates[binding.PolicyVersion]
+		if !exists {
+			return nil, fmt.Errorf(
+				"approval reconciliation binding %q references an unknown policy",
+				binding.ApprovalCode,
+			)
+		}
+		scanBinding := worker.ApprovalReconciliationBinding{ApprovalCode: binding.ApprovalCode}
+		switch state {
+		case policy.PolicyStateActive:
+			if binding.AcceptInstanceStartedBefore != "" {
+				return nil, fmt.Errorf("active approval %q has a scan cutoff", binding.ApprovalCode)
+			}
+		case policy.PolicyStateDraining:
+			cutoff, err := time.Parse(time.RFC3339, binding.AcceptInstanceStartedBefore)
+			if err != nil {
+				return nil, fmt.Errorf("draining approval %q requires a valid scan cutoff", binding.ApprovalCode)
+			}
+			scanBinding.ScanUntil = cutoff
+		case policy.PolicyStateRetired:
+			continue
+		default:
+			return nil, fmt.Errorf("approval %q has an invalid policy state", binding.ApprovalCode)
+		}
+		bindings = append(bindings, scanBinding)
+	}
+	return bindings, nil
 }
 
 func activatePrincipalDisableRuntime(
@@ -468,7 +569,17 @@ func scheduledWorkerDelay(err error, interval time.Duration, retryInterval time.
 		employmentFailure.Retryable && employmentFailure.RetryAfter > delay {
 		delay = employmentFailure.RetryAfter
 	}
-	if delay > interval {
+	var approvalFailure *worker.ApprovalFetchError
+	if errors.As(err, &approvalFailure) && approvalFailure != nil {
+		if approvalFailure.Retryable && approvalFailure.RetryAfter > delay {
+			delay = approvalFailure.RetryAfter
+		}
+		if delay > maxApprovalRetryDelay {
+			delay = maxApprovalRetryDelay
+		}
+		return delay
+	}
+	if delay > interval && retryInterval <= interval {
 		return interval
 	}
 	return delay

@@ -98,6 +98,12 @@ func (h *Handler) metrics(response http.ResponseWriter, request *http.Request) {
 		boundedCounts(snapshot.PrincipalDisableDeadLetters, allowedPrincipalDisableFailureReasons))
 	writeCounterMap(&output, "employment_reconciliation_total", "result",
 		boundedCounts(snapshot.EmploymentReconciliations, allowedEmploymentReconciliationResults))
+	writeCounterMap(&output, "approval_reconciliation_total", "result",
+		boundedCountsWithZeros(snapshot.ApprovalReconciliations, allowedApprovalReconciliationResults))
+	writeGaugeMap(&output, "approval_reconciliation_cursor_initialized", "approval_code",
+		snapshot.ApprovalCursorInitialized)
+	writeGaugeMap(&output, "approval_reconciliation_cursor_lag_seconds", "approval_code",
+		snapshot.ApprovalCursorLagSeconds)
 	writeCounterMap(&output, "lark_controller_processing_recovered_total", "queue",
 		boundedCounts(snapshot.ProcessingRecoveries, allowedProcessingRecoveryQueues))
 	writeCounterMap(&output, "lark_approval_fetch_total", "result",
@@ -221,6 +227,16 @@ func boundedCounts(source map[string]int64, allowed map[string]struct{}) map[str
 	return result
 }
 
+func boundedCountsWithZeros(source map[string]int64, allowed map[string]struct{}) map[string]int64 {
+	result := boundedCounts(source, allowed)
+	for key := range allowed {
+		if _, exists := result[key]; !exists {
+			result[key] = 0
+		}
+	}
+	return result
+}
+
 func labels(values ...string) map[string]struct{} {
 	result := make(map[string]struct{}, len(values))
 	for _, value := range values {
@@ -268,6 +284,17 @@ var (
 		"health_probe_failed",
 		"principal_list_failed",
 		"employment_check_failed",
+		"incomplete_scan",
+	)
+	allowedApprovalReconciliationResults = labels(
+		"success",
+		"rate_limited",
+		"server_error",
+		"client_error",
+		"timeout",
+		"transport_error",
+		"invalid_response",
+		"unclassified_error",
 		"incomplete_scan",
 	)
 	allowedProcessingRecoveryQueues = labels(

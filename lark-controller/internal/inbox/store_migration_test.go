@@ -133,6 +133,9 @@ INSERT INTO lark_event_inbox (
 	if legacy.RevertedInstanceCode != "instance-original" {
 		t.Fatalf("legacy reverted instance code = %q, want instance-original", legacy.RevertedInstanceCode)
 	}
+	if legacy.Origin != inbox.EventOriginWebhook {
+		t.Fatalf("legacy event origin = %q, want webhook", legacy.Origin)
+	}
 	if duplicate, err := store.Record(ctx, legacyEvent); err != nil || !duplicate {
 		t.Fatalf("redelivered legacy event: duplicate=%t err=%v", duplicate, err)
 	}

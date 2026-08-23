@@ -21,6 +21,7 @@ const sqliteBusyTimeout = 500 * time.Millisecond
 
 type Event struct {
 	Key                  string
+	Origin               EventOrigin
 	SchemaVersion        string
 	EventID              string
 	EventType            string
@@ -37,6 +38,13 @@ type Event struct {
 	LastSeenAt           time.Time
 	PrincipalDisableJob  *PrincipalDisableJobDraft
 }
+
+type EventOrigin string
+
+const (
+	EventOriginWebhook                EventOrigin = "webhook"
+	EventOriginApprovalReconciliation EventOrigin = "approval_reconciliation"
+)
 
 type ProcessingState string
 
@@ -151,6 +159,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS lark_event_inbox (
     event_key TEXT PRIMARY KEY,
+    event_origin TEXT NOT NULL DEFAULT 'webhook',
     schema_version TEXT NOT NULL,
     event_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
@@ -226,6 +235,22 @@ CREATE TABLE IF NOT EXISTS approval_reversals (
 );
 CREATE INDEX IF NOT EXISTS idx_approval_reversals_result
     ON approval_reversals(result, created_at, event_key);
+CREATE TABLE IF NOT EXISTS approval_reconciliation_cursors (
+    approval_code TEXT PRIMARY KEY,
+    scanned_through TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS approval_reconciliation_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    approval_code TEXT NOT NULL,
+    window_start TEXT NOT NULL,
+    window_end TEXT NOT NULL,
+    result TEXT NOT NULL,
+    instance_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_approval_reconciliation_audit_result
+    ON approval_reconciliation_audit(result, created_at, id);
 CREATE TABLE IF NOT EXISTS controller_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_key TEXT NOT NULL REFERENCES lark_event_inbox(event_key) ON DELETE CASCADE,
@@ -517,6 +542,14 @@ func (s *Store) ensureInboxColumns(ctx context.Context) error {
 			return fmt.Errorf("add inbox column %q: %w", "reverted_instance_code", err)
 		}
 	}
+	if _, exists := columns["event_origin"]; !exists {
+		if _, err := tx.ExecContext(
+			ctx,
+			"ALTER TABLE lark_event_inbox ADD COLUMN event_origin TEXT NOT NULL DEFAULT 'webhook'",
+		); err != nil {
+			return fmt.Errorf("add inbox column %q: %w", "event_origin", err)
+		}
+	}
 	if err := backfillLegacyRevertedInstanceCodes(ctx, tx); err != nil {
 		return err
 	}
@@ -741,9 +774,19 @@ func (s *Store) tableColumns(ctx context.Context, table string) (map[string]stru
 }
 
 func (s *Store) Record(ctx context.Context, event Event) (bool, error) {
+	if event.Origin == "" {
+		event.Origin = EventOriginWebhook
+	}
 	if event.Key == "" || event.EventID == "" || event.EventType == "" ||
 		event.AppID == "" || event.TenantKey == "" || event.PayloadJSON == "" {
 		return false, errors.New("incomplete inbox event")
+	}
+	if event.Origin != EventOriginWebhook && event.Origin != EventOriginApprovalReconciliation {
+		return false, errors.New("invalid inbox event origin")
+	}
+	isReconciliationKey := strings.HasPrefix(event.Key, "lark:reconcile:")
+	if (event.Origin == EventOriginApprovalReconciliation) != isReconciliationKey {
+		return false, errors.New("inbox event origin does not match its key")
 	}
 	isPrincipalDisable := event.PrincipalDisableJob != nil
 	if (event.EventType == "contact.user.deleted_v3") != isPrincipalDisable ||
@@ -757,11 +800,11 @@ func (s *Store) Record(ctx context.Context, event Event) (bool, error) {
 	}
 	const insertEvent = `
 INSERT INTO lark_event_inbox (
-    event_key, schema_version, event_id, event_type, app_id, tenant_key,
+    event_key, event_origin, schema_version, event_id, event_type, app_id, tenant_key,
     approval_code, instance_code, reverted_instance_code, event_status,
     payload_json, payload_hash, processing_state, duplicate_count,
     received_at, last_seen_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 ON CONFLICT(event_key) DO NOTHING`
 	tx, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -773,7 +816,7 @@ ON CONFLICT(event_key) DO NOTHING`
 		initialState = ProcessingStateShadowRecorded
 	}
 	result, err := tx.ExecContext(ctx, insertEvent,
-		event.Key, event.SchemaVersion, event.EventID, event.EventType,
+		event.Key, event.Origin, event.SchemaVersion, event.EventID, event.EventType,
 		event.AppID, event.TenantKey, event.ApprovalCode, event.InstanceCode,
 		event.RevertedInstanceCode, event.Status, event.PayloadJSON, payloadHash,
 		initialState, now, now,
@@ -874,7 +917,7 @@ func (s *Store) Get(ctx context.Context, key string) (Event, error) {
 	}
 	const query = `
 SELECT event_key, schema_version, event_id, event_type, app_id, tenant_key,
-       approval_code, instance_code, reverted_instance_code, event_status, payload_json,
+       event_origin, approval_code, instance_code, reverted_instance_code, event_status, payload_json,
        processing_state, duplicate_count, received_at, last_seen_at
 FROM lark_event_inbox WHERE event_key = ?`
 	var event Event
@@ -882,7 +925,7 @@ FROM lark_event_inbox WHERE event_key = ?`
 	var lastSeenAt string
 	err := s.database.QueryRowContext(ctx, query, key).Scan(
 		&event.Key, &event.SchemaVersion, &event.EventID, &event.EventType,
-		&event.AppID, &event.TenantKey, &event.ApprovalCode, &event.InstanceCode,
+		&event.AppID, &event.TenantKey, &event.Origin, &event.ApprovalCode, &event.InstanceCode,
 		&event.RevertedInstanceCode, &event.Status, &event.PayloadJSON, &event.ProcessingState,
 		&event.DuplicateCount, &receivedAt, &lastSeenAt,
 	)
@@ -913,7 +956,7 @@ func (s *Store) ClaimNext(ctx context.Context) (Job, bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	const query = `
 SELECT j.id, j.attempts, i.event_key, i.schema_version, i.event_id, i.event_type,
-       i.app_id, i.tenant_key, i.approval_code, i.instance_code,
+       i.app_id, i.tenant_key, i.event_origin, i.approval_code, i.instance_code,
        i.reverted_instance_code, i.event_status, i.payload_json, i.processing_state,
        i.duplicate_count, i.received_at, i.last_seen_at
 FROM jobs j
@@ -927,7 +970,8 @@ LIMIT 1`
 	err = tx.QueryRowContext(ctx, query, jobStatusPending, jobStatusRetryWait, now).Scan(
 		&job.ID, &job.Attempts, &job.Event.Key, &job.Event.SchemaVersion, &job.Event.EventID,
 		&job.Event.EventType, &job.Event.AppID, &job.Event.TenantKey,
-		&job.Event.ApprovalCode, &job.Event.InstanceCode, &job.Event.RevertedInstanceCode, &job.Event.Status,
+		&job.Event.Origin, &job.Event.ApprovalCode, &job.Event.InstanceCode,
+		&job.Event.RevertedInstanceCode, &job.Event.Status,
 		&job.Event.PayloadJSON, &job.Event.ProcessingState, &job.Event.DuplicateCount,
 		&receivedAt, &lastSeenAt,
 	)

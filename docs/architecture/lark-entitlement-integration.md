@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复和事件驱动 approval reversal 栅栏；周期性 approval reconciliation、管理员纠正流程、WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏和周期性 approval reconciliation；管理员纠正流程、WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1084,9 +1084,11 @@ New API fork 同时给 `subscription_plans` 增加 `managed_only boolean NOT NUL
 | `principals` | subject、展示信息、最近登录和在职回查状态；不是 New API 身份映射权威 |
 | `policy_versions` | 已加载 policy bundle 的版本、hash 和状态快照 |
 | `approval_policy_bindings` | approval code、locale、schema fingerprint 和 definition manifest |
-| `lark_event_inbox` | webhook 去重、规范化 event、处理状态 |
+| `lark_event_inbox` | webhook 去重或确定性 reconciliation event、显式 origin、规范化 event、处理状态 |
 | `approval_instances` | 回查结果摘要、schema hash、处理决策 |
 | `approval_reversals` | 脱敏撤销证据、唯一原 external ID、原 grant 摘要和 bounded manual-review result/reason |
+| `approval_reconciliation_cursors` | 每个 approval code 已完整扫描到的 monotonic UTC 时间 |
+| `approval_reconciliation_audit` | 成功或失败窗口、bounded result 和实例数；不保存上游错误正文 |
 | `entitlement_command_shadows` | 脱敏 grant receipt、external ID/request hash 重放账本 |
 | `base_subscription_grants` | userinfo 基础订阅的确定性 external ID、hash、policy/catalog/level/quota 重放账本 |
 | `base_subscription_audit` | 无 webhook event key 的基础订阅 plan/replay/result/retry/dead-letter 审计 |
@@ -1298,6 +1300,8 @@ LARK_INTEGRATION_SECRET_FILE
 NEW_API_INTERNAL_BASE_URL
 LARK_RECONCILIATION_HEALTH_OPEN_ID
 LARK_RECONCILIATION_INTERVAL
+LARK_APPROVAL_RECONCILIATION_INTERVAL
+LARK_APPROVAL_RECONCILIATION_LOOKBACK
 NEW_API_BRIDGE_CLIENT_ID
 NEW_API_BRIDGE_CLIENT_SECRET_FILE
 NEW_API_OAUTH_CALLBACK_ALLOWLIST
@@ -1309,6 +1313,8 @@ CONTROLLER_DATABASE_PATH
 ```
 
 `LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`LARK_INTEGRATION_SECRET_FILE` 保存一个不少于 32 字节的 printable、无空白 ASCII bearer token，可带一个 LF 或 CRLF 结尾；仅 active mode 读取。`LARK_RECONCILIATION_HEALTH_OPEN_ID` 同样仅 active mode 必需，必须是当前 tenant 和应用可用范围内稳定且已知 active 的 open_id；扫描前后任一探针不为 present 时，本次扫描只记失败，不提交证据。`LARK_RECONCILIATION_INTERVAL` 仅 active mode 生效，默认 `24h`，只允许 `24h..168h`；失败后至少间隔 15 分钟重试，若 Lark 给出更长 `Retry-After` 则遵守该值，但不超过正常 reconciliation interval。`LARK_PROCESSING_LEASE_TIMEOUT` 和 `LARK_PROCESSING_RECOVERY_INTERVAL` 在 shadow/active 均生效，默认分别为 `5m` 和 `1m`；lease 只允许 `1m..1h`，扫描周期至少 `10s` 且不能超过 lease，两者之和必须小于 readiness queue age。`NEW_API_BRIDGE_CLIENT_SECRET_FILE` 保存一个 32 至 4096 字节的 printable、无空白 ASCII client secret，可带一个 LF 或 CRLF 结尾；shadow/active 均在 startup gate 读取，明文不能放入环境变量、日志或 SQLite。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。OAuth authorize、callback、token 和 userinfo 使用四个独立的 per-client 一分钟固定窗口，`LARK_OAUTH_RATE_LIMIT_PER_MINUTE` 默认 30；authorize 另有每个 resolved client 每 5 分钟最多签发 20 个 state、全局每分钟最多签发 500 个 state 的固定硬限制。IPv4 client key 使用单个地址，IPv6 client key 统一按 masked `/64` 归组。被后续门禁拒绝或 state 持久化失败时必须回滚已预留的签发计数和空 map entry；`429 Retry-After` 必须反映实际拒绝请求的一分钟或五分钟窗口。只有直接对端位于显式 `LARK_OAUTH_TRUSTED_PROXY_CIDRS` 时才解析 `X-Forwarded-For`，该配置必须只包含实际 Controller 前置代理网段。
+
+approval reconciliation 在 shadow/active 都运行。`LARK_APPROVAL_RECONCILIATION_INTERVAL` 默认 `15m`、只允许 `1m..24h`；`LARK_APPROVAL_RECONCILIATION_LOOKBACK` 默认 `72h`、只允许 `1h..720h`。失败后至少等待 5 分钟，较长的 `Retry-After` 最多遵守 24 小时。它与 active-only employment reconciliation 共用 100ms process-wide Lark request pacer。
 
 日志必须对以下字段脱敏：
 
@@ -1413,6 +1419,9 @@ principal_disable_retry_total{reason}
 principal_disable_dead_letter_total{reason}
 lark_principal_disable_jobs{state}
 employment_reconciliation_total{result}
+approval_reconciliation_total{result}
+approval_reconciliation_cursor_initialized{approval_code}
+approval_reconciliation_cursor_lag_seconds{approval_code}
 lark_controller_processing_recovered_total{queue}
 auth_deny_fence_age_seconds
 ```
@@ -1426,6 +1435,7 @@ auth_deny_fence_age_seconds
 - active assignment 没有 subscription 或出现多个 subscription。
 - 离职事件停用失败超过 5 分钟。
 - 每日在职巡检未完整成功，或连续两天没有成功完成全量 active principal 扫描。
+- approval reconciliation 任一时间窗失败，或 active/draining binding 的成功游标长期不前进。
 - `integration_outbox` 超过 5 分钟未投递，或 auth deny fence 超过配置 TTL 仍未确认清除。
 - 支付成功订单进入 `blocked_managed_policy`，需要人工退款。
 - OAuth 失败率 5 分钟窗口显著上升。
@@ -1694,7 +1704,19 @@ grant 是否可能已由 New API 应用，都不会自动扣钱包或降订阅�
 `lark_approval_reversal_pending{reason}` 暴露当前待人工处理数；仓库内
 `lark-controller/monitoring/lark-controller-alerts.yml` 提供 `LarkApprovalReversalPending` 告警规则。
 生产环境仍必须显式加载该 rule 并配置 Alertmanager operator route，当前没有部署这部分监控配置。
-周期性 approval reconciliation、管理员 correction command、Compose 接入和生产验证仍未实现。
+周期性 approval reconciliation 也已实现：worker 从 policy snapshot 派生所有非 retired binding，
+active 扫到本轮 UTC 时间，draining 只扫到 `accept_instance_started_before`；每个 `approval_code`
+持久化独立 monotonic cursor，首次按配置 lookback 回看，续扫回退 10 分钟 overlap，并把 Lark 的
+实例创建时间范围拆成不超过 10 小时的窗口。每页 instance code 都权威回查，仅对 `APPROVED` 或
+`reverted=true` 生成带 `origin=approval_reconciliation` 的确定性内部 inbox event；它不计入
+`lark_webhook_*`。已有 validated grant 在 policy 未 retired 时持续作为精确 recheck target，因此
+webhook 丢失后的晚撤销仍进入同一 reversal deny fence。分页 token/code 重复、authority identity
+不匹配、响应缺字段、`429/5xx` 或任一窗口失败都不推进该窗口 cursor，只追加 bounded audit；
+对象级失败不会阻塞后续 binding 或 grant recheck，tenant-wide rate limit 则结束本轮以遵守
+`Retry-After`。`approval_reconciliation_total{result}`、per-binding cursor target lag 以及
+`LarkApprovalReconciliationFailed`/`LarkApprovalReconciliationCursorStalled` 暴露失败和长期停滞。approval 与
+employment reconciliation 共用 100ms process-wide pacer，避免两类定时任务叠加超过 10 QPS。
+管理员 correction command、Compose 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的
