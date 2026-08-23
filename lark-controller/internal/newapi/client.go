@@ -483,6 +483,10 @@ func normalizeAPIErrorCode(code string) string {
 		"unknown_package",
 		"unknown_level",
 		"quota_out_of_range",
+		"correction_state_mismatch",
+		"correction_original_grant_mismatch",
+		"correction_already_applied",
+		"managed_plan_mismatch",
 		"temporarily_unavailable":
 		return code
 	default:

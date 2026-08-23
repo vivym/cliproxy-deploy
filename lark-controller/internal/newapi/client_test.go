@@ -305,6 +305,9 @@ func TestClientClassifiesOnlyDocumentedRetryableErrors(t *testing.T) {
 		{name: "unknown package", statusCode: http.StatusUnprocessableEntity, upstreamCode: "unknown_package", wantCode: "unknown_package", retryable: false},
 		{name: "unknown level", statusCode: http.StatusUnprocessableEntity, upstreamCode: "unknown_level", wantCode: "unknown_level", retryable: false},
 		{name: "quota out of range", statusCode: http.StatusUnprocessableEntity, upstreamCode: "quota_out_of_range", wantCode: "quota_out_of_range", retryable: false},
+		{name: "correction original grant mismatch", statusCode: http.StatusConflict, upstreamCode: "correction_original_grant_mismatch", wantCode: "correction_original_grant_mismatch", retryable: false},
+		{name: "correction already applied", statusCode: http.StatusConflict, upstreamCode: "correction_already_applied", wantCode: "correction_already_applied", retryable: false},
+		{name: "managed plan mismatch", statusCode: http.StatusConflict, upstreamCode: "managed_plan_mismatch", wantCode: "managed_plan_mismatch", retryable: false},
 		{name: "unknown code", statusCode: http.StatusInternalServerError, upstreamCode: "sensitive_internal_detail", wantCode: "unclassified_error", retryable: false},
 	}
 	for _, test := range tests {

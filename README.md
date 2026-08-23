@@ -162,4 +162,6 @@ for a verified backup and full restore into the new identities.
 The planned Lark login, wallet grant, and managed subscription integration is
 specified in
 [`docs/architecture/lark-entitlement-integration.md`](docs/architecture/lark-entitlement-integration.md).
-Its controller and policy bundle extend the single root Compose deployment.
+The locally implemented, not-yet-deployed operator correction workflow is in
+[`docs/runbooks/lark-entitlement-correction.md`](docs/runbooks/lark-entitlement-correction.md).
+Its controller and policy bundle will extend the single root Compose deployment.

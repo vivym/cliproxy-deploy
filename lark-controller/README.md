@@ -53,6 +53,24 @@ The controller supports a locally verified `shadow` mode and an explicit
   `processing`, or `retry_wait` grant job to `reversal_pending`, and uses the
   existing status/attempt fence to reject a late worker completion; it never
   subtracts wallet quota or downgrades a subscription automatically;
+- provides the separate one-shot `cmd/lark-correction` workflow: `--list-pending`
+  discovers durable reversals through a SQLite read-only connection without
+  migration, processing recovery, or raw SQLite; the default mode previews
+  sanitized current state, and only `--apply` submits a correction with the
+  correction-only New API credential;
+- durably records an original-level correction attempt before any New API write;
+  uncertain outcomes remain `active` for exact replay, proven no-commit failures
+  become auditable `abandoned` attempts that release the original, and remote
+  ledger conflicts remain fenced as `remote_conflict`; a concurrent different
+  request fails before the correction credential is read;
+- records a successful correction in a group-level receipt table whose
+  correction external ID is primary and whose original external ID is unique,
+  requires its type and SHA-256 subject evidence to match the original grant,
+  atomically moves every pending reversal in the original-grant group plus the
+  ordinary and any fenced grant job to `reversal_resolved`, and verifies every
+  expected row transition; a late reversal can attach the exact receipt without
+  a New API call, while changed identity, request, audit evidence, status, or
+  result fails closed;
 - persists 256-bit OAuth state, login-code, and access-handle credentials only
   by SHA-256 digest, with atomic single-use consumption and fixed five-minute
   or 60-second expiry windows; consumption atomically deletes the row, while
@@ -275,9 +293,11 @@ is excluded. Dead letters remain visible in metrics but do not disable webhook
 ingestion.
 
 `internal/newapi` implements the versioned HTTP contracts for entitlement
-grants, principal disable, and paginated active-Lark-principal enumeration.
-Both write adapters use only the dedicated integration bearer credential,
-validate bounded responses, and classify response loss as retryable because
+grants, principal disable, paginated active-Lark-principal enumeration, and
+operator correction preview/apply. The long-running adapters use only the
+dedicated integration bearer credential; the separate `CorrectionClient` uses
+only the correction credential and is constructed by the one-shot CLI. The
+clients validate bounded responses and classify response loss as retryable because
 the external ID is idempotent. The principal response intentionally contains
 no New API user ID, wallet balance, token, or subscription details. In shadow mode,
 `cmd/lark-controller` neither loads the integration credential nor constructs
@@ -316,6 +336,20 @@ increases and `LarkApprovalReconciliationCursorStalled` when a non-retired
 binding has no cursor or remains more than 26 hours behind its active/current
 or draining/cutoff target. The rules and metrics are implemented locally, but
 production Prometheus/Alertmanager wiring has not been performed.
+
+Resolve one pending item with the one-shot CLI documented in
+`../docs/runbooks/lark-entitlement-correction.md`. Preview is the default and
+does not write New API or Controller state. `--apply` uses one timeout only for
+each remote call; after New API succeeds, local resolution is not constrained by
+that HTTP timeout. A repeated command returns an already stored Controller
+resolution without another New API write. If New API committed but its response
+was lost, preview returns the durable `existing_intent`; the same external ID
+and canonical payload replay before current-state CAS validation and can then
+complete the local resolution. Before loading the
+correction credential or calling New API, the CLI hashes `--subject` and requires
+an exact match with the original command shadow; the Store repeats this check in
+the intent claim and resolution transaction. The subject digest remains internal and is not
+included in list, preview, or applied JSON output.
 
 Principal-disable jobs use an independent durable ledger and audit table. A
 real-time contact event binds its optional inbox event key, while the job model
@@ -404,6 +438,6 @@ public OAuth authorize/callback handlers, internal token/userinfo handlers,
 and idempotent base-subscription dispatch are implemented locally. Employment
 reconciliation, runtime stale-claim recovery, and event-driven approval
 reversal fencing are also implemented locally. Periodic approval reconciliation
-is now implemented locally; operator correction workflows, Compose wiring,
-operational runbooks, and production validation remain follow-up work. Do not
+and the operator correction workflow are now implemented locally; Compose wiring
+and production validation remain follow-up work. Do not
 enable active mode in production before those gates are complete.

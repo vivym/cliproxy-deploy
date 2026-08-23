@@ -1,4 +1,5 @@
 /lark-controller
+/lark-correction
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

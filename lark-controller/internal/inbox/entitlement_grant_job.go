@@ -16,13 +16,14 @@ type EntitlementGrantJobStatus string
 type EntitlementGrantFailureReason string
 
 const (
-	EntitlementGrantJobStatusHeldShadow      EntitlementGrantJobStatus = "held_shadow"
-	EntitlementGrantJobStatusPending         EntitlementGrantJobStatus = "pending"
-	EntitlementGrantJobStatusProcessing      EntitlementGrantJobStatus = "processing"
-	EntitlementGrantJobStatusRetryWait       EntitlementGrantJobStatus = "retry_wait"
-	EntitlementGrantJobStatusReversalPending EntitlementGrantJobStatus = "reversal_pending"
-	EntitlementGrantJobStatusSucceeded       EntitlementGrantJobStatus = "succeeded"
-	EntitlementGrantJobStatusDeadLetter      EntitlementGrantJobStatus = "dead_letter"
+	EntitlementGrantJobStatusHeldShadow       EntitlementGrantJobStatus = "held_shadow"
+	EntitlementGrantJobStatusPending          EntitlementGrantJobStatus = "pending"
+	EntitlementGrantJobStatusProcessing       EntitlementGrantJobStatus = "processing"
+	EntitlementGrantJobStatusRetryWait        EntitlementGrantJobStatus = "retry_wait"
+	EntitlementGrantJobStatusReversalPending  EntitlementGrantJobStatus = "reversal_pending"
+	EntitlementGrantJobStatusReversalResolved EntitlementGrantJobStatus = "reversal_resolved"
+	EntitlementGrantJobStatusSucceeded        EntitlementGrantJobStatus = "succeeded"
+	EntitlementGrantJobStatusDeadLetter       EntitlementGrantJobStatus = "dead_letter"
 )
 
 const (
@@ -489,9 +490,10 @@ func (s *Store) ValidateEntitlementGrantJobKeyIDs(ctx context.Context, keyIDs []
 	}
 	rows, err := s.database.QueryContext(ctx, `
 SELECT DISTINCT key_id FROM entitlement_grant_jobs
-WHERE status NOT IN (?, ?)`,
+	WHERE status NOT IN (?, ?, ?)`,
 		EntitlementGrantJobStatusSucceeded,
 		EntitlementGrantJobStatusDeadLetter,
+		EntitlementGrantJobStatusReversalResolved,
 	)
 	if err != nil {
 		return fmt.Errorf("validate grant job keyring: %w", err)

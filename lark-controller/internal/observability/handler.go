@@ -270,9 +270,9 @@ var (
 		"approval_instance",
 		"contact.user.deleted_v3",
 	)
-	allowedInboxStates                     = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter", "principal_disabled")
-	allowedJobStates                       = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "dead_letter")
-	allowedEntitlementGrantJobStates       = labels("held_shadow", "pending", "processing", "retry_wait", "reversal_pending", "succeeded", "dead_letter")
+	allowedInboxStates                     = labels("pending", "processing", "shadow_recorded", "reversal_pending", "reversal_resolved", "dead_letter", "principal_disabled")
+	allowedJobStates                       = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "reversal_resolved", "dead_letter")
+	allowedEntitlementGrantJobStates       = labels("held_shadow", "pending", "processing", "retry_wait", "reversal_pending", "reversal_resolved", "succeeded", "dead_letter")
 	allowedEntitlementGrantTypes           = labels("wallet_quota", "subscription_level")
 	allowedEntitlementGrantStatuses        = labels("applied", "replayed", "noop", "ignored_stale")
 	allowedEntitlementGrantFailureReasons  = entitlementGrantFailureReasonLabels()

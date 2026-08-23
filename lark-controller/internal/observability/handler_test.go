@@ -90,7 +90,7 @@ func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 		WebhookReceived:           map[string]int64{"approval.instance.status_changed_v4": 3},
 		WebhookDuplicates:         map[string]int64{"approval.instance.status_changed_v4": 1},
 		InboxStates:               map[inbox.ProcessingState]int64{inbox.ProcessingStatePending: 2},
-		JobStates:                 map[string]int64{"retry_wait": 1, "succeeded": 4},
+		JobStates:                 map[string]int64{"retry_wait": 1, "succeeded": 4, "reversal_resolved": 2},
 		EntitlementGrantJobStates: map[string]int64{"held_shadow": 4, "unexpected": 2},
 		EntitlementGrantResults: map[inbox.EntitlementGrantResultKey]int64{
 			{GrantType: "wallet_quota", Status: "applied"}:        2,
@@ -152,6 +152,7 @@ func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 		`lark_webhook_duplicate_total{event_type="approval.instance.status_changed_v4"} 1`,
 		`lark_controller_inbox_events{state="pending"} 2`,
 		`lark_controller_jobs{state="retry_wait"} 1`,
+		`lark_controller_jobs{state="reversal_resolved"} 2`,
 		`lark_new_api_grant_jobs{state="held_shadow"} 4`,
 		`lark_new_api_grant_jobs{state="other"} 2`,
 		`entitlement_grant_total{status="applied",type="wallet_quota"} 2`,

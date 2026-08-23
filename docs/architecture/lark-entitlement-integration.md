@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏和周期性 approval reconciliation；管理员纠正流程、WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏、周期性 approval reconciliation 和管理员一次性纠正流程；WP4/WP5 未实施，尚未接入 Compose、部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -278,15 +278,17 @@ Lark OAuth / Approval / Contact APIs
 | Lark | 员工身份、审批流程、离职事件 | New API 余额账本 |
 | Traefik | TLS 和路径路由 | 身份绑定、审批、额度业务规则 |
 
-Controller 对 New API 只依赖三个窄接口：
+Controller 对 New API 只依赖五个窄接口：
 
 ```http
 POST /api/integrations/v1/entitlement-grants
 POST /api/integrations/v1/principals/disable
 GET  /api/integrations/v1/principals?provider_slug=lark&status=active&cursor=...
+POST /api/integrations/v1/entitlement-corrections/preview
+POST /api/integrations/v1/entitlement-corrections
 ```
 
-前两个是幂等写接口，第三个只为离职补偿提供分页 active principal subject、principal version 和 opaque cursor，不返回邮箱、手机号、wallet、API key 或内部用户表内容。它们共同构成 Controller 与 New API 的集成边界；New API 内部的用户表、订阅表、缓存和事务细节不暴露给 Controller。
+前三个是常驻 Controller 使用的两个幂等写接口和一个离职补偿只读接口；后两个只供 one-shot 管理员纠正工具使用。principal 枚举只返回分页 active principal subject、principal version 和 opaque cursor，不返回邮箱、手机号、wallet、API key 或内部用户表内容。correction preview 只返回操作者作出 CAS 决策所需的 wallet、usage、last-login 和 managed-subscription 投影，不返回 API key、token 或个人资料。它们共同构成 Controller 与 New API 的集成边界；New API 内部的用户表、订阅表、缓存和事务细节不暴露给 Controller。
 
 ## Lark 登录设计
 
@@ -672,7 +674,13 @@ Authorization: Bearer <LARK_INTEGRATION_SECRET>
 - 支持 current/next 双密钥轮换。
 - 服务端用 constant-time compare 校验。
 
-migration/correction 使用另一份默认不挂载到 Controller 的短期运维凭证，并要求管理员会话、operator、reason、变更单和 expected version。生产常驻 Controller credential 不能提交这两类 command source。
+correction 使用另一份默认不挂载到常驻 Controller 的短期运维凭证：
+
+```http
+Authorization: Bearer <LARK_CORRECTION_SECRET>
+```
+
+只有设置 `LARK_CORRECTION_SECRET_FILE` 或 `LARK_CORRECTION_SECRET` 时才注册两个 correction endpoint。该值必须是至少 32 bytes 的单个 printable ASCII token，并且不得等于 current 或 next integration secret。它不能调用 grant、disable 或 principal-list endpoint；常驻 integration credential 也不能调用 correction endpoint。首版 correction credential 没有 current/next 双密钥窗口，变更单完成后应撤销或轮换，并从 one-shot 操作环境移除。correction command 还必须携带 `operator`、`reason`、`change_ticket`、原 grant external ID 和 expected state。
 
 ### `POST /api/integrations/v1/entitlement-grants`
 
@@ -934,6 +942,117 @@ deny fence 建立前已经持久化的 `SubscriptionPreConsumeRecord` 仍允许�
 
 响应只包含 `provider_slug`、`subject`、`principal_version`、`updated_at`、`next_cursor` 和 `scan_complete`。不返回 New API user ID、姓名、邮箱、余额、token 或 subscription 细节。Controller 只有在 `scan_complete=true` 且权限健康探针正常时，才能把本轮 not-found 计入连续确认。
 
+### `POST /api/integrations/v1/entitlement-corrections/preview`
+
+该接口只接受 correction credential，用于在人工决定前读取目标 principal 的当前 CAS 状态：
+
+```json
+{
+  "identity": {
+    "provider_slug": "lark",
+    "subject": "tenant-key:ou_xxx"
+  }
+}
+```
+
+响应不包含 New API user ID 或身份资料：
+
+```json
+{
+  "wallet_quota": 3000000,
+  "used_quota": 7000000,
+  "last_login_at": 1788192100,
+  "managed_subscription": {
+    "policy_version": "employee-entitlements-2026-09-v1",
+    "level_code": "pro",
+    "assignment_version": 3,
+    "source_external_id": "lark:subscription-level:...",
+    "subscription_id": 701,
+    "amount_total": 15000000,
+    "amount_used": 9000000,
+    "start_time": 1785542400,
+    "end_time": 2100902400,
+    "last_reset_time": 1785542400,
+    "next_reset_time": 1788220800
+  }
+}
+```
+
+没有 active managed assignment 时省略 `managed_subscription`。principal 不存在、已停用或投影不一致时 fail closed，不返回部分数据。
+
+### `POST /api/integrations/v1/entitlement-corrections`
+
+correction 是新的审计命令，不会修改原 grant。钱包纠正使用 signed delta，包含可审计的 `0` no-op：
+
+```json
+{
+  "external_id": "lark:correction:CHG-2026-0060:wallet",
+  "source": "correction",
+  "policy_version": "employee-entitlements-2026-09-v1",
+  "identity": {
+    "provider_slug": "lark",
+    "subject": "tenant-key:ou_xxx"
+  },
+  "correction": {
+    "type": "wallet_quota",
+    "quota_delta": -1000000,
+    "expected_wallet_quota": 3000000
+  },
+  "evidence": {
+    "operator": "ops@example.com",
+    "reason": "reverted approval after partial use",
+    "change_ticket": "CHG-2026-0060",
+    "original_external_id": "lark:wallet-topup:..."
+  }
+}
+```
+
+订阅纠正使用 absolute target 和 assignment version CAS：
+
+```json
+{
+  "external_id": "lark:correction:CHG-2026-0061:subscription",
+  "source": "correction",
+  "policy_version": "employee-entitlements-2026-09-v1",
+  "identity": {
+    "provider_slug": "lark",
+    "subject": "tenant-key:ou_xxx"
+  },
+  "correction": {
+    "type": "subscription_level",
+    "level_code": "basic",
+    "expected_assignment_version": 3
+  },
+  "evidence": {
+    "operator": "ops@example.com",
+    "reason": "approved downgrade after reversal",
+    "change_ticket": "CHG-2026-0061",
+    "original_external_id": "lark:subscription-level:..."
+  }
+}
+```
+
+New API 在 `integration_grants` 中复用 external-ID ledger 和 outbox。`lark:correction:*` external ID 的历史同-payload replay 必须在 current expected-state CAS 和 policy lifecycle 检查之前返回，因此“数据库已提交、HTTP response 丢失”后可以安全重放。首次写入允许已发布的 `active`、`draining` 或 `retired` policy，拒绝 `staged`。钱包结果返回 final `wallet_quota`；负余额、业务上限和 checked addition 溢出均原子拒绝。订阅纠正在同一 subscription ID 上原地设置目标等级，保留 start/end/reset timestamps；降级时若当前 `amount_used` 超过目标总额，则将 used 截到目标总额，remaining 为零。相同 level code 即使命令指向另一已发布 policy 也只推进审计 grant 并返回 `noop`，不推进 assignment version，不迁移 assignment policy/source，不更新用户 setting、subscription 或 cache outbox；policy migration 必须走独立流程。
+
+correction endpoint 的稳定错误矩阵：
+
+| HTTP | code | 语义 | 操作动作 |
+| ---: | --- | --- | --- |
+| `400` | `invalid_request` | 结构、namespace、source 或审计证据错误 | 修正命令，禁止重用已提交 external ID |
+| `401` | `integration_unauthorized` | correction credential 缺失或错误 | 停止并修复凭证，不重试写入 |
+| `404` | `principal_not_ready` | principal 不存在 | 核实 subject 和登录/绑定状态 |
+| `409` | `principal_disabled` | principal 或用户已停用 | 终态，不自动恢复 |
+| `409` | `external_id_payload_mismatch` | external ID 已绑定其他 payload | 高优先级告警，禁止覆盖 |
+| `409` | `correction_state_mismatch` | wallet quota 或 assignment version 已变化 | 重新 preview 和审批，使用新的 external ID |
+| `409` | `correction_original_grant_mismatch` | New API 已存在的原 grant 与 correction 的 provider、subject、type、approval source 或终态不一致 | 停止并调查主体/原 grant 选择，不重试 |
+| `409` | `correction_already_applied` | 该 original grant 已由另一 correction external ID 取得唯一栅栏 | 禁止第二次纠正；恢复并复用首条 receipt |
+| `409` | `policy_version_mismatch` | policy 未发布或仍 staged | 修复 policy/target，不猜测替代版本 |
+| `409` | `unmanaged_subscription_conflict` | managed projection 不一致或存在冲突 | 人工调查，不自动改订阅 |
+| `409` | `managed_plan_mismatch` | 目录绑定的 plan 缺失或 reset/quota contract 漂移 | 修复目录/plan 漂移并重新审批，不重试原命令 |
+| `422` | `unknown_level` | target level 不在指定历史目录 | 修正目标并重新审批 |
+| `422` | `quota_out_of_range` | wallet 结果越界或算术溢出 | 修正 delta 并重新审批 |
+| `503` | `temporarily_unavailable` | 数据库或内部依赖暂不可用 | 用完全相同 external ID/payload 重试 |
+
 ## 数据模型
 
 ### New API Postgres
@@ -1021,7 +1140,7 @@ OAuth create/bind 和 disable 都先取得由 provider+subject 稳定派生的 P
 
 该表只保存 New API 防御性校验所需的 binding。完整 `custom_id + exact display text -> business code` manifest 保存在 Controller 的只读 policy bundle 和 SQLite 快照中；两端启动时比较 hash。
 
-建议新增 `integration_grants`，作为两个写接口共享的幂等命令账本：
+建议新增 `integration_grants`，作为 grant、disable 和 correction 写接口共享的幂等命令账本：
 
 | 字段 | 类型 | 约束或用途 |
 | --- | --- | --- |
@@ -1086,7 +1205,9 @@ New API fork 同时给 `subscription_plans` 增加 `managed_only boolean NOT NUL
 | `approval_policy_bindings` | approval code、locale、schema fingerprint 和 definition manifest |
 | `lark_event_inbox` | webhook 去重或确定性 reconciliation event、显式 origin、规范化 event、处理状态 |
 | `approval_instances` | 回查结果摘要、schema hash、处理决策 |
-| `approval_reversals` | 脱敏撤销证据、唯一原 external ID、原 grant 摘要和 bounded manual-review result/reason |
+| `approval_reversals` | 脱敏撤销证据、原 external ID、原 grant 摘要、bounded manual-review result/reason，以及组级 correction receipt 引用 |
+| `approval_reversal_correction_intents` | New API 写入前持久化的 correction attempt ledger；每条 attempt 不可变绑定 correction external ID、type、subject/request hash 和审计字段，并以 `active/abandoned/remote_conflict/resolved` 记录生命周期；只有非 `abandoned` attempt 按 original external ID 唯一占用恢复栅栏 |
+| `approval_reversal_resolution_receipts` | 每个 original external ID 唯一的不可变 correction receipt；correction external ID 为主键，并绑定 subject hash、request hash、operator/ticket/result/resolved_at |
 | `approval_reconciliation_cursors` | 每个 approval code 已完整扫描到的 monotonic UTC 时间 |
 | `approval_reconciliation_audit` | 成功或失败窗口、bounded result 和实例数；不保存上游错误正文 |
 | `entitlement_command_shadows` | 脱敏 grant receipt、external ID/request hash 重放账本 |
@@ -1127,9 +1248,15 @@ REVERTED
   -> notify operator
   -> show original delta, current wallet and usage timestamps
   -> operator decides correction
+  -> preview, apply a new correction command, store resolution
+  -> move inbox and fenced grant job to reversal_resolved
 ```
 
-人工纠正必须产生新的独立 `external_id`，不能修改原 grant 记录。
+人工纠正必须产生新的独立 `external_id`，不能修改原 grant 记录；但同一个 original grant 最多只能有一条成功 correction receipt。one-shot `cmd/lark-correction` 默认只 preview；`--apply` 才提交 New API 写入。`--list-pending` 使用 SQLite `mode=ro + query_only` 的 Store 连接枚举待处理项，不运行 schema migration 或 processing recovery，不需要 correction credential，也不要求运维人员执行 raw SQLite。输出包含可选的当前非 abandoned attempt bounded lifecycle 摘要，但不输出 subject hash；历史 abandoned attempt 仅保留在 SQLite audit ledger。CLI 在读取 credential 或访问 New API 前将 `--subject` 做 SHA-256，并与原 `entitlement_command_shadows.subject_sha256` 精确比较，同时查询 original-level receipt 和非 abandoned attempt；晚到 reversal 只能 preview/attach 完全相同的历史 receipt，不再次访问 New API。
+
+`--apply` 在读取 credential 和调用 New API 前，先按 original external ID 原子写入 attempt。每条 attempt 的 external ID、request hash、correction type 与审计字段不可变；其 lifecycle 为 `active`、`abandoned`、`remote_conflict` 或 `resolved`。credential/client/preview 的 fresh-attempt 失败、fresh preview expected-state 不匹配，以及 New API 明确返回的无提交业务拒绝会把 attempt 标为 `abandoned`，释放 original external ID，允许经过新审批的 external ID 继续；旧 external ID 不能绑定不同 payload。timeout、transport failure、不可验证的成功响应和未知远端错误保留 `active`，因为远端可能已经提交，只允许完全相同命令恢复。`correction_already_applied` 和 `external_id_payload_mismatch` 标为 `remote_conflict`，继续阻止替代命令，直到人工对账。成功 resolution 在同一事务把 attempt 标为 `resolved`。若 New API 已提交但 response 丢失，active attempt 保留原 external ID/request hash，默认 preview 返回 `existing_intent`，完全相同的 `--apply` 可跨过 stale expected-state 恢复远端 replay 和本地 resolution。
+
+Store 在 resolution 事务内再次校验或补写同一 attempt 和原 grant 证据。CLI 和 Store 还校验 correction type 与原 grant type 相同；若 New API 已存在原 grant ledger，New API 再验证 provider、subject、type、`lark_approval` source 和 terminal status。New API 在 correction ledger 创建时用 nullable `correction_original_external_id` 唯一索引抢占 original grant，顺序早于任何 wallet/subscription side effect；并发不同 correction 中最多一个成功，其他稳定返回 `correction_already_applied`。Controller 的 attempt 和组级 receipt 都以 correction external ID 为主键；receipt 的 original external ID 永久唯一，attempt 只对 `active/remote_conflict/resolved` 建立 original external ID partial unique index。`OpenCorrection` 在允许运维写入前验证两表主键、receipt 唯一索引和 attempt partial unique predicate。resolution 一旦提交，只允许同 original subject hash、external ID、request hash、operator、reason、ticket、response status 和 result 的精确重放，任何差异返回冲突。
 
 ### 等级升级审批被撤销
 
@@ -1360,6 +1487,7 @@ pending -> processing -> succeeded
                     -> retry_wait -> processing
                     -> dead_letter
                     -> reversal_pending
+reversal_pending --one-shot correction resolution--> reversal_resolved
 ```
 
 `held_shadow` 的保存时间不计入 `principal_not_ready` 的 24 小时窗口；窗口从显式 release
@@ -1467,7 +1595,7 @@ New API 检查：
 - 所有 Lark event 必须校验 `app_id` 和 `tenant_key`。
 - 表单只接受固定 `custom_id`、locale、schema fingerprint 和 exact display-text mapping；未知文本与未知状态一律 fail closed。
 - Controller 不能持有 New API 管理员 PAT 和数据库密码。
-- New API integration credential 只能调用两个幂等写接口和一个最小只读 principal 枚举接口。
+- New API integration credential 只能调用两个幂等写接口和一个最小只读 principal 枚举接口；独立 correction credential 只能调用 preview/apply 两个纠正接口。
 - `:3001` 在 New API 所有容器网络可达，不能被当作认证边界；必须不 publish、不路由并强制 bearer auth。
 - 数据库事务和唯一约束是幂等性的最终保障，不能只依赖进程内锁或 Redis 锁。
 - active managed principal 的 identity、billing preference 和 subscription creation policy 均为服务端锁，UI 隐藏不是安全控制。
@@ -1495,6 +1623,9 @@ New API 检查：
 - APPROVED 事件总是回查实例。
 - `PENDING/REJECTED/CANCELED/DELETED/OVERTIME_CLOSE/OVERTIME_RECOVER/REVERTED` 和未知状态按状态矩阵处理；使用仓库内按真实 Lark 协议结构脱敏固化的 v1/v2 event 与 instance fixture。
 - REVERTED 使用当前 event/API 可用的显式关联码或已登记原 `instance_code` 精确找到原 grant，歧义时进入 `reversal_pending`。
+- correction CLI 默认 preview、脱敏输出 reversal/current state，只有 `--apply` 写入；subject hash 或类型错配在读取凭据或调用 New API 前拒绝；`--list-pending` 不迁移或恢复运行期队列状态。
+- correction `--apply` 在远端写入前持久化 original-level attempt；fresh 确定无提交失败转 `abandoned` 并允许新 external ID，response loss 保持 `active` 并使用相同 external ID/payload 重放，远端 ledger 冲突转 `remote_conflict` 并阻止替代请求；New API 成功而 Controller resolution 失败时可补写，Controller 已保存 resolution 时不再次调用 New API。
+- Store 只允许 correction type 与 original grant type 一致，并将 inbox、普通 job 和 fenced grant job 原子推进到 `reversal_resolved`。
 - 429、5xx 和 `Retry-After` 重试。
 - 每日在职巡检只有权威终态或两次健康全量扫描的 not-found 才停用；权限、scope、分页、`429`、`5xx` 和应用范围错误只告警。
 
@@ -1503,6 +1634,8 @@ New API 检查：
 - 同 external ID、同 payload 并发 100 次只增加一次 wallet。
 - 同 external ID、不同 payload 返回 `409`。
 - 模拟提交成功但响应丢失，重试不重复加额。
+- correction 在原 grant ledger 存在时拒绝 subject/type/source 不一致；plan drift 返回稳定不可重试的 `409`。
+- subscription correction 即使已到普通 lazy-reset 时间也保留 amount-used 和 reset timestamps；same-level no-op 不产生 setting/subscription/assignment/outbox 隐藏写入，也不因 policy version 不同而隐式迁移 assignment。
 - 新 principal 尚未绑定返回 `principal_not_ready`。
 - Lark 新用户在全局 `QuotaForNewUser/QuotaForInvitee` 非零且带 affiliate code 时，wallet 仍为 0，邀请双方都不发奖励。
 - user、OAuth binding 和 integration principal 任一步失败时整笔创建回滚；相同 subject 并发登录只映射到一个 user。
@@ -1582,7 +1715,7 @@ New API 检查：
 - 增加复合键 managed level binding、不可变 plan 约束和双向 subscription purchase gate。
 - 增加独立 `:3001` listener，确保不 publish、不路由；明确它仍可被 New API 所在的其他容器网络访问。
 - 增加专用 integration auth middleware。
-- 实现两个幂等写接口和一个最小、分页、只读的 active principal 枚举接口。
+- 实现四个 POST 接口和一个最小、分页、只读的 active principal 枚举接口；两个 correction 接口使用独立可选凭证。
 - 实现原子 wallet grant。
 - 实现 managed subscription 原地升级、lazy reset、用量继承和 preconsume settle/refund 兼容。
 - 锁定 managed identity 和 billing preference；在余额购买、支付下单/回调及普通 admin bind 的共享事务层执行门禁。
@@ -1591,8 +1724,8 @@ New API 检查：
 
 当前本地实现收据：fork 从上游 `v0.13.2` 的 peeled commit
 `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d` 开始，bigint、wallet grant、managed
-subscription、managed OAuth 和 principal disable 五个 tracer slice 均已实现，wire contract
-固定于 `f2ef0d95`。`go test ./service ./router ./middleware ./model ./controller` 已通过；真实
+subscription、managed OAuth、principal disable 和 operator correction 六个 tracer slice 均已实现，常驻 wire contract
+固定于 `f2ef0d95`，correction contract 在当前本地 worktree 验证。`go test ./service ./router ./middleware ./model ./controller` 已通过；真实
 MySQL/PostgreSQL migration 测试仍需要外部 DSN，仓库全量套件仍保留 WP2 baseline 记录的
 4 个非集成失败。这些是本地验证收据，不代表镜像已构建、Compose 已接入或生产已验收。
 
@@ -1716,7 +1849,13 @@ webhook 丢失后的晚撤销仍进入同一 reversal deny fence。分页 token/
 `Retry-After`。`approval_reconciliation_total{result}`、per-binding cursor target lag 以及
 `LarkApprovalReconciliationFailed`/`LarkApprovalReconciliationCursorStalled` 暴露失败和长期停滞。approval 与
 employment reconciliation 共用 100ms process-wide pacer，避免两类定时任务叠加超过 10 QPS。
-管理员 correction command、Compose 接入和生产验证仍未实现。
+管理员 correction command 也已在本地实现：独立 `CorrectionClient` 和 one-shot
+`cmd/lark-correction` 默认 preview，`--list-pending` 通过不迁移、不恢复 processing 的只读 Store 枚举待处理 reversal，只有显式
+`--apply` 且 original-level receipt 不存在时才调用 New API。远端调用前，SQLite original-level attempt 已不可变绑定 correction external ID、canonical request hash、type、subject hash 和审计字段；fresh 确定无提交失败转 `abandoned` 后释放 original，timeout/response loss 保持 `active` 供 exact replay，远端 ledger 冲突转 `remote_conflict` 并继续 fail closed。异请求无法跨过非 abandoned attempt 的本地 fence。SQLite 组级 receipt 保存 correction external ID、canonical request hash、
+operator/reason/change ticket、response status、sanitized result 和 resolved timestamp，并把 inbox、
+同 original 的全部 pending reversal、普通 job 与 fenced grant job 原子推进到 `reversal_resolved` 并核验预期行数。晚到 reversal 复用并 attach 同一 receipt；同 resolution 可重放，任何 payload
+漂移冲突；CLI 和 Store 均要求 correction type 与 original grant type 一致，并把输入 subject 的 SHA-256 与原 command shadow 绑定；New API 在原 grant ledger 存在时再次验证主体和类型。New API response loss
+使用相同 external ID/payload 重放；New API 的 original-grant unique fence 阻止并发不同 correction 二次生效。Controller 已保存 resolution 时 CLI 直接返回或 attach 本地收据，不再次调用 New API。实现和运行说明见 `docs/runbooks/lark-entitlement-correction.md`。Compose 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的

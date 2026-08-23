@@ -6,12 +6,20 @@ import (
 )
 
 func LoadIntegrationSecretFile(path string) (string, error) {
+	return loadCredentialFile(path, "integration")
+}
+
+func LoadCorrectionSecretFile(path string) (string, error) {
+	return loadCredentialFile(path, "correction")
+}
+
+func loadCredentialFile(path, credentialKind string) (string, error) {
 	if path == "" {
-		return "", errors.New("New API integration secret file is required")
+		return "", errors.New("New API " + credentialKind + " secret file is required")
 	}
 	contents, err := os.ReadFile(path)
 	if err != nil {
-		return "", errors.New("read New API integration secret file")
+		return "", errors.New("read New API " + credentialKind + " secret file")
 	}
 	defer func() {
 		for index := range contents {
@@ -26,7 +34,7 @@ func LoadIntegrationSecretFile(path string) (string, error) {
 		}
 	}
 	if !validIntegrationSecret(secret) {
-		return "", errors.New("New API integration secret must be one printable ASCII token of at least 32 bytes")
+		return "", errors.New("New API " + credentialKind + " secret must be one printable ASCII token of at least 32 bytes")
 	}
 	return string(secret), nil
 }

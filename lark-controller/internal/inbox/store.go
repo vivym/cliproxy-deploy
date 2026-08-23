@@ -53,6 +53,7 @@ const (
 	ProcessingStateProcessing        ProcessingState = "processing"
 	ProcessingStateShadowRecorded    ProcessingState = "shadow_recorded"
 	ProcessingStateReversalPending   ProcessingState = "reversal_pending"
+	ProcessingStateReversalResolved  ProcessingState = "reversal_resolved"
 	ProcessingStateDeadLetter        ProcessingState = "dead_letter"
 	ProcessingStatePrincipalDisabled ProcessingState = "principal_disabled"
 )
@@ -75,12 +76,13 @@ const (
 type jobStatus string
 
 const (
-	jobStatusPending         jobStatus = "pending"
-	jobStatusProcessing      jobStatus = "processing"
-	jobStatusRetryWait       jobStatus = "retry_wait"
-	jobStatusSucceeded       jobStatus = "succeeded"
-	jobStatusReversalPending jobStatus = "reversal_pending"
-	jobStatusDeadLetter      jobStatus = "dead_letter"
+	jobStatusPending          jobStatus = "pending"
+	jobStatusProcessing       jobStatus = "processing"
+	jobStatusRetryWait        jobStatus = "retry_wait"
+	jobStatusSucceeded        jobStatus = "succeeded"
+	jobStatusReversalPending  jobStatus = "reversal_pending"
+	jobStatusReversalResolved jobStatus = "reversal_resolved"
+	jobStatusDeadLetter       jobStatus = "dead_letter"
 )
 
 type Store struct {
@@ -153,6 +155,259 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+// OpenReadOnly opens an already-migrated Store without schema migration or
+// processing-state recovery. It is intended for one-shot inspection commands.
+func OpenReadOnly(path string) (*Store, error) {
+	if path == "" {
+		return nil, errors.New("sqlite path is required")
+	}
+	query := url.Values{}
+	query.Set("mode", "ro")
+	query.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", sqliteBusyTimeout.Milliseconds()))
+	query.Add("_pragma", "foreign_keys(1)")
+	query.Add("_pragma", "query_only(1)")
+	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
+	database, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open read-only sqlite: %w", err)
+	}
+	database.SetMaxOpenConns(1)
+	if err := database.Ping(); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("open read-only sqlite: %w", err)
+	}
+	return &Store{database: database, now: time.Now}, nil
+}
+
+// OpenCorrection opens an existing writable Store for correction resolution.
+// Schema migration and processing recovery remain owned by Controller startup.
+func OpenCorrection(path string) (*Store, error) {
+	if path == "" {
+		return nil, errors.New("sqlite path is required")
+	}
+	query := url.Values{}
+	query.Set("mode", "rw")
+	query.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", sqliteBusyTimeout.Milliseconds()))
+	query.Add("_pragma", "foreign_keys(1)")
+	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: query.Encode()}).String()
+	database, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open correction sqlite: %w", err)
+	}
+	database.SetMaxOpenConns(1)
+	store := &Store{database: database, now: time.Now}
+	if err := database.Ping(); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("open correction sqlite: %w", err)
+	}
+	if err := store.validateCorrectionSchema(context.Background()); err != nil {
+		_ = database.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func (s *Store) validateCorrectionSchema(ctx context.Context) error {
+	queries := []string{
+		"SELECT event_key, processing_state FROM lark_event_inbox LIMIT 0",
+		"SELECT event_key, status, last_error, updated_at FROM jobs LIMIT 0",
+		"SELECT event_key, external_id, subject_sha256, created_at FROM entitlement_command_shadows LIMIT 0",
+		"SELECT external_id, status, last_error, completed_at, updated_at FROM entitlement_grant_jobs LIMIT 0",
+		"SELECT event_key, original_external_id, original_grant_status, original_grant_type, resolution_external_id, resolution_request_sha256, resolution_operator, resolution_reason, resolution_change_ticket, resolution_response_status, resolution_result_json, resolved_at FROM approval_reversals LIMIT 0",
+		"SELECT correction_external_id, original_external_id, original_subject_sha256, correction_request_sha256, correction_type, operator, reason, change_ticket, status, failure_code, claimed_at, ended_at FROM approval_reversal_correction_intents LIMIT 0",
+		"SELECT correction_external_id, original_external_id, original_subject_sha256, correction_request_sha256, operator, reason, change_ticket, response_status, result_json, resolved_at FROM approval_reversal_resolution_receipts LIMIT 0",
+		"SELECT event_key, action, outcome, created_at FROM controller_audit LIMIT 0",
+	}
+	for _, query := range queries {
+		rows, err := s.database.QueryContext(ctx, query)
+		if err != nil {
+			return fmt.Errorf("validate correction schema: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("validate correction schema: %w", err)
+		}
+	}
+	if err := s.validateSingleColumnPrimaryKey(
+		ctx, "approval_reversal_correction_intents", "correction_external_id",
+	); err != nil {
+		return fmt.Errorf("validate approval_reversal_correction_intents primary key: %w", err)
+	}
+	if err := s.validateSingleColumnPrimaryKey(
+		ctx, "approval_reversal_resolution_receipts", "correction_external_id",
+	); err != nil {
+		return fmt.Errorf("validate approval_reversal_resolution_receipts primary key: %w", err)
+	}
+	if err := s.validateUniqueIndex(
+		ctx, "approval_reversal_resolution_receipts", "", []string{"original_external_id"}, false,
+	); err != nil {
+		return fmt.Errorf(
+			"validate approval_reversal_resolution_receipts unique original_external_id: %w", err,
+		)
+	}
+	const openIntentIndex = "ux_approval_reversal_open_intent_original"
+	if err := s.validateUniqueIndex(
+		ctx, "approval_reversal_correction_intents", openIntentIndex,
+		[]string{"original_external_id"}, true,
+	); err != nil {
+		return fmt.Errorf("validate open correction intent partial index: %w", err)
+	}
+	var indexSQL string
+	if err := s.database.QueryRowContext(ctx, `
+SELECT sql FROM sqlite_schema
+WHERE type = 'index' AND tbl_name = ? AND name = ?`,
+		"approval_reversal_correction_intents", openIntentIndex,
+	).Scan(&indexSQL); err != nil {
+		return fmt.Errorf("validate open correction intent partial index predicate: %w", err)
+	}
+	normalized := strings.ToLower(strings.Join(strings.Fields(indexSQL), " "))
+	whereAt := strings.Index(normalized, " where ")
+	if whereAt < 0 || normalized[whereAt+len(" where "):] !=
+		"status in ('active', 'remote_conflict', 'resolved')" {
+		return errors.New("validate open correction intent partial index predicate: unexpected predicate")
+	}
+	return nil
+}
+
+func sqliteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func (s *Store) validateSingleColumnPrimaryKey(
+	ctx context.Context,
+	table string,
+	expectedColumn string,
+) error {
+	rows, err := s.database.QueryContext(
+		ctx, "PRAGMA table_info("+sqliteIdentifier(table)+")",
+	)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	primaryKeyColumns := make(map[int]string)
+	for rows.Next() {
+		var columnID int
+		var name string
+		var dataType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKeyPosition int
+		if err := rows.Scan(
+			&columnID, &name, &dataType, &notNull, &defaultValue, &primaryKeyPosition,
+		); err != nil {
+			return err
+		}
+		if primaryKeyPosition > 0 {
+			primaryKeyColumns[primaryKeyPosition] = name
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(primaryKeyColumns) != 1 || primaryKeyColumns[1] != expectedColumn {
+		return fmt.Errorf("got primary key columns %v, want [%s]", primaryKeyColumns, expectedColumn)
+	}
+	return nil
+}
+
+type sqliteIndexMetadata struct {
+	name    string
+	unique  bool
+	partial bool
+}
+
+func (s *Store) validateUniqueIndex(
+	ctx context.Context,
+	table string,
+	requiredName string,
+	expectedColumns []string,
+	expectedPartial bool,
+) error {
+	rows, err := s.database.QueryContext(
+		ctx, "PRAGMA index_list("+sqliteIdentifier(table)+")",
+	)
+	if err != nil {
+		return err
+	}
+	indexes := make([]sqliteIndexMetadata, 0)
+	for rows.Next() {
+		var sequence int
+		var index sqliteIndexMetadata
+		var unique int
+		var origin string
+		var partial int
+		if err := rows.Scan(&sequence, &index.name, &unique, &origin, &partial); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		index.unique = unique == 1
+		index.partial = partial == 1
+		indexes = append(indexes, index)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, index := range indexes {
+		if requiredName != "" && index.name != requiredName {
+			continue
+		}
+		if !index.unique || index.partial != expectedPartial {
+			continue
+		}
+		columns, err := s.sqliteIndexColumns(ctx, index.name)
+		if err != nil {
+			return err
+		}
+		if len(columns) != len(expectedColumns) {
+			continue
+		}
+		matches := true
+		for position := range columns {
+			if columns[position] != expectedColumns[position] {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"missing unique index name=%q columns=%v partial=%t",
+		requiredName, expectedColumns, expectedPartial,
+	)
+}
+
+func (s *Store) sqliteIndexColumns(ctx context.Context, index string) ([]string, error) {
+	rows, err := s.database.QueryContext(
+		ctx, "PRAGMA index_info("+sqliteIdentifier(index)+")",
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	columns := make([]string, 0, 1)
+	for rows.Next() {
+		var sequence int
+		var columnID int
+		var name sql.NullString
+		if err := rows.Scan(&sequence, &columnID, &name); err != nil {
+			return nil, err
+		}
+		if !name.Valid {
+			return nil, errors.New("expression index is not supported")
+		}
+		columns = append(columns, name.String)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return columns, nil
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -231,10 +486,47 @@ CREATE TABLE IF NOT EXISTS approval_reversals (
     original_business_code TEXT NOT NULL DEFAULT '',
     result TEXT NOT NULL,
     reason TEXT NOT NULL,
+	resolution_external_id TEXT NOT NULL DEFAULT '',
+	resolution_request_sha256 TEXT NOT NULL DEFAULT '',
+	resolution_operator TEXT NOT NULL DEFAULT '',
+	resolution_reason TEXT NOT NULL DEFAULT '',
+	resolution_change_ticket TEXT NOT NULL DEFAULT '',
+	resolution_response_status TEXT NOT NULL DEFAULT '',
+	resolution_result_json TEXT NOT NULL DEFAULT '',
+	resolved_at TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_approval_reversals_result
     ON approval_reversals(result, created_at, event_key);
+CREATE TABLE IF NOT EXISTS approval_reversal_correction_intents (
+    correction_external_id TEXT PRIMARY KEY,
+    original_external_id TEXT NOT NULL,
+    original_subject_sha256 TEXT NOT NULL,
+    correction_request_sha256 TEXT NOT NULL,
+    correction_type TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    change_ticket TEXT NOT NULL,
+    status TEXT NOT NULL,
+    failure_code TEXT NOT NULL DEFAULT '',
+    claimed_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_approval_reversal_open_intent_original
+    ON approval_reversal_correction_intents(original_external_id)
+    WHERE status IN ('active', 'remote_conflict', 'resolved');
+CREATE TABLE IF NOT EXISTS approval_reversal_resolution_receipts (
+    correction_external_id TEXT PRIMARY KEY,
+    original_external_id TEXT NOT NULL UNIQUE,
+    original_subject_sha256 TEXT NOT NULL,
+    correction_request_sha256 TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    change_ticket TEXT NOT NULL,
+    response_status TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    resolved_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS approval_reconciliation_cursors (
     approval_code TEXT PRIMARY KEY,
     scanned_through TEXT NOT NULL,
@@ -481,6 +773,9 @@ WHERE processing_state = 'processing'
 	if err := s.ensureInboxColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureApprovalReversalResolutionColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensurePolicyVersionColumns(ctx); err != nil {
 		return err
 	}
@@ -489,6 +784,113 @@ WHERE processing_state = 'processing'
 	}
 	if err := s.reclassifyLegacyApprovalDecisions(ctx); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureApprovalReversalResolutionColumns(ctx context.Context) error {
+	required := []struct {
+		name string
+		ddl  string
+	}{
+		{"resolution_external_id", "ALTER TABLE approval_reversals ADD COLUMN resolution_external_id TEXT NOT NULL DEFAULT ''"},
+		{"resolution_request_sha256", "ALTER TABLE approval_reversals ADD COLUMN resolution_request_sha256 TEXT NOT NULL DEFAULT ''"},
+		{"resolution_operator", "ALTER TABLE approval_reversals ADD COLUMN resolution_operator TEXT NOT NULL DEFAULT ''"},
+		{"resolution_reason", "ALTER TABLE approval_reversals ADD COLUMN resolution_reason TEXT NOT NULL DEFAULT ''"},
+		{"resolution_change_ticket", "ALTER TABLE approval_reversals ADD COLUMN resolution_change_ticket TEXT NOT NULL DEFAULT ''"},
+		{"resolution_response_status", "ALTER TABLE approval_reversals ADD COLUMN resolution_response_status TEXT NOT NULL DEFAULT ''"},
+		{"resolution_result_json", "ALTER TABLE approval_reversals ADD COLUMN resolution_result_json TEXT NOT NULL DEFAULT ''"},
+		{"resolved_at", "ALTER TABLE approval_reversals ADD COLUMN resolved_at TEXT NOT NULL DEFAULT ''"},
+	}
+	columns, err := s.tableColumns(ctx, "approval_reversals")
+	if err != nil {
+		return err
+	}
+	for _, column := range required {
+		if _, exists := columns[column.name]; exists {
+			continue
+		}
+		if _, err := s.database.ExecContext(ctx, column.ddl); err != nil {
+			return fmt.Errorf("add approval reversal column %q: %w", column.name, err)
+		}
+	}
+	if _, err := s.database.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS approval_reversal_correction_intents (
+    correction_external_id TEXT PRIMARY KEY,
+    original_external_id TEXT NOT NULL,
+    original_subject_sha256 TEXT NOT NULL,
+    correction_request_sha256 TEXT NOT NULL,
+    correction_type TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    change_ticket TEXT NOT NULL,
+    status TEXT NOT NULL,
+    failure_code TEXT NOT NULL DEFAULT '',
+    claimed_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_approval_reversal_open_intent_original
+    ON approval_reversal_correction_intents(original_external_id)
+    WHERE status IN ('active', 'remote_conflict', 'resolved');
+CREATE TABLE IF NOT EXISTS approval_reversal_resolution_receipts (
+    correction_external_id TEXT PRIMARY KEY,
+    original_external_id TEXT NOT NULL UNIQUE,
+    original_subject_sha256 TEXT NOT NULL,
+    correction_request_sha256 TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    change_ticket TEXT NOT NULL,
+    response_status TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    resolved_at TEXT NOT NULL
+);
+DROP INDEX IF EXISTS ux_approval_reversal_resolution_external_id;
+CREATE INDEX IF NOT EXISTS idx_approval_reversal_resolution_external_id
+ON approval_reversals(resolution_external_id, original_external_id)
+WHERE resolution_external_id <> ''`); err != nil {
+		return fmt.Errorf("create approval reversal resolution external id index: %w", err)
+	}
+	if err := s.backfillApprovalReversalResolutionReceipts(ctx); err != nil {
+		return err
+	}
+	if _, err := s.database.ExecContext(ctx, `
+INSERT OR IGNORE INTO approval_reversal_correction_intents (
+    correction_external_id, original_external_id, original_subject_sha256,
+    correction_request_sha256, correction_type, operator, reason, change_ticket,
+    status, failure_code, claimed_at, ended_at
+)
+SELECT correction_external_id, original_external_id, original_subject_sha256,
+       correction_request_sha256,
+       COALESCE((
+           SELECT reversal.original_grant_type
+           FROM approval_reversals reversal
+           WHERE reversal.original_external_id = approval_reversal_resolution_receipts.original_external_id
+           ORDER BY reversal.created_at, reversal.event_key
+           LIMIT 1
+       ), ''),
+       operator, reason, change_ticket, 'resolved', '', resolved_at, resolved_at
+FROM approval_reversal_resolution_receipts`); err != nil {
+		return fmt.Errorf("backfill approval reversal correction intents: %w", err)
+	}
+	var incompatibleIntents int
+	if err := s.database.QueryRowContext(ctx, `
+SELECT COUNT(*)
+FROM approval_reversal_resolution_receipts receipt
+LEFT JOIN approval_reversal_correction_intents intent
+  ON intent.correction_external_id = receipt.correction_external_id
+WHERE intent.correction_external_id IS NULL
+   OR intent.original_external_id <> receipt.original_external_id
+   OR intent.original_subject_sha256 <> receipt.original_subject_sha256
+   OR intent.correction_request_sha256 <> receipt.correction_request_sha256
+   OR intent.correction_type = ''
+   OR intent.status <> 'resolved'
+   OR intent.operator <> receipt.operator
+   OR intent.reason <> receipt.reason
+   OR intent.change_ticket <> receipt.change_ticket`).Scan(&incompatibleIntents); err != nil {
+		return fmt.Errorf("validate approval reversal correction intent backfill: %w", err)
+	}
+	if incompatibleIntents != 0 {
+		return ErrApprovalReversalResolutionMismatch
 	}
 	return nil
 }
@@ -742,6 +1144,8 @@ func (s *Store) tableColumns(ctx context.Context, table string) (map[string]stru
 		query = "PRAGMA table_info(lark_event_inbox)"
 	case "approval_instances":
 		query = "PRAGMA table_info(approval_instances)"
+	case "approval_reversals":
+		query = "PRAGMA table_info(approval_reversals)"
 	case "policy_versions":
 		query = "PRAGMA table_info(policy_versions)"
 	case "entitlement_grant_jobs":

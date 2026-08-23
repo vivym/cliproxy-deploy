@@ -136,6 +136,87 @@ SELECT queue, recovered_count FROM processing_recovery_audit ORDER BY queue`)
 	}
 }
 
+func TestOpenReadOnlyDoesNotRecoverLiveProcessingState(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	ctx := context.Background()
+	when := time.Date(2026, time.August, 23, 10, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	insertRecoveryInbox(t, ctx, store, "evt-read-only", ProcessingStateProcessing, when)
+	if _, err := store.database.ExecContext(ctx, `
+INSERT INTO jobs (event_key, job_type, status, attempts, next_attempt_at, last_error, created_at, updated_at)
+VALUES ('evt-read-only', 'process_lark_event', 'processing', 1, ?, '', ?, ?)`, when, when, when); err != nil {
+		t.Fatalf("insert read-only processing fixture: %v", err)
+	}
+
+	readOnly, err := OpenReadOnly(databasePath)
+	if err != nil {
+		t.Fatalf("open read-only store: %v", err)
+	}
+	if _, err := readOnly.ListPendingApprovalReversals(ctx, 10); err != nil {
+		t.Fatalf("query through read-only store: %v", err)
+	}
+	if err := readOnly.Close(); err != nil {
+		t.Fatalf("close read-only store: %v", err)
+	}
+
+	var jobState string
+	var inboxState ProcessingState
+	if err := store.database.QueryRowContext(ctx, `
+SELECT job.status, event.processing_state
+FROM jobs job JOIN lark_event_inbox event ON event.event_key = job.event_key
+WHERE job.event_key = 'evt-read-only'`).Scan(&jobState, &inboxState); err != nil {
+		t.Fatalf("read processing state after read-only open: %v", err)
+	}
+	if jobState != "processing" || inboxState != ProcessingStateProcessing {
+		t.Fatalf("read-only open mutated processing state: job=%q inbox=%q", jobState, inboxState)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+}
+
+func TestOpenCorrectionDoesNotRecoverLiveProcessingState(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")
+	store, err := Open(databasePath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	ctx := context.Background()
+	when := time.Date(2026, time.August, 23, 10, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
+	insertRecoveryInbox(t, ctx, store, "evt-correction-open", ProcessingStateProcessing, when)
+	if _, err := store.database.ExecContext(ctx, `
+INSERT INTO jobs (event_key, job_type, status, attempts, next_attempt_at, last_error, created_at, updated_at)
+VALUES ('evt-correction-open', 'process_lark_event', 'processing', 1, ?, '', ?, ?)`, when, when, when); err != nil {
+		t.Fatalf("insert correction-open processing fixture: %v", err)
+	}
+
+	correctionStore, err := OpenCorrection(databasePath)
+	if err != nil {
+		t.Fatalf("open correction store: %v", err)
+	}
+	if err := correctionStore.Close(); err != nil {
+		t.Fatalf("close correction store: %v", err)
+	}
+
+	var jobState string
+	var inboxState ProcessingState
+	if err := store.database.QueryRowContext(ctx, `
+SELECT job.status, event.processing_state
+FROM jobs job JOIN lark_event_inbox event ON event.event_key = job.event_key
+WHERE job.event_key = 'evt-correction-open'`).Scan(&jobState, &inboxState); err != nil {
+		t.Fatalf("read processing state after correction open: %v", err)
+	}
+	if jobState != "processing" || inboxState != ProcessingStateProcessing {
+		t.Fatalf("correction open mutated processing state: job=%q inbox=%q", jobState, inboxState)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+}
+
 func TestRecoveredApprovalAttemptFencesLateRetryAndCompletion(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "controller.sqlite"))
 	if err != nil {

@@ -138,6 +138,7 @@ func TestTerminalEntitlementGrantJobDoesNotBlockKeyRetirement(t *testing.T) {
 	for _, terminalStatus := range []inbox.EntitlementGrantJobStatus{
 		inbox.EntitlementGrantJobStatusSucceeded,
 		inbox.EntitlementGrantJobStatusDeadLetter,
+		inbox.EntitlementGrantJobStatusReversalResolved,
 	} {
 		t.Run(string(terminalStatus), func(t *testing.T) {
 			ctx := context.Background()
@@ -146,7 +147,8 @@ func TestTerminalEntitlementGrantJobDoesNotBlockKeyRetirement(t *testing.T) {
 				t.Fatalf("open store: %v", err)
 			}
 			t.Cleanup(func() { _ = store.Close() })
-			externalID := recordHeldGrantJob(t, ctx, store, "evt-retire-grant-key-"+string(terminalStatus))
+			originalEventID := "evt-retire-grant-key-" + string(terminalStatus)
+			externalID := recordHeldGrantJob(t, ctx, store, originalEventID)
 			if released, err := store.ReleaseHeldEntitlementGrantJobs(ctx, "employee-v1"); err != nil || released != 1 {
 				t.Fatalf("release held grant: released=%d err=%v", released, err)
 			}
@@ -169,6 +171,23 @@ func TestTerminalEntitlementGrantJobDoesNotBlockKeyRetirement(t *testing.T) {
 					job,
 					inbox.EntitlementGrantFailureInvalidSealedPayload,
 				)
+			case inbox.EntitlementGrantJobStatusReversalResolved:
+				reversal := completeVerifiedReversal(
+					t, ctx, store, "retire-grant-key-reversal", "instance-"+originalEventID,
+				)
+				_, err = store.ResolveApprovalReversal(ctx, inbox.ApprovalReversalResolution{
+					EventKey: reversal.EventKey, OriginalExternalID: externalID,
+					OriginalSubjectSHA256:   testSHA256("tenant-test:ou-requester"),
+					CorrectionExternalID:    "lark:correction:CHG-KEY-RETIRE:wallet",
+					CorrectionRequestSHA256: strings.Repeat("a", 64),
+					Operator:                "ops@example.com",
+					Reason:                  "resolve reversal before retiring payload key",
+					ChangeTicket:            "CHG-KEY-RETIRE",
+					ResponseStatus:          "noop",
+					Result: inbox.ApprovalCorrectionResult{
+						CorrectionType: "wallet_quota", WalletQuota: int64Pointer(2_500_000),
+					},
+				})
 			}
 			if err != nil {
 				t.Fatalf("transition grant to %s: %v", terminalStatus, err)
