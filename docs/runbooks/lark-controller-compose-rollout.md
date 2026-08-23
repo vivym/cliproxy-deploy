@@ -2,7 +2,7 @@
 
 ## 状态和边界
 
-本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。当前代码已完成本地 Compose 渲染、New API fork、Controller 与 correction CLI 镜像构建和 offline quiesce backup/restore 合同，但未发布这些镜像的 multi-arch registry digest，未配置真实 Lark tenant，也未做获准的生产恢复/reconciliation 演练。因此当前不能据此宣称生产可上线。
+本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。当前代码已完成本地 Compose 渲染、New API fork、Controller 与 correction CLI 的 `linux/amd64,linux/arm64` OCI 构建验证和 offline quiesce backup/restore 合同，但未发布这些镜像的 multi-arch registry digest，未配置真实 Lark tenant，也未做获准的生产恢复/reconciliation 演练。因此当前不能据此宣称生产可上线。
 
 基础 New API 迁移和 Lark rollout 是两个独立变更。先按 `migrate-to-new-api-deploy.md` 完成并验收基础迁移；不要在同一个维护窗口首次启用 Lark profile。
 

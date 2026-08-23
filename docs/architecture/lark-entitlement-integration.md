@@ -1733,9 +1733,10 @@ SQLite、MySQL 8.0 和 PostgreSQL 16 上通过。`dbfcf0c7` 源码已完成本�
 `linux/arm64` local image ID 为
 `sha256:68f25465624a0e736a2bfacf58adad608b0e2777f4f89be0272a174bf952e973`。
 仓库全量 `go test ./...` 仍重现 4 个非 Lark 基线失败：Claude file-content 转换 3 个，
-stream ticker 零间隔 panic 1 个；对应 `relay/channel/claude` 和 `relay/helper` 路径相对上述
-peeled upstream commit 无 diff。这些是本地验证收据，不是 multi-arch registry manifest
-digest，也不代表镜像已发布或生产已验收。
+timing-sensitive stream-scanner 失败 1 个；后者在不同运行中可能表现为 assertion failure
+或 ticker panic。对应 `relay/channel/claude` 和 `relay/helper` 路径相对上述 peeled upstream
+commit 无 diff。这些是本地验证收据，不是 multi-arch registry manifest digest，也不代表
+镜像已发布或生产已验收。
 
 ### WP3：Controller
 
@@ -1876,7 +1877,7 @@ job 年龄，未来的 `retry_wait` 不会被误判为卡死。
 
 - [x] 修改根目录唯一的 `docker-compose.yml`，不引入 overlay 或第二套部署入口。
 - [x] 增加显式命名为 `new-api-lark-integration` 的 `lark-integration` network、分离的 events/OAuth Traefik exact-path router 和 Controller volume。
-- [ ] 发布并固定 New API fork 和 Controller image digest；当前模板只提供 repository/tag 输入和本地 Controller build。
+- [ ] 发布并固定 New API fork、Controller 和 correction CLI image digest；当前模板只提供 repository/tag 输入，三个 image 已完成本地双架构 OCI build 验证但尚未发布。
 - [x] 扩展 `.env.example` 和按 `shared/controller/new-api` consumer 隔离的 file-backed secret mount，但不提交任何 secret；Controller/correction image target 已分离，integration current/next rotation window 与 correction 三方独立性检查已接入。
 - [x] 扩展带 offline quiesce barrier、v2 manifest/receipt、精确 checksum coverage 和 Lark enabled/absent 同包校验的 backup/restore 脚本；restore 强制 shadow/OAuth-off，New API-only restore 拒绝拆分 enabled 包。生产恢复与 reconciliation 演练仍待执行。
 - [x] 本地 verify 已检查公网 integration path 为 `404`、New API 容器内无凭证访问 `:3001` 为 `401`、Controller `readyz` 和 OAuth 灰度门禁。
@@ -1889,6 +1890,19 @@ manifest digest：
 - New API fork `dbfcf0c7`：`sha256:68f25465624a0e736a2bfacf58adad608b0e2777f4f89be0272a174bf952e973`
 - Controller `f55103e`：`sha256:9f5a2401242ed2cd90daadcc5249037323250d9f6f90384bdbd93570469d538e`
 - correction CLI `f55103e`：`sha256:840befffed905094ab3e99d33aaab90c57023f9251800bc41c53c90b5613c8aa`
+
+2026-08-24 又使用 Buildx 以 `linux/amd64,linux/arm64`、`--provenance=false`、
+`--sbom=false` 和 OCI exporter 完成本地双架构构建。archive 内 index blob 的 SHA-256
+已独立复算，且每个 index 只包含预期的两个 Linux platform descriptor：
+
+- New API fork `dbfcf0c7` local OCI index：`sha256:bedab26b032ee2b4b8654495c6f1d52bcd987fd047e2157b91d9d96edc41d24a`
+- Controller `f55103e` local OCI index：`sha256:a16a36248214119b5f13e373637d52488d561f8a7bb5e566e86c66016e161867`
+- correction CLI `f55103e` local OCI index：`sha256:19d9154c941528afeb7676bb8f15302cb128ca561c2a32acf827beec35d17316`
+
+两架构 config 还分别验证了 New API entrypoint、Controller/correction entrypoint、Controller
+healthcheck 和 runtime UID/GID `10001:10001`。验证后的临时 OCI archive 已删除。这三个
+local OCI index digest 不是已发布的 registry digest；未来启用 attestations、改变 exporter
+或由 registry 转换 media type 都可能产生不同 digest，发布后必须重新记录 registry receipt。
 
 本次验证未 push 或发布任何镜像，未部署，也未访问服务器。
 
