@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers 和幂等基础订阅投递，每日在职对账仍未实现，WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递和 active principal 每日在职对账；其他 reconciliation、WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1092,7 +1092,10 @@ New API fork 同时给 `subscription_plans` 增加 `managed_only boolean NOT NUL
 | `entitlement_grant_jobs` | AES-256-GCM 密封的 canonical request；shadow 写入 `held_shadow`，active gate 后转为可执行状态 |
 | `principal_disable_jobs` | AES-256-GCM 密封的 disable command；实时事件可选关联 inbox，reconciliation 不伪造 event |
 | `principal_disable_audit` | disable shadow/retry/result/dead-letter 脱敏审计，不依赖 webhook event key |
-| `employment_checks` | 在职状态证据、连续缺失计数和 disable external ID |
+| `employment_reconciliation_runs` | 每个 UTC evidence date 的最新完整或失败扫描状态 |
+| `employment_checks` | 每个 UTC evidence date 最新一次尝试的 subject hash、查询时间、稳定结果、Lark result code、权限健康状态和 evidence hash |
+| `employment_reconciliation_audit` | 同日失败与成功均保留的 append-only bounded result 审计 |
+| `employment_missing_evidence` | subject hash 的连续 not-found 次数及首次、最近一次健康完整证据时间 |
 | `jobs` | retry schedule、attempt、last_error、dead-letter |
 | `controller_audit` | Controller 决策轨迹 |
 
@@ -1165,7 +1168,7 @@ Lark userinfo 返回 `20021 User resigned` 只能阻止该员工再次登录，�
 
 ### 离职事件丢失补偿
 
-Webhook 不是永久可靠的离职事实来源。Controller 使用同一 `contact:contact.base:readonly` 权限，每日对 New API 中所有 active Lark principal 分批查询 Lark 用户状态，并受 Lark rate limit 控制；该任务只读取最小身份和在职状态，不读取邮箱、手机号或工号。
+Webhook 不是永久可靠的离职事实来源。Controller 使用同一 `contact:contact.base:readonly` 权限，每日对 New API 中所有 active Lark principal 分批查询 Lark 用户状态，并受 Lark rate limit 控制；初始实现串行查询，包含前后 health probe 在内的请求起点至少间隔 100ms（最多 10 QPS），`429` 后遵守更长但不超过正常 reconciliation interval 的 `Retry-After`。该任务只读取最小身份和在职状态，不读取邮箱、手机号或工号。
 
 自动停用必须满足严格证据门槛：
 
@@ -1291,6 +1294,8 @@ LARK_APPROVAL_BINDINGS_FILE
 LARK_GRANT_PAYLOAD_KEYRING_FILE
 LARK_INTEGRATION_SECRET_FILE
 NEW_API_INTERNAL_BASE_URL
+LARK_RECONCILIATION_HEALTH_OPEN_ID
+LARK_RECONCILIATION_INTERVAL
 NEW_API_BRIDGE_CLIENT_ID
 NEW_API_BRIDGE_CLIENT_SECRET_FILE
 NEW_API_OAUTH_CALLBACK_ALLOWLIST
@@ -1299,7 +1304,7 @@ LARK_OAUTH_TRUSTED_PROXY_CIDRS
 CONTROLLER_DATABASE_PATH
 ```
 
-`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`LARK_INTEGRATION_SECRET_FILE` 保存一个不少于 32 字节的 printable、无空白 ASCII bearer token，可带一个 LF 或 CRLF 结尾；仅 active mode 读取。`NEW_API_BRIDGE_CLIENT_SECRET_FILE` 保存一个 32 至 4096 字节的 printable、无空白 ASCII client secret，可带一个 LF 或 CRLF 结尾；shadow/active 均在 startup gate 读取，明文不能放入环境变量、日志或 SQLite。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。OAuth authorize、callback、token 和 userinfo 使用四个独立的 per-client 一分钟固定窗口，`LARK_OAUTH_RATE_LIMIT_PER_MINUTE` 默认 30；authorize 另有每个 resolved client 每 5 分钟最多签发 20 个 state、全局每分钟最多签发 500 个 state 的固定硬限制。IPv4 client key 使用单个地址，IPv6 client key 统一按 masked `/64` 归组。被后续门禁拒绝或 state 持久化失败时必须回滚已预留的签发计数和空 map entry；`429 Retry-After` 必须反映实际拒绝请求的一分钟或五分钟窗口。只有直接对端位于显式 `LARK_OAUTH_TRUSTED_PROXY_CIDRS` 时才解析 `X-Forwarded-For`，该配置必须只包含实际 Controller 前置代理网段。
+`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`LARK_INTEGRATION_SECRET_FILE` 保存一个不少于 32 字节的 printable、无空白 ASCII bearer token，可带一个 LF 或 CRLF 结尾；仅 active mode 读取。`LARK_RECONCILIATION_HEALTH_OPEN_ID` 同样仅 active mode 必需，必须是当前 tenant 和应用可用范围内稳定且已知 active 的 open_id；扫描前后任一探针不为 present 时，本次扫描只记失败，不提交证据。`LARK_RECONCILIATION_INTERVAL` 仅 active mode 生效，默认 `24h`，只允许 `24h..168h`；失败后至少间隔 15 分钟重试，若 Lark 给出更长 `Retry-After` 则遵守该值，但不超过正常 reconciliation interval。`NEW_API_BRIDGE_CLIENT_SECRET_FILE` 保存一个 32 至 4096 字节的 printable、无空白 ASCII client secret，可带一个 LF 或 CRLF 结尾；shadow/active 均在 startup gate 读取，明文不能放入环境变量、日志或 SQLite。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。OAuth authorize、callback、token 和 userinfo 使用四个独立的 per-client 一分钟固定窗口，`LARK_OAUTH_RATE_LIMIT_PER_MINUTE` 默认 30；authorize 另有每个 resolved client 每 5 分钟最多签发 20 个 state、全局每分钟最多签发 500 个 state 的固定硬限制。IPv4 client key 使用单个地址，IPv6 client key 统一按 masked `/64` 归组。被后续门禁拒绝或 state 持久化失败时必须回滚已预留的签发计数和空 map entry；`429 Retry-After` 必须反映实际拒绝请求的一分钟或五分钟窗口。只有直接对端位于显式 `LARK_OAUTH_TRUSTED_PROXY_CIDRS` 时才解析 `X-Forwarded-For`，该配置必须只包含实际 Controller 前置代理网段。
 
 日志必须对以下字段脱敏：
 
@@ -1650,7 +1655,18 @@ per-client 限流、稳定错误和 `no-store` 响应均已实现，bridge clien
 key ID、nonce 和 ciphertext。shadow mode 不 release；active startup/runtime 校验所有非终态 grant
 和 disable job key 后显式 release，使用同一 external ID 处理 response-loss replay、有限重试、
 dead-letter、重启恢复及脱敏结果审计。disable ledger 的 `event_key` 是可选关联，使后续
-`employment_reconciliation` 能复用执行器而无需伪造 webhook。每日在职 reconciliation、Compose
+`employment_reconciliation` 能复用执行器而无需伪造 webhook。active mode 现在会立即启动一次
+每日在职 reconciliation，并按 cursor 分页枚举 New API 中所有 active Lark principal；扫描前后
+均验证已知 active open_id。`is_resigned/is_exited` 在健康完整扫描提交时生成 eventless
+`held_shadow` disable job；`41012` 只有在两次相隔至少 24 小时的健康完整扫描后才生成 job，present
+会清除旧 missing evidence。间隔使用每个 Lark 查询实际完成时间，不使用整轮扫描开始时间，避免长扫描
+或跨日重启把短间隔误算为 24 小时。所有 Lark 查询串行，request start 至少相隔 100ms。
+`41050`、`429`、`5xx`、token/scope/permission、单用户查询失败、分页
+不完整、重复 cursor/subject 或超过页数上限都只追加 bounded failure audit，partial checks 统一标记
+`permission_healthy=false`，不会推进 missing evidence；其中已确认的 present 仍会清除旧 missing evidence，
+防止下一次 not-found 被误判为连续缺失。失败后至少 15 分钟重试，并遵守更长但不超过正常周期的
+Lark `Retry-After`；同一 UTC evidence date
+成功后幂等跳过，之前的失败 audit 仍保留。其他 Controller inbox/job/approval reconciliation、Compose
 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout

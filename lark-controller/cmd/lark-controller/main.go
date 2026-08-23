@@ -28,6 +28,7 @@ const (
 	controllerReadHeaderTimeout = 500 * time.Millisecond
 	controllerReadTimeout       = 2 * time.Second
 	controllerWriteTimeout      = 2300 * time.Millisecond
+	employmentCheckInterval     = 100 * time.Millisecond
 )
 
 func main() {
@@ -146,6 +147,22 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	employmentChecker, err := prepareEmploymentChecker(loaded)
+	if err != nil {
+		return err
+	}
+	employmentReconciler, err := activateEmploymentReconciliation(
+		loaded.Mode,
+		store,
+		grantClient,
+		employmentChecker,
+		grantKeyring,
+		loaded.TenantKey,
+		loaded.ReconciliationHealthOpenID,
+	)
+	if err != nil {
+		return err
+	}
 
 	rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -155,6 +172,15 @@ func run() error {
 	}
 	if principalDisableRuntime != nil {
 		go runWorker(rootContext, "New API principal disable", principalDisableRuntime, loaded.WorkerPoll)
+	}
+	if employmentReconciler != nil {
+		go runScheduledWorker(
+			rootContext,
+			"Lark employment reconciliation",
+			employmentReconciler,
+			loaded.ReconciliationInterval,
+			15*time.Minute,
+		)
 	}
 
 	serveResult := make(chan error, 1)
@@ -218,6 +244,7 @@ func prepareOAuthBridge(
 type integrationClient interface {
 	worker.GrantClient
 	worker.PrincipalDisableClient
+	worker.ActivePrincipalLister
 }
 
 func prepareGrantClient(loaded config.Config) (integrationClient, error) {
@@ -232,6 +259,43 @@ func prepareGrantClient(loaded config.Config) (integrationClient, error) {
 		return newapi.NewClient(newapi.Config{
 			BaseURL:           loaded.NewAPIBaseURL,
 			IntegrationSecret: secret,
+		})
+	default:
+		return nil, errors.New("controller mode must be shadow or active")
+	}
+}
+
+func prepareEmploymentChecker(loaded config.Config) (worker.EmploymentChecker, error) {
+	switch loaded.Mode {
+	case config.ModeShadow:
+		return nil, nil
+	case config.ModeActive:
+		return larkapi.NewEmploymentChecker(larkapi.Config{
+			AppID: loaded.AppID, AppSecret: loaded.AppSecret,
+		})
+	default:
+		return nil, errors.New("controller mode must be shadow or active")
+	}
+}
+
+func activateEmploymentReconciliation(
+	mode config.Mode,
+	store *inbox.Store,
+	principalLister worker.ActivePrincipalLister,
+	employmentChecker worker.EmploymentChecker,
+	sealer worker.PrincipalDisableSealer,
+	tenantKey string,
+	healthOpenID string,
+) (*worker.EmploymentReconciler, error) {
+	switch mode {
+	case config.ModeShadow:
+		return nil, nil
+	case config.ModeActive:
+		return worker.NewEmploymentReconciler(worker.EmploymentReconcilerConfig{
+			Store: store, PrincipalLister: principalLister,
+			EmploymentChecker: employmentChecker, PrincipalDisableSealer: sealer,
+			TenantKey: tenantKey, HealthOpenID: healthOpenID,
+			MinimumCheckInterval: employmentCheckInterval,
 		})
 	default:
 		return nil, errors.New("controller mode must be shadow or active")
@@ -353,4 +417,45 @@ func runWorker(ctx context.Context, name string, processor runOnceWorker, idlePo
 			timer.Reset(idlePoll)
 		}
 	}
+}
+
+func runScheduledWorker(
+	ctx context.Context,
+	name string,
+	processor runOnceWorker,
+	interval time.Duration,
+	retryInterval time.Duration,
+) {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		_, err := processor.RunOnce(ctx)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				log.Printf("%s processing failed", name)
+			}
+		}
+		timer.Reset(scheduledWorkerDelay(err, interval, retryInterval))
+	}
+}
+
+func scheduledWorkerDelay(err error, interval time.Duration, retryInterval time.Duration) time.Duration {
+	if err == nil {
+		return interval
+	}
+	delay := retryInterval
+	var employmentFailure *worker.EmploymentCheckError
+	if errors.As(err, &employmentFailure) && employmentFailure != nil &&
+		employmentFailure.Retryable && employmentFailure.RetryAfter > delay {
+		delay = employmentFailure.RetryAfter
+	}
+	if delay > interval {
+		return interval
+	}
+	return delay
 }

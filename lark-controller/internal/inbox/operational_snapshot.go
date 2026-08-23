@@ -20,6 +20,7 @@ type OperationalSnapshot struct {
 	PrincipalDisableResults     map[string]int64
 	PrincipalDisableRetries     map[string]int64
 	PrincipalDisableDeadLetters map[string]int64
+	EmploymentReconciliations   map[string]int64
 	ApprovalFetches             map[string]int64
 	NewAPIGrants                map[string]int64
 	DeadLetters                 map[string]int64
@@ -52,6 +53,7 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, e
 		PrincipalDisableResults:     make(map[string]int64),
 		PrincipalDisableRetries:     make(map[string]int64),
 		PrincipalDisableDeadLetters: make(map[string]int64),
+		EmploymentReconciliations:   make(map[string]int64),
 		ApprovalFetches:             make(map[string]int64),
 		NewAPIGrants:                make(map[string]int64),
 		DeadLetters:                 make(map[string]int64),
@@ -220,6 +222,24 @@ WHERE status = 'succeeded' GROUP BY response_status`)
 	)
 	if err != nil {
 		return OperationalSnapshot{}, fmt.Errorf("query principal disable dead-letter metrics: %w", err)
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT result, COUNT(*) FROM employment_reconciliation_audit GROUP BY result`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query employment reconciliation metrics: %w", err)
+	}
+	for rows.Next() {
+		var result string
+		var count int64
+		if err := rows.Scan(&result, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan employment reconciliation metrics: %w", err)
+		}
+		snapshot.EmploymentReconciliations[result] = count
+	}
+	if err := closeRows(rows, "employment reconciliation metrics"); err != nil {
+		return OperationalSnapshot{}, err
 	}
 
 	rows, err = tx.QueryContext(ctx, `

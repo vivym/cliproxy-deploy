@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,6 +25,7 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthcontract"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/worker"
 )
 
 func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
@@ -49,6 +51,12 @@ func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
 	disableRuntime, err := activatePrincipalDisableRuntime(ctx, "shadow", store, grantClient, keyring)
 	if err != nil || disableRuntime != nil {
 		t.Fatalf("shadow principal disable runtime = %v, err=%v", disableRuntime, err)
+	}
+	reconciler, err := activateEmploymentReconciliation(
+		"shadow", store, grantClient, nil, keyring, "tenant-test", "ou_health",
+	)
+	if err != nil || reconciler != nil {
+		t.Fatalf("shadow employment reconciler = %v, err=%v", reconciler, err)
 	}
 
 	secretPath := filepath.Join(t.TempDir(), "lark-integration.secret")
@@ -76,6 +84,71 @@ func TestActiveGrantRuntimeRequiresCredentialPreflight(t *testing.T) {
 	disableRuntime, err = activatePrincipalDisableRuntime(ctx, "active", store, grantClient, keyring)
 	if err != nil || disableRuntime == nil {
 		t.Fatalf("activate principal disable runtime: runtime=%v err=%v", disableRuntime, err)
+	}
+	reconciler, err = activateEmploymentReconciliation(
+		"active",
+		store,
+		grantClient,
+		mainEmploymentChecker{},
+		keyring,
+		"tenant-test",
+		"ou_health",
+	)
+	if err != nil || reconciler == nil {
+		t.Fatalf("activate employment reconciler: reconciler=%v err=%v", reconciler, err)
+	}
+}
+
+type mainEmploymentChecker struct{}
+
+func (mainEmploymentChecker) CheckEmployment(
+	context.Context,
+	string,
+) (worker.EmploymentCheckResult, error) {
+	return worker.EmploymentCheckResult{Status: worker.EmploymentStatusPresent}, nil
+}
+
+func TestScheduledWorkerDelayHonorsBoundedEmploymentRetryAfter(t *testing.T) {
+	interval := 24 * time.Hour
+	retryInterval := 15 * time.Minute
+	tests := []struct {
+		name string
+		err  error
+		want time.Duration
+	}{
+		{name: "success", want: interval},
+		{name: "generic failure", err: errors.New("failure"), want: retryInterval},
+		{
+			name: "short retry after",
+			err: &worker.EmploymentCheckError{
+				Reason: worker.EmploymentCheckRateLimited, Retryable: true,
+				RetryAfter: time.Minute,
+			},
+			want: retryInterval,
+		},
+		{
+			name: "long retry after",
+			err: &worker.EmploymentCheckError{
+				Reason: worker.EmploymentCheckRateLimited, Retryable: true,
+				RetryAfter: time.Hour,
+			},
+			want: time.Hour,
+		},
+		{
+			name: "bounded retry after",
+			err: &worker.EmploymentCheckError{
+				Reason: worker.EmploymentCheckRateLimited, Retryable: true,
+				RetryAfter: 48 * time.Hour,
+			},
+			want: interval,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := scheduledWorkerDelay(test.err, interval, retryInterval); got != test.want {
+				t.Fatalf("scheduled worker delay = %s, want %s", got, test.want)
+			}
+		})
 	}
 }
 

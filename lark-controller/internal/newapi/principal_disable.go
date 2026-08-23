@@ -3,6 +3,7 @@ package newapi
 import (
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 const contactUserDeletedEventType = "contact.user.deleted_v3"
@@ -33,6 +34,49 @@ func PlanContactEventPrincipalDisable(
 		!validIdentifier(eventID, 200) {
 		return PrincipalDisableRequest{}, PrincipalDisableReceipt{},
 			errors.New("invalid contact event principal disable input")
+	}
+	return request, PrincipalDisableReceipt{
+		ExternalID: request.ExternalID, RequestSHA256: requestSHA256,
+		SubjectSHA256: sha256Hex([]byte(subject)),
+	}, nil
+}
+
+func PlanEmploymentReconciliationPrincipalDisable(
+	tenantKey string,
+	openID string,
+	evidenceDate string,
+	employmentStatus string,
+) (PrincipalDisableRequest, PrincipalDisableReceipt, error) {
+	if _, err := time.Parse(time.DateOnly, evidenceDate); err != nil {
+		return PrincipalDisableRequest{}, PrincipalDisableReceipt{},
+			errors.New("invalid employment reconciliation evidence date")
+	}
+	reason := ""
+	switch employmentStatus {
+	case "resigned":
+		reason = "lark_employment_resigned"
+	case "exited":
+		reason = "lark_employment_exited"
+	case "not_found":
+		reason = "lark_employment_not_found_confirmed"
+	default:
+		return PrincipalDisableRequest{}, PrincipalDisableReceipt{},
+			errors.New("invalid employment reconciliation status")
+	}
+	subject := tenantKey + ":" + openID
+	request := PrincipalDisableRequest{
+		ExternalID: "lark:disable-reconcile:" + subject + ":" + evidenceDate,
+		Source:     "employment_reconciliation",
+		Identity: Identity{
+			ProviderSlug: "lark",
+			Subject:      subject,
+		},
+		Reason: reason,
+	}
+	_, requestSHA256, err := canonicalizePrincipalDisableRequest(request)
+	if err != nil || !validIdentifier(tenantKey, 128) || !validIdentifier(openID, 128) {
+		return PrincipalDisableRequest{}, PrincipalDisableReceipt{},
+			errors.New("invalid employment reconciliation principal disable input")
 	}
 	return request, PrincipalDisableReceipt{
 		ExternalID: request.ExternalID, RequestSHA256: requestSHA256,

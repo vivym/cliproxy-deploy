@@ -102,7 +102,10 @@ func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 		PrincipalDisableResults:     map[string]int64{"applied": 1, "replayed": 2},
 		PrincipalDisableRetries:     map[string]int64{"temporarily_unavailable": 3},
 		PrincipalDisableDeadLetters: map[string]int64{"integration_unauthorized": 1},
-		ApprovalFetches:             map[string]int64{"success": 4, "retryable_error": 2},
+		EmploymentReconciliations: map[string]int64{
+			"success": 2, "health_probe_failed": 1, "unexpected": 3,
+		},
+		ApprovalFetches: map[string]int64{"success": 4, "retryable_error": 2},
 		NewAPIGrants: map[string]int64{
 			"shadow_planned": 3, "shadow_replayed": 1, "applied": 5, "unexpected": 2,
 		},
@@ -143,6 +146,9 @@ func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 		`principal_disable_total{result="replayed"} 2`,
 		`principal_disable_retry_total{reason="temporarily_unavailable"} 3`,
 		`principal_disable_dead_letter_total{reason="integration_unauthorized"} 1`,
+		`employment_reconciliation_total{result="health_probe_failed"} 1`,
+		`employment_reconciliation_total{result="other"} 3`,
+		`employment_reconciliation_total{result="success"} 2`,
 		`lark_approval_fetch_total{result="retryable_error"} 2`,
 		`lark_new_api_grant_total{result="applied"} 5`,
 		`lark_new_api_grant_total{result="shadow_planned"} 3`,

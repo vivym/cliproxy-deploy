@@ -2,10 +2,58 @@ package newapi_test
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 )
+
+func TestPlanEmploymentReconciliationPrincipalDisableProducesStableCommand(t *testing.T) {
+	tests := []struct {
+		status string
+		reason string
+	}{
+		{status: "resigned", reason: "lark_employment_resigned"},
+		{status: "exited", reason: "lark_employment_exited"},
+		{status: "not_found", reason: "lark_employment_not_found_confirmed"},
+	}
+	for _, test := range tests {
+		t.Run(test.status, func(t *testing.T) {
+			request, receipt, err := newapi.PlanEmploymentReconciliationPrincipalDisable(
+				"tenant-1", "ou-employee", "2026-08-23", test.status,
+			)
+			if err != nil {
+				t.Fatalf("plan employment reconciliation principal disable: %v", err)
+			}
+			if request.ExternalID != "lark:disable-reconcile:tenant-1:ou-employee:2026-08-23" ||
+				request.Source != "employment_reconciliation" || request.Identity.ProviderSlug != "lark" ||
+				request.Identity.Subject != "tenant-1:ou-employee" || request.Reason != test.reason {
+				t.Fatalf("unexpected request: %+v", request)
+			}
+			if receipt.ExternalID != request.ExternalID || receipt.RequestSHA256 == "" ||
+				len(receipt.SubjectSHA256) != 64 {
+				t.Fatalf("unexpected receipt: %+v", receipt)
+			}
+		})
+	}
+	for _, invalid := range []struct {
+		name   string
+		date   string
+		status string
+	}{
+		{name: "invalid date", date: "2026-8-23", status: "resigned"},
+		{name: "present status", date: "2026-08-23", status: "present"},
+	} {
+		t.Run(invalid.name, func(t *testing.T) {
+			_, _, err := newapi.PlanEmploymentReconciliationPrincipalDisable(
+				"tenant-1", "ou-employee", invalid.date, invalid.status,
+			)
+			if err == nil || strings.Contains(err.Error(), "ou-employee") {
+				t.Fatalf("invalid planner input error = %v", err)
+			}
+		})
+	}
+}
 
 func TestPlanContactEventPrincipalDisableProducesStableCommand(t *testing.T) {
 	request, receipt, err := newapi.PlanContactEventPrincipalDisable(

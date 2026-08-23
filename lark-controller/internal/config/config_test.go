@@ -64,33 +64,61 @@ func TestLoadRequiresCommonSecretsAndDefaultsToShadowMode(t *testing.T) {
 
 func TestLoadRequiresNewAPIConfigOnlyInActiveMode(t *testing.T) {
 	values := map[string]string{
-		"LARK_CONTROLLER_MODE":              "active",
-		"LARK_CONTROLLER_DB_PATH":           "/data/controller.sqlite",
-		"LARK_APP_ID":                       "cli_test",
-		"LARK_APP_SECRET":                   "app-secret",
-		"LARK_VERIFICATION_TOKEN":           "verification-token",
-		"LARK_EVENT_ENCRYPT_KEY":            "event-encryption-key",
-		"LARK_TENANT_KEY":                   "tenant-test",
-		"LARK_ACTIVE_POLICY_VERSION":        "employee-v1",
-		"LARK_POLICY_BUNDLE_DIR":            "/policies",
-		"LARK_APPROVAL_BINDINGS_FILE":       "/policies/approval-bindings.json",
-		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   "/run/secrets/lark_grant_payload_keyring",
-		"LARK_INTEGRATION_SECRET_FILE":      "/run/secrets/lark_integration_secret",
-		"NEW_API_INTERNAL_BASE_URL":         "http://new-api:3001",
-		"NEW_API_BRIDGE_CLIENT_ID":          "bridge-client-id",
-		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "/run/secrets/new_api_bridge_client_secret",
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark",
+		"LARK_CONTROLLER_MODE":               "active",
+		"LARK_CONTROLLER_DB_PATH":            "/data/controller.sqlite",
+		"LARK_APP_ID":                        "cli_test",
+		"LARK_APP_SECRET":                    "app-secret",
+		"LARK_VERIFICATION_TOKEN":            "verification-token",
+		"LARK_EVENT_ENCRYPT_KEY":             "event-encryption-key",
+		"LARK_TENANT_KEY":                    "tenant-test",
+		"LARK_ACTIVE_POLICY_VERSION":         "employee-v1",
+		"LARK_POLICY_BUNDLE_DIR":             "/policies",
+		"LARK_APPROVAL_BINDINGS_FILE":        "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE":    "/run/secrets/lark_grant_payload_keyring",
+		"LARK_INTEGRATION_SECRET_FILE":       "/run/secrets/lark_integration_secret",
+		"LARK_RECONCILIATION_HEALTH_OPEN_ID": "ou_health_probe",
+		"NEW_API_INTERNAL_BASE_URL":          "http://new-api:3001",
+		"NEW_API_BRIDGE_CLIENT_ID":           "bridge-client-id",
+		"NEW_API_BRIDGE_CLIENT_SECRET_FILE":  "/run/secrets/new_api_bridge_client_secret",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":   "https://ai.x2r.store/oauth/lark",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })
 	if err != nil {
 		t.Fatalf("load active config: %v", err)
 	}
 	if loaded.Mode != "active" || loaded.NewAPIBaseURL != "http://new-api:3001" ||
-		loaded.IntegrationSecretFile != "/run/secrets/lark_integration_secret" {
+		loaded.IntegrationSecretFile != "/run/secrets/lark_integration_secret" ||
+		loaded.ReconciliationHealthOpenID != "ou_health_probe" ||
+		loaded.ReconciliationInterval != 24*time.Hour {
 		t.Fatalf("unexpected active config: %+v", loaded)
 	}
+	values["LARK_RECONCILIATION_INTERVAL"] = "48h"
+	loaded, err = config.Load(func(key string) string { return values[key] })
+	if err != nil || loaded.ReconciliationInterval != 48*time.Hour {
+		t.Fatalf("load custom reconciliation interval: interval=%s err=%v",
+			loaded.ReconciliationInterval, err)
+	}
+	for _, interval := range []string{"23h", "169h", "tomorrow"} {
+		values["LARK_RECONCILIATION_INTERVAL"] = interval
+		if _, err := config.Load(func(key string) string { return values[key] }); err == nil ||
+			!strings.Contains(err.Error(), "LARK_RECONCILIATION_INTERVAL") {
+			t.Fatalf("invalid reconciliation interval %q error = %v", interval, err)
+		}
+	}
+	delete(values, "LARK_RECONCILIATION_INTERVAL")
+	originalHealthOpenID := values["LARK_RECONCILIATION_HEALTH_OPEN_ID"]
+	values["LARK_RECONCILIATION_HEALTH_OPEN_ID"] = "ou_health:other"
+	if _, err := config.Load(func(key string) string { return values[key] }); err == nil ||
+		!strings.Contains(err.Error(), "LARK_RECONCILIATION_HEALTH_OPEN_ID") {
+		t.Fatalf("invalid reconciliation health open_id error = %v", err)
+	}
+	values["LARK_RECONCILIATION_HEALTH_OPEN_ID"] = originalHealthOpenID
 
-	for _, name := range []string{"LARK_INTEGRATION_SECRET_FILE", "NEW_API_INTERNAL_BASE_URL"} {
+	for _, name := range []string{
+		"LARK_INTEGRATION_SECRET_FILE",
+		"LARK_RECONCILIATION_HEALTH_OPEN_ID",
+		"NEW_API_INTERNAL_BASE_URL",
+	} {
 		value := values[name]
 		delete(values, name)
 		if _, err := config.Load(func(key string) string { return values[key] }); err == nil ||
@@ -102,10 +130,12 @@ func TestLoadRequiresNewAPIConfigOnlyInActiveMode(t *testing.T) {
 
 	values["LARK_CONTROLLER_MODE"] = "shadow"
 	delete(values, "LARK_INTEGRATION_SECRET_FILE")
+	delete(values, "LARK_RECONCILIATION_HEALTH_OPEN_ID")
 	delete(values, "NEW_API_INTERNAL_BASE_URL")
 	activeLookups := 0
 	if _, err := config.Load(func(key string) string {
-		if key == "LARK_INTEGRATION_SECRET_FILE" || key == "NEW_API_INTERNAL_BASE_URL" {
+		if key == "LARK_INTEGRATION_SECRET_FILE" ||
+			key == "LARK_RECONCILIATION_HEALTH_OPEN_ID" || key == "NEW_API_INTERNAL_BASE_URL" {
 			activeLookups++
 		}
 		return values[key]

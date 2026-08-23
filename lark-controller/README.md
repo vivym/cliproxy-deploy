@@ -10,6 +10,15 @@ The controller supports a locally verified `shadow` mode and an explicit
 - accepts `contact.user.deleted_v3`, persists only a subject hash in the
   ordinary inbox payload, and atomically creates a sealed principal-disable
   job before acknowledging the event;
+- in active mode, runs a scheduled employment reconciliation over every active
+  Lark principal exposed by New API, with a known-active Lark health probe
+  before and after each complete paginated scan; every Lark lookup is serial and
+  its request start is spaced by at least 100 milliseconds;
+- creates an eventless sealed principal-disable job for authoritative
+  `is_resigned` or `is_exited` results, while `41012` requires two healthy
+  complete scans at least 24 hours apart; present results clear prior missing
+  evidence, and permission, rate-limit, server, health, or pagination failures
+  never advance it;
 - validates the configured Verification Token, application ID, and tenant key;
 - durably deduplicates v1 `uuid` and v2 `event_id` values in single-replica
   SQLite WAL storage;
@@ -105,11 +114,17 @@ Active mode additionally requires:
 LARK_CONTROLLER_MODE=active
 NEW_API_INTERNAL_BASE_URL=http://new-api:3001
 LARK_INTEGRATION_SECRET_FILE=/run/secrets/lark_integration_secret
+LARK_RECONCILIATION_HEALTH_OPEN_ID=ou_known_active_employee
 ```
 
 The integration secret file contains one printable, non-whitespace ASCII token
 of at least 32 bytes, with an optional LF or CRLF ending. It is a dedicated
 narrow-scope integration credential, not a New API administrator token.
+
+`LARK_RECONCILIATION_HEALTH_OPEN_ID` must be a stable, known-active member in
+the configured Lark tenant and application availability scope. If either the
+pre-scan or post-scan probe is not present, the run is audited as failed and no
+employment evidence or disable job is committed.
 
 The bridge client secret file contains one printable, non-whitespace ASCII
 token between 32 and 4096 bytes, with an optional LF or CRLF ending. Configure
@@ -139,6 +154,7 @@ LARK_APPROVAL_LOCALE=zh-CN
 LARK_READINESS_MAX_QUEUE_AGE=15m
 LARK_OAUTH_RATE_LIMIT_PER_MINUTE=30
 LARK_OAUTH_TRUSTED_PROXY_CIDRS=172.31.20.0/24
+LARK_RECONCILIATION_INTERVAL=24h
 ```
 
 The configured OAuth rate limit is applied independently to authorize,
@@ -152,6 +168,12 @@ the direct peer is covered by `LARK_OAUTH_TRUSTED_PROXY_CIDRS`; configure only
 the exact proxy network that reaches the controller. The initial callback
 allowlist is intentionally a single fixed URL and rejects additional or
 prefix-matching entries.
+
+`LARK_RECONCILIATION_INTERVAL` is active-mode only, defaults to `24h`, and must
+be between `24h` and `168h`. A failed run is retried after at least 15 minutes;
+a longer Lark `Retry-After` is honored up to the normal reconciliation interval.
+Completed runs are idempotent by UTC evidence date, and Prometheus exposes
+their append-only outcomes through `employment_reconciliation_total{result}`.
 
 The internal token endpoint accepts only `POST` with an at-most-16-KiB
 `application/x-www-form-urlencoded` body containing exactly one non-empty
@@ -212,12 +234,17 @@ cannot proceed until the documented drain or explicit migration is complete.
 
 Principal-disable jobs use an independent durable ledger and audit table. A
 real-time contact event binds its optional inbox event key, while the job model
-also permits a future reconciliation command without fabricating a webhook
+also permits an employment-reconciliation command without fabricating a webhook
 event. Duplicate delivery preserves the first key ID, nonce, and ciphertext.
 Active execution calls the idempotent New API disable endpoint with
-`lark:disable:<event_id>`, retries transport/temporary failures with the same
+`lark:disable:<event_id>` for contact events or
+`lark:disable-reconcile:<tenant_key>:<open_id>:<evidence_date>` for completed
+employment evidence, retries transport/temporary failures with the same
 request, recovers claimed jobs after restart, and persists only the bounded
-status, outcome, principal version, and auth version receipt.
+status, outcome, principal version, and auth version receipt. Reconciliation
+stores subject hashes, stable result classes, Lark result codes, permission
+health, actual lookup completion times, and evidence hashes; it does not store
+raw employee identities.
 
 The active policy must define a positive `basic` level before the OAuth bridge
 can start. Userinfo handle deletion, the base-subscription ledger row, the
@@ -290,6 +317,6 @@ Active grant and real-time principal-disable execution, the durable opaque
 OAuth credential store, the outbound Lark token/userinfo adapter, and the
 public OAuth authorize/callback handlers, internal token/userinfo handlers,
 and idempotent base-subscription dispatch are implemented locally. Employment
-reconciliation, Compose wiring, operational runbooks, and production
-validation remain follow-up work. Do not enable active mode in production
-before those gates are complete.
+reconciliation is also implemented locally. Compose wiring, operational
+runbooks, and production validation remain follow-up work. Do not enable active
+mode in production before those gates are complete.

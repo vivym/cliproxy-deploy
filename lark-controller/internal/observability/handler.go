@@ -96,6 +96,8 @@ func (h *Handler) metrics(response http.ResponseWriter, request *http.Request) {
 		boundedCounts(snapshot.PrincipalDisableRetries, allowedPrincipalDisableFailureReasons))
 	writeCounterMap(&output, "principal_disable_dead_letter_total", "reason",
 		boundedCounts(snapshot.PrincipalDisableDeadLetters, allowedPrincipalDisableFailureReasons))
+	writeCounterMap(&output, "employment_reconciliation_total", "result",
+		boundedCounts(snapshot.EmploymentReconciliations, allowedEmploymentReconciliationResults))
 	writeCounterMap(&output, "lark_approval_fetch_total", "result",
 		boundedCounts(snapshot.ApprovalFetches, allowedFetchResults))
 	writeCounterMap(&output, "lark_new_api_grant_total", "result",
@@ -246,17 +248,24 @@ var (
 		"approval_instance",
 		"contact.user.deleted_v3",
 	)
-	allowedInboxStates                    = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter", "principal_disabled")
-	allowedJobStates                      = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "dead_letter")
-	allowedEntitlementGrantJobStates      = labels("held_shadow", "pending", "processing", "retry_wait", "succeeded", "dead_letter")
-	allowedEntitlementGrantTypes          = labels("wallet_quota", "subscription_level")
-	allowedEntitlementGrantStatuses       = labels("applied", "replayed", "noop", "ignored_stale")
-	allowedEntitlementGrantFailureReasons = entitlementGrantFailureReasonLabels()
-	allowedPrincipalDisableJobStates      = labels("held_shadow", "pending", "processing", "retry_wait", "succeeded", "dead_letter")
-	allowedPrincipalDisableResults        = labels("applied", "replayed", "noop")
-	allowedPrincipalDisableFailureReasons = principalDisableFailureReasonLabels()
-	allowedFetchResults                   = labels("success", "retryable_error", "terminal_error")
-	allowedNewAPIGrantResults             = labels(
+	allowedInboxStates                     = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter", "principal_disabled")
+	allowedJobStates                       = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "dead_letter")
+	allowedEntitlementGrantJobStates       = labels("held_shadow", "pending", "processing", "retry_wait", "succeeded", "dead_letter")
+	allowedEntitlementGrantTypes           = labels("wallet_quota", "subscription_level")
+	allowedEntitlementGrantStatuses        = labels("applied", "replayed", "noop", "ignored_stale")
+	allowedEntitlementGrantFailureReasons  = entitlementGrantFailureReasonLabels()
+	allowedPrincipalDisableJobStates       = labels("held_shadow", "pending", "processing", "retry_wait", "succeeded", "dead_letter")
+	allowedPrincipalDisableResults         = labels("applied", "replayed", "noop")
+	allowedPrincipalDisableFailureReasons  = principalDisableFailureReasonLabels()
+	allowedEmploymentReconciliationResults = labels(
+		"success",
+		"health_probe_failed",
+		"principal_list_failed",
+		"employment_check_failed",
+		"incomplete_scan",
+	)
+	allowedFetchResults       = labels("success", "retryable_error", "terminal_error")
+	allowedNewAPIGrantResults = labels(
 		"shadow_planned",
 		"shadow_replayed",
 		"applied",

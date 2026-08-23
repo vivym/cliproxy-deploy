@@ -307,6 +307,45 @@ CREATE TABLE IF NOT EXISTS entitlement_grant_jobs (
 	);
 	CREATE INDEX IF NOT EXISTS idx_principal_disable_audit_action
 	    ON principal_disable_audit(action, outcome);
+	CREATE TABLE IF NOT EXISTS employment_reconciliation_runs (
+	    reconciliation_id TEXT PRIMARY KEY,
+	    evidence_date TEXT NOT NULL UNIQUE,
+	    status TEXT NOT NULL,
+	    permission_healthy INTEGER NOT NULL,
+	    scan_complete INTEGER NOT NULL,
+	    checked_count INTEGER NOT NULL,
+	    failure_reason TEXT NOT NULL DEFAULT '',
+	    started_at TEXT NOT NULL,
+	    completed_at TEXT NOT NULL,
+	    updated_at TEXT NOT NULL
+	);
+	CREATE TABLE IF NOT EXISTS employment_checks (
+	    reconciliation_id TEXT NOT NULL REFERENCES employment_reconciliation_runs(reconciliation_id) ON DELETE RESTRICT,
+	    subject_sha256 TEXT NOT NULL,
+	    checked_at TEXT NOT NULL,
+	    result TEXT NOT NULL,
+	    lark_result_code INTEGER NOT NULL,
+	    permission_healthy INTEGER NOT NULL,
+	    evidence_sha256 TEXT NOT NULL,
+	    PRIMARY KEY (reconciliation_id, subject_sha256)
+	);
+	CREATE INDEX IF NOT EXISTS idx_employment_checks_subject
+	    ON employment_checks(subject_sha256, checked_at);
+	CREATE TABLE IF NOT EXISTS employment_reconciliation_audit (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    reconciliation_id TEXT NOT NULL REFERENCES employment_reconciliation_runs(reconciliation_id) ON DELETE RESTRICT,
+	    result TEXT NOT NULL,
+	    created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_employment_reconciliation_audit_result
+	    ON employment_reconciliation_audit(result);
+	CREATE TABLE IF NOT EXISTS employment_missing_evidence (
+	    subject_sha256 TEXT PRIMARY KEY,
+	    consecutive_count INTEGER NOT NULL,
+	    first_not_found_at TEXT NOT NULL,
+	    last_not_found_at TEXT NOT NULL,
+	    updated_at TEXT NOT NULL
+	);
 	CREATE TABLE IF NOT EXISTS oauth_states (
 	    state_hash BLOB PRIMARY KEY CHECK(length(state_hash) = 32),
 	    new_api_state TEXT NOT NULL,

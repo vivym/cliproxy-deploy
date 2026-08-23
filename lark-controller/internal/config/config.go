@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthcontract"
 )
@@ -18,6 +19,8 @@ const (
 	ModeActive                     Mode = "active"
 	defaultOAuthRateLimitPerMinute      = 30
 	maxOAuthRateLimitPerMinute          = 10_000
+	defaultReconciliationInterval       = 24 * time.Hour
+	maxReconciliationInterval           = 7 * 24 * time.Hour
 )
 
 type Config struct {
@@ -36,6 +39,8 @@ type Config struct {
 	GrantPayloadKeyringFile      string
 	NewAPIBaseURL                string
 	IntegrationSecretFile        string
+	ReconciliationHealthOpenID   string
+	ReconciliationInterval       time.Duration
 	BridgeClientID               string
 	BridgeClientSecretFile       string
 	NewAPIOAuthCallbackAllowlist []string
@@ -68,6 +73,7 @@ func Load(getenv func(string) string) (Config, error) {
 		WorkerPoll:              time.Second,
 		ReadinessMaxQueueAge:    15 * time.Minute,
 		OAuthRateLimitPerMinute: defaultOAuthRateLimitPerMinute,
+		ReconciliationInterval:  defaultReconciliationInterval,
 	}
 	callbackAllowlist, err := parseOAuthCallbackAllowlist(getenv("NEW_API_OAUTH_CALLBACK_ALLOWLIST"))
 	if err != nil {
@@ -130,10 +136,23 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if loaded.Mode == ModeActive {
 		loaded.IntegrationSecretFile = getenv("LARK_INTEGRATION_SECRET_FILE")
+		loaded.ReconciliationHealthOpenID = getenv("LARK_RECONCILIATION_HEALTH_OPEN_ID")
 		loaded.NewAPIBaseURL = getenv("NEW_API_INTERNAL_BASE_URL")
+		if raw := getenv("LARK_RECONCILIATION_INTERVAL"); raw != "" {
+			interval, err := time.ParseDuration(raw)
+			if err != nil || interval < defaultReconciliationInterval ||
+				interval > maxReconciliationInterval {
+				return Config{}, errors.New("LARK_RECONCILIATION_INTERVAL must be between 24h and 168h")
+			}
+			loaded.ReconciliationInterval = interval
+		}
+		if !validOpenID(loaded.ReconciliationHealthOpenID) {
+			return Config{}, errors.New("LARK_RECONCILIATION_HEALTH_OPEN_ID must be one valid open_id")
+		}
 		activeRequired := map[string]string{
-			"LARK_INTEGRATION_SECRET_FILE": loaded.IntegrationSecretFile,
-			"NEW_API_INTERNAL_BASE_URL":    loaded.NewAPIBaseURL,
+			"LARK_INTEGRATION_SECRET_FILE":       loaded.IntegrationSecretFile,
+			"LARK_RECONCILIATION_HEALTH_OPEN_ID": loaded.ReconciliationHealthOpenID,
+			"NEW_API_INTERNAL_BASE_URL":          loaded.NewAPIBaseURL,
 		}
 		for name, value := range activeRequired {
 			if value == "" {
@@ -142,6 +161,19 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	return loaded, nil
+}
+
+func validOpenID(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > 128 ||
+		strings.Contains(value, ":") {
+		return false
+	}
+	for _, character := range value {
+		if unicode.IsControl(character) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseOAuthCallbackAllowlist(raw string) ([]string, error) {
