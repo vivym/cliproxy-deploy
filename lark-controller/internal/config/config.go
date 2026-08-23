@@ -15,12 +15,17 @@ import (
 type Mode string
 
 const (
-	ModeShadow                     Mode = "shadow"
-	ModeActive                     Mode = "active"
-	defaultOAuthRateLimitPerMinute      = 30
-	maxOAuthRateLimitPerMinute          = 10_000
-	defaultReconciliationInterval       = 24 * time.Hour
-	maxReconciliationInterval           = 7 * 24 * time.Hour
+	ModeShadow                        Mode = "shadow"
+	ModeActive                        Mode = "active"
+	defaultOAuthRateLimitPerMinute         = 30
+	maxOAuthRateLimitPerMinute             = 10_000
+	defaultReconciliationInterval          = 24 * time.Hour
+	maxReconciliationInterval              = 7 * 24 * time.Hour
+	defaultProcessingLeaseTimeout          = 5 * time.Minute
+	defaultProcessingRecoveryInterval      = time.Minute
+	minProcessingLeaseTimeout              = time.Minute
+	maxProcessingLeaseTimeout              = time.Hour
+	minProcessingRecoveryInterval          = 10 * time.Second
 )
 
 type Config struct {
@@ -48,6 +53,8 @@ type Config struct {
 	OAuthTrustedProxyCIDRs       []netip.Prefix
 	WorkerPoll                   time.Duration
 	ReadinessMaxQueueAge         time.Duration
+	ProcessingLeaseTimeout       time.Duration
+	ProcessingRecoveryInterval   time.Duration
 }
 
 func Load(getenv func(string) string) (Config, error) {
@@ -55,25 +62,27 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("environment lookup is required")
 	}
 	loaded := Config{
-		Mode:                    Mode(getenv("LARK_CONTROLLER_MODE")),
-		ListenAddress:           getenv("LARK_CONTROLLER_LISTEN_ADDR"),
-		DatabasePath:            getenv("LARK_CONTROLLER_DB_PATH"),
-		AppID:                   getenv("LARK_APP_ID"),
-		AppSecret:               getenv("LARK_APP_SECRET"),
-		VerificationToken:       getenv("LARK_VERIFICATION_TOKEN"),
-		EventEncryptKey:         getenv("LARK_EVENT_ENCRYPT_KEY"),
-		TenantKey:               getenv("LARK_TENANT_KEY"),
-		Locale:                  getenv("LARK_APPROVAL_LOCALE"),
-		ActivePolicyVersion:     getenv("LARK_ACTIVE_POLICY_VERSION"),
-		PolicyBundleDirectory:   getenv("LARK_POLICY_BUNDLE_DIR"),
-		ApprovalBindingsFile:    getenv("LARK_APPROVAL_BINDINGS_FILE"),
-		GrantPayloadKeyringFile: getenv("LARK_GRANT_PAYLOAD_KEYRING_FILE"),
-		BridgeClientID:          getenv("NEW_API_BRIDGE_CLIENT_ID"),
-		BridgeClientSecretFile:  getenv("NEW_API_BRIDGE_CLIENT_SECRET_FILE"),
-		WorkerPoll:              time.Second,
-		ReadinessMaxQueueAge:    15 * time.Minute,
-		OAuthRateLimitPerMinute: defaultOAuthRateLimitPerMinute,
-		ReconciliationInterval:  defaultReconciliationInterval,
+		Mode:                       Mode(getenv("LARK_CONTROLLER_MODE")),
+		ListenAddress:              getenv("LARK_CONTROLLER_LISTEN_ADDR"),
+		DatabasePath:               getenv("LARK_CONTROLLER_DB_PATH"),
+		AppID:                      getenv("LARK_APP_ID"),
+		AppSecret:                  getenv("LARK_APP_SECRET"),
+		VerificationToken:          getenv("LARK_VERIFICATION_TOKEN"),
+		EventEncryptKey:            getenv("LARK_EVENT_ENCRYPT_KEY"),
+		TenantKey:                  getenv("LARK_TENANT_KEY"),
+		Locale:                     getenv("LARK_APPROVAL_LOCALE"),
+		ActivePolicyVersion:        getenv("LARK_ACTIVE_POLICY_VERSION"),
+		PolicyBundleDirectory:      getenv("LARK_POLICY_BUNDLE_DIR"),
+		ApprovalBindingsFile:       getenv("LARK_APPROVAL_BINDINGS_FILE"),
+		GrantPayloadKeyringFile:    getenv("LARK_GRANT_PAYLOAD_KEYRING_FILE"),
+		BridgeClientID:             getenv("NEW_API_BRIDGE_CLIENT_ID"),
+		BridgeClientSecretFile:     getenv("NEW_API_BRIDGE_CLIENT_SECRET_FILE"),
+		WorkerPoll:                 time.Second,
+		ReadinessMaxQueueAge:       15 * time.Minute,
+		OAuthRateLimitPerMinute:    defaultOAuthRateLimitPerMinute,
+		ReconciliationInterval:     defaultReconciliationInterval,
+		ProcessingLeaseTimeout:     defaultProcessingLeaseTimeout,
+		ProcessingRecoveryInterval: defaultProcessingRecoveryInterval,
 	}
 	callbackAllowlist, err := parseOAuthCallbackAllowlist(getenv("NEW_API_OAUTH_CALLBACK_ALLOWLIST"))
 	if err != nil {
@@ -113,6 +122,26 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, errors.New("LARK_READINESS_MAX_QUEUE_AGE must be a positive duration")
 		}
 		loaded.ReadinessMaxQueueAge = threshold
+	}
+	if raw := getenv("LARK_PROCESSING_LEASE_TIMEOUT"); raw != "" {
+		timeout, err := time.ParseDuration(raw)
+		if err != nil || timeout < minProcessingLeaseTimeout || timeout > maxProcessingLeaseTimeout {
+			return Config{}, errors.New("LARK_PROCESSING_LEASE_TIMEOUT must be between 1m and 1h")
+		}
+		loaded.ProcessingLeaseTimeout = timeout
+	}
+	if raw := getenv("LARK_PROCESSING_RECOVERY_INTERVAL"); raw != "" {
+		interval, err := time.ParseDuration(raw)
+		if err != nil || interval < minProcessingRecoveryInterval {
+			return Config{}, errors.New("LARK_PROCESSING_RECOVERY_INTERVAL must be at least 10s")
+		}
+		loaded.ProcessingRecoveryInterval = interval
+	}
+	if loaded.ProcessingRecoveryInterval > loaded.ProcessingLeaseTimeout {
+		return Config{}, errors.New("LARK_PROCESSING_RECOVERY_INTERVAL must not exceed LARK_PROCESSING_LEASE_TIMEOUT")
+	}
+	if loaded.ProcessingLeaseTimeout+loaded.ProcessingRecoveryInterval >= loaded.ReadinessMaxQueueAge {
+		return Config{}, errors.New("LARK_READINESS_MAX_QUEUE_AGE must exceed the processing lease plus recovery interval")
 	}
 	required := map[string]string{
 		"LARK_CONTROLLER_DB_PATH":           loaded.DatabasePath,

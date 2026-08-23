@@ -163,6 +163,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	processingReconciler, err := worker.NewProcessingReconciler(
+		store,
+		loaded.ProcessingLeaseTimeout,
+	)
+	if err != nil {
+		return err
+	}
 
 	rootContext, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -182,6 +189,13 @@ func run() error {
 			15*time.Minute,
 		)
 	}
+	go runScheduledWorker(
+		rootContext,
+		"controller processing recovery",
+		processingReconciler,
+		loaded.ProcessingRecoveryInterval,
+		loaded.ProcessingRecoveryInterval,
+	)
 
 	serveResult := make(chan error, 1)
 	go func() {

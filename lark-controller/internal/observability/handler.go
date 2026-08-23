@@ -98,6 +98,8 @@ func (h *Handler) metrics(response http.ResponseWriter, request *http.Request) {
 		boundedCounts(snapshot.PrincipalDisableDeadLetters, allowedPrincipalDisableFailureReasons))
 	writeCounterMap(&output, "employment_reconciliation_total", "result",
 		boundedCounts(snapshot.EmploymentReconciliations, allowedEmploymentReconciliationResults))
+	writeCounterMap(&output, "lark_controller_processing_recovered_total", "queue",
+		boundedCounts(snapshot.ProcessingRecoveries, allowedProcessingRecoveryQueues))
 	writeCounterMap(&output, "lark_approval_fetch_total", "result",
 		boundedCounts(snapshot.ApprovalFetches, allowedFetchResults))
 	writeCounterMap(&output, "lark_new_api_grant_total", "result",
@@ -263,6 +265,11 @@ var (
 		"principal_list_failed",
 		"employment_check_failed",
 		"incomplete_scan",
+	)
+	allowedProcessingRecoveryQueues = labels(
+		inbox.ProcessingRecoveryQueueApproval,
+		inbox.ProcessingRecoveryQueueEntitlementGrant,
+		inbox.ProcessingRecoveryQueuePrincipalDisable,
 	)
 	allowedFetchResults       = labels("success", "retryable_error", "terminal_error")
 	allowedNewAPIGrantResults = labels(

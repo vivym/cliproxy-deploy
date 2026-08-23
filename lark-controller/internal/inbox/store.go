@@ -339,6 +339,14 @@ CREATE TABLE IF NOT EXISTS entitlement_grant_jobs (
 	);
 	CREATE INDEX IF NOT EXISTS idx_employment_reconciliation_audit_result
 	    ON employment_reconciliation_audit(result);
+	CREATE TABLE IF NOT EXISTS processing_recovery_audit (
+	    id INTEGER PRIMARY KEY AUTOINCREMENT,
+	    queue TEXT NOT NULL,
+	    recovered_count INTEGER NOT NULL CHECK(recovered_count > 0),
+	    created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_processing_recovery_audit_queue
+	    ON processing_recovery_audit(queue);
 	CREATE TABLE IF NOT EXISTS employment_missing_evidence (
 	    subject_sha256 TEXT PRIMARY KEY,
 	    consecutive_count INTEGER NOT NULL,
@@ -916,11 +924,25 @@ INSERT INTO approval_instances (
 			return fmt.Errorf("store New API grant shadow audit: %w", err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx,
-		"UPDATE jobs SET status = ?, last_error = ?, updated_at = ? WHERE id = ? AND status = ?",
-		terminalJobStatus, decision.FailureReason, createdAt, job.ID, jobStatusProcessing,
-	); err != nil {
+	result, err := tx.ExecContext(ctx, `
+UPDATE jobs SET status = ?, last_error = ?, updated_at = ?
+WHERE id = ? AND status = ? AND attempts = ?`,
+		terminalJobStatus,
+		decision.FailureReason,
+		createdAt,
+		job.ID,
+		jobStatusProcessing,
+		job.Attempts,
+	)
+	if err != nil {
 		return fmt.Errorf("complete job: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect completed job: %w", err)
+	}
+	if affected != 1 {
+		return fmt.Errorf("complete job affected %d rows", affected)
 	}
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE lark_event_inbox SET processing_state = ? WHERE event_key = ?",
@@ -965,16 +987,19 @@ func (s *Store) Retry(ctx context.Context, job Job, reason string, delay time.Du
 	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx, `
 UPDATE jobs SET status = ?, next_attempt_at = ?, last_error = ?, updated_at = ?
-WHERE id = ? AND status = ?`,
+WHERE id = ? AND status = ? AND attempts = ?`,
 		jobStatusRetryWait, now.Add(delay).Format(time.RFC3339Nano), reason,
-		now.Format(time.RFC3339Nano), job.ID, jobStatusProcessing,
+		now.Format(time.RFC3339Nano), job.ID, jobStatusProcessing, job.Attempts,
 	)
 	if err != nil {
 		return fmt.Errorf("schedule job retry: %w", err)
 	}
 	affected, err := result.RowsAffected()
-	if err != nil || affected != 1 {
-		return fmt.Errorf("schedule job retry affected %d rows: %w", affected, err)
+	if err != nil {
+		return fmt.Errorf("inspect scheduled job retry: %w", err)
+	}
+	if affected != 1 {
+		return fmt.Errorf("schedule job retry affected %d rows", affected)
 	}
 	if _, err := tx.ExecContext(ctx,
 		"UPDATE lark_event_inbox SET processing_state = ? WHERE event_key = ?",

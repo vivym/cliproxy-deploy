@@ -21,6 +21,7 @@ type OperationalSnapshot struct {
 	PrincipalDisableRetries     map[string]int64
 	PrincipalDisableDeadLetters map[string]int64
 	EmploymentReconciliations   map[string]int64
+	ProcessingRecoveries        map[string]int64
 	ApprovalFetches             map[string]int64
 	NewAPIGrants                map[string]int64
 	DeadLetters                 map[string]int64
@@ -54,6 +55,7 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, e
 		PrincipalDisableRetries:     make(map[string]int64),
 		PrincipalDisableDeadLetters: make(map[string]int64),
 		EmploymentReconciliations:   make(map[string]int64),
+		ProcessingRecoveries:        make(map[string]int64),
 		ApprovalFetches:             make(map[string]int64),
 		NewAPIGrants:                make(map[string]int64),
 		DeadLetters:                 make(map[string]int64),
@@ -239,6 +241,24 @@ SELECT result, COUNT(*) FROM employment_reconciliation_audit GROUP BY result`)
 		snapshot.EmploymentReconciliations[result] = count
 	}
 	if err := closeRows(rows, "employment reconciliation metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT queue, SUM(recovered_count) FROM processing_recovery_audit GROUP BY queue`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query processing recovery metrics: %w", err)
+	}
+	for rows.Next() {
+		var queue string
+		var count int64
+		if err := rows.Scan(&queue, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan processing recovery metrics: %w", err)
+		}
+		snapshot.ProcessingRecoveries[queue] = count
+	}
+	if err := closeRows(rows, "processing recovery metrics"); err != nil {
 		return OperationalSnapshot{}, err
 	}
 

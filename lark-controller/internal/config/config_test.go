@@ -35,6 +35,10 @@ func TestLoadRequiresCommonSecretsAndDefaultsToShadowMode(t *testing.T) {
 	if loaded.ReadinessMaxQueueAge != 15*time.Minute {
 		t.Fatalf("readiness max queue age = %s, want 15m", loaded.ReadinessMaxQueueAge)
 	}
+	if loaded.ProcessingLeaseTimeout != 5*time.Minute ||
+		loaded.ProcessingRecoveryInterval != time.Minute {
+		t.Fatalf("unexpected processing recovery defaults: %+v", loaded)
+	}
 	if loaded.OAuthRateLimitPerMinute != 30 || len(loaded.OAuthTrustedProxyCIDRs) != 0 ||
 		loaded.BridgeClientID != "bridge-client-id" ||
 		loaded.BridgeClientSecretFile != "/run/secrets/new_api_bridge_client_secret" ||
@@ -175,6 +179,57 @@ func TestLoadValidatesReadinessQueueAge(t *testing.T) {
 	if _, err := config.Load(func(key string) string { return values[key] }); err == nil ||
 		!strings.Contains(err.Error(), "LARK_READINESS_MAX_QUEUE_AGE") {
 		t.Fatalf("invalid readiness threshold error = %v", err)
+	}
+}
+
+func TestLoadValidatesProcessingRecoveryDurations(t *testing.T) {
+	values := map[string]string{
+		"LARK_CONTROLLER_DB_PATH":           "/data/controller.sqlite",
+		"LARK_APP_ID":                       "cli_test",
+		"LARK_APP_SECRET":                   "app-secret",
+		"LARK_VERIFICATION_TOKEN":           "verification-token",
+		"LARK_EVENT_ENCRYPT_KEY":            "event-encryption-key",
+		"LARK_TENANT_KEY":                   "tenant-test",
+		"LARK_ACTIVE_POLICY_VERSION":        "employee-v1",
+		"LARK_POLICY_BUNDLE_DIR":            "/policies",
+		"LARK_APPROVAL_BINDINGS_FILE":       "/policies/approval-bindings.json",
+		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   "/run/secrets/lark_grant_payload_keyring",
+		"LARK_READINESS_MAX_QUEUE_AGE":      "30m",
+		"LARK_PROCESSING_LEASE_TIMEOUT":     "10m",
+		"LARK_PROCESSING_RECOVERY_INTERVAL": "2m",
+		"NEW_API_BRIDGE_CLIENT_ID":          "bridge-client-id",
+		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "/run/secrets/new_api_bridge_client_secret",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark",
+	}
+	loaded, err := config.Load(func(key string) string { return values[key] })
+	if err != nil {
+		t.Fatalf("load processing recovery config: %v", err)
+	}
+	if loaded.ProcessingLeaseTimeout != 10*time.Minute ||
+		loaded.ProcessingRecoveryInterval != 2*time.Minute {
+		t.Fatalf("unexpected processing recovery config: %+v", loaded)
+	}
+
+	tests := []struct {
+		name  string
+		value string
+	}{
+		{"LARK_PROCESSING_LEASE_TIMEOUT", "30s"},
+		{"LARK_PROCESSING_LEASE_TIMEOUT", "61m"},
+		{"LARK_PROCESSING_RECOVERY_INTERVAL", "5s"},
+		{"LARK_PROCESSING_RECOVERY_INTERVAL", "11m"},
+		{"LARK_READINESS_MAX_QUEUE_AGE", "12m"},
+	}
+	for _, test := range tests {
+		t.Run(test.name+"="+test.value, func(t *testing.T) {
+			original := values[test.name]
+			values[test.name] = test.value
+			_, err := config.Load(func(key string) string { return values[key] })
+			values[test.name] = original
+			if err == nil || !strings.Contains(err.Error(), test.name) {
+				t.Fatalf("invalid %s=%q error = %v", test.name, test.value, err)
+			}
+		})
 	}
 }
 

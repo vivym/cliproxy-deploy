@@ -74,7 +74,10 @@ The controller supports a locally verified `shadow` mode and an explicit
   an explicitly configured trusted proxy CIDR;
 - classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
   six-step jittered retry schedule before durable dead-lettering;
-- recovers interrupted jobs with their attempt counters after restart;
+- recovers interrupted jobs with their attempt counters after restart, and
+  periodically requeues claims that remain `processing` beyond a bounded lease;
+  the attempt counter fences late approval completions and all New API writes
+  already use stable external IDs for response-loss replay;
 - activates held jobs only after the active startup gate has validated the
   keyring, New API credential/client, SQLite state, webhook server, and listen
   socket, then decrypts canonical grant and principal-disable requests,
@@ -82,7 +85,8 @@ The controller supports a locally verified `shadow` mode and an explicit
   matrices;
 - exposes liveness, readiness, and bounded-label Prometheus metrics for inbox,
   jobs, approval fetches, New API shadow grants, held grant jobs, policy
-  failures, principal disable jobs, dead letters, and queue age;
+  failures, principal disable jobs, processing recovery, dead letters, and
+  queue age;
 - keeps queryable columns limited to normalized event data, hashes, decisions,
   stable failure reasons, and sanitized New API receipts; the complete grant
   request exists only as authenticated ciphertext; and
@@ -152,6 +156,8 @@ Optional variables:
 LARK_CONTROLLER_LISTEN_ADDR=0.0.0.0:8080
 LARK_APPROVAL_LOCALE=zh-CN
 LARK_READINESS_MAX_QUEUE_AGE=15m
+LARK_PROCESSING_LEASE_TIMEOUT=5m
+LARK_PROCESSING_RECOVERY_INTERVAL=1m
 LARK_OAUTH_RATE_LIMIT_PER_MINUTE=30
 LARK_OAUTH_TRUSTED_PROXY_CIDRS=172.31.20.0/24
 LARK_RECONCILIATION_INTERVAL=24h
@@ -168,6 +174,16 @@ the direct peer is covered by `LARK_OAUTH_TRUSTED_PROXY_CIDRS`; configure only
 the exact proxy network that reaches the controller. The initial callback
 allowlist is intentionally a single fixed URL and rejects additional or
 prefix-matching entries.
+
+Processing recovery runs in both modes. `LARK_PROCESSING_LEASE_TIMEOUT` must be
+between `1m` and `1h`; `LARK_PROCESSING_RECOVERY_INTERVAL` must be at least
+`10s` and no longer than the lease. The lease plus recovery interval must stay
+below `LARK_READINESS_MAX_QUEUE_AGE`, so the default worker requeues abandoned
+approval, entitlement-grant, and principal-disable claims before readiness
+reports a stalled queue. Recovery preserves the attempt counter, records only
+bounded queue/count audit data, and never releases `held_shadow`, future
+`retry_wait`, or terminal jobs. Prometheus exposes cumulative recovery counts
+through `lark_controller_processing_recovered_total{queue}`.
 
 `LARK_RECONCILIATION_INTERVAL` is active-mode only, defaults to `24h`, and must
 be between `24h` and `168h`. A failed run is retried after at least 15 minutes;
@@ -317,6 +333,7 @@ Active grant and real-time principal-disable execution, the durable opaque
 OAuth credential store, the outbound Lark token/userinfo adapter, and the
 public OAuth authorize/callback handlers, internal token/userinfo handlers,
 and idempotent base-subscription dispatch are implemented locally. Employment
-reconciliation is also implemented locally. Compose wiring, operational
-runbooks, and production validation remain follow-up work. Do not enable active
-mode in production before those gates are complete.
+reconciliation and runtime stale-claim recovery are also implemented locally.
+Full approval/reversal reconciliation, Compose wiring, operational runbooks,
+and production validation remain follow-up work. Do not enable active mode in
+production before those gates are complete.
