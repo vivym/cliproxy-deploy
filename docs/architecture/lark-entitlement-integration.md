@@ -1890,6 +1890,8 @@ manifest digest：
 - Controller `f55103e`：`sha256:9f5a2401242ed2cd90daadcc5249037323250d9f6f90384bdbd93570469d538e`
 - correction CLI `f55103e`：`sha256:840befffed905094ab3e99d33aaab90c57023f9251800bc41c53c90b5613c8aa`
 
+本次验证未 push 或发布任何镜像，未部署，也未访问服务器。
+
 ### WP5：灰度上线
 
 1. 部署 fork 和 Controller，但不开放 OAuth provider。
