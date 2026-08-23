@@ -23,6 +23,8 @@ type OperationalSnapshot struct {
 	EmploymentReconciliations   map[string]int64
 	ProcessingRecoveries        map[string]int64
 	ApprovalFetches             map[string]int64
+	ApprovalReversals           map[string]int64
+	ApprovalReversalPending     map[string]int64
 	NewAPIGrants                map[string]int64
 	DeadLetters                 map[string]int64
 	PolicyValidationFailures    int64
@@ -57,6 +59,8 @@ func (s *Store) OperationalSnapshot(ctx context.Context) (OperationalSnapshot, e
 		EmploymentReconciliations:   make(map[string]int64),
 		ProcessingRecoveries:        make(map[string]int64),
 		ApprovalFetches:             make(map[string]int64),
+		ApprovalReversals:           make(map[string]int64),
+		ApprovalReversalPending:     make(map[string]int64),
 		NewAPIGrants:                make(map[string]int64),
 		DeadLetters:                 make(map[string]int64),
 	}
@@ -278,6 +282,46 @@ WHERE action = 'approval_fetch' GROUP BY outcome`)
 		snapshot.ApprovalFetches[result] = count
 	}
 	if err := closeRows(rows, "approval fetch metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT result, COUNT(*) FROM approval_reversals GROUP BY result`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query approval reversal metrics: %w", err)
+	}
+	for rows.Next() {
+		var result string
+		var count int64
+		if err := rows.Scan(&result, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan approval reversal metrics: %w", err)
+		}
+		snapshot.ApprovalReversals[result] = count
+	}
+	if err := closeRows(rows, "approval reversal metrics"); err != nil {
+		return OperationalSnapshot{}, err
+	}
+
+	rows, err = tx.QueryContext(ctx, `
+SELECT reversal.reason, COUNT(*)
+FROM approval_reversals reversal
+JOIN lark_event_inbox event ON event.event_key = reversal.event_key
+WHERE event.processing_state = 'reversal_pending'
+GROUP BY reversal.reason`)
+	if err != nil {
+		return OperationalSnapshot{}, fmt.Errorf("query pending approval reversal metrics: %w", err)
+	}
+	for rows.Next() {
+		var reason string
+		var count int64
+		if err := rows.Scan(&reason, &count); err != nil {
+			_ = rows.Close()
+			return OperationalSnapshot{}, fmt.Errorf("scan pending approval reversal metrics: %w", err)
+		}
+		snapshot.ApprovalReversalPending[reason] = count
+	}
+	if err := closeRows(rows, "pending approval reversal metrics"); err != nil {
 		return OperationalSnapshot{}, err
 	}
 

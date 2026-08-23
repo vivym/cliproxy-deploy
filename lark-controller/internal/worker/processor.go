@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
@@ -185,7 +186,32 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 		}
 		return true, nil
 	}
-	instance, err := p.fetcher.Fetch(ctx, job.Event.InstanceCode, p.locale)
+	targetInstanceCode := job.Event.InstanceCode
+	if job.Event.Status == "REVERTED" && job.Event.RevertedInstanceCode != "" {
+		targetInstanceCode = job.Event.RevertedInstanceCode
+	}
+	if job.Event.Status == "REVERTED" &&
+		(targetInstanceCode == "" || job.Event.ApprovalCode == "") {
+		reason := inbox.ApprovalReversalReasonTargetMissing
+		if job.Event.ApprovalCode == "" {
+			reason = inbox.ApprovalReversalReasonApprovalCodeMissing
+		}
+		decision := inbox.Decision{
+			EventKey: job.Event.Key, ApprovalCode: job.Event.ApprovalCode,
+			InstanceCode: targetInstanceCode, EventStatus: job.Event.Status,
+			Outcome: inbox.DecisionOutcomeReversalPending,
+			ApprovalReversal: &inbox.ApprovalReversalDraft{
+				TargetInstanceCode: targetInstanceCode,
+				Result:             inbox.ApprovalReversalResultAuthorityMismatch,
+				Reason:             reason,
+			},
+		}
+		if err := p.store.CompleteDecision(ctx, job, decision); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+	instance, err := p.fetcher.Fetch(ctx, targetInstanceCode, p.locale)
 	if err != nil {
 		if ctx.Err() != nil {
 			return true, ctx.Err()
@@ -197,16 +223,17 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 			if classified {
 				reason = failure.Reason
 			}
-			if completeErr := p.completeFetchDeadLetter(ctx, job, string(reason)); completeErr != nil {
+			if completeErr := p.completeFetchFailure(ctx, job, targetInstanceCode, string(reason)); completeErr != nil {
 				return true, completeErr
 			}
 			return true, nil
 		}
 		delay, retry := p.retryDelay(job, failure)
 		if !retry {
-			if completeErr := p.completeFetchDeadLetter(
+			if completeErr := p.completeFetchFailure(
 				ctx,
 				job,
+				targetInstanceCode,
 				"retry_exhausted_"+string(failure.Reason),
 			); completeErr != nil {
 				return true, completeErr
@@ -215,6 +242,13 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 		}
 		if retryErr := p.store.Retry(ctx, job, string(failure.Reason), delay); retryErr != nil {
 			return true, fmt.Errorf("schedule approval fetch retry: %w", retryErr)
+		}
+		return true, nil
+	}
+	if job.Event.Status == "REVERTED" {
+		decision := evaluateRevertedEvent(job.Event, targetInstanceCode, instance)
+		if err := p.store.CompleteDecision(ctx, job, decision); err != nil {
+			return true, err
 		}
 		return true, nil
 	}
@@ -283,6 +317,16 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 		}
 	}
 	if err := p.store.CompleteDecision(ctx, job, decision); err != nil {
+		if errors.Is(err, inbox.ErrApprovalReverted) {
+			decision.Outcome = inbox.DecisionOutcomeShadowAuthorityRejected
+			decision.FailureReason = "approval_reverted"
+			decision.EntitlementCommand = nil
+			decision.EntitlementGrantJob = nil
+			if completeErr := p.store.CompleteDecision(ctx, job, decision); completeErr != nil {
+				return true, fmt.Errorf("reject grant fenced by approval reversal: %w", completeErr)
+			}
+			return true, nil
+		}
 		if errors.Is(err, inbox.ErrEntitlementCommandPayloadMismatch) {
 			decision.Outcome = inbox.DecisionOutcomeDeadLetterCommandPlanning
 			decision.FailureReason = "external_id_payload_mismatch"
@@ -304,6 +348,31 @@ func (p *ShadowProcessor) completeFetchDeadLetter(ctx context.Context, job inbox
 		InstanceCode: job.Event.InstanceCode, EventStatus: job.Event.Status,
 		Outcome:       inbox.DecisionOutcomeDeadLetterApprovalFetch,
 		FailureReason: reason,
+	})
+}
+
+func (p *ShadowProcessor) completeFetchFailure(
+	ctx context.Context,
+	job inbox.Job,
+	targetInstanceCode string,
+	reason string,
+) error {
+	if job.Event.Status != "REVERTED" {
+		return p.completeFetchDeadLetter(ctx, job, reason)
+	}
+	result := inbox.ApprovalReversalResultFetchTerminalError
+	if strings.HasPrefix(reason, "retry_exhausted_") {
+		result = inbox.ApprovalReversalResultFetchRetryExhausted
+	}
+	return p.store.CompleteDecision(ctx, job, inbox.Decision{
+		EventKey: job.Event.Key, ApprovalCode: job.Event.ApprovalCode,
+		InstanceCode: targetInstanceCode, EventStatus: job.Event.Status,
+		Outcome: inbox.DecisionOutcomeReversalPending,
+		ApprovalReversal: &inbox.ApprovalReversalDraft{
+			TargetInstanceCode: targetInstanceCode,
+			Result:             result,
+			Reason:             inbox.ApprovalReversalReason(reason),
+		},
 	})
 }
 
@@ -357,16 +426,42 @@ func decisionWithoutFetch(event inbox.Event) (inbox.Decision, bool) {
 		InstanceCode: event.InstanceCode, EventStatus: event.Status,
 	}
 	switch event.Status {
-	case "APPROVED", "OVERTIME_RECOVER":
+	case "APPROVED", "OVERTIME_RECOVER", "REVERTED":
 		return inbox.Decision{}, false
 	case "PENDING", "REJECTED", "CANCELED", "DELETED", "OVERTIME_CLOSE":
 		decision.Outcome = inbox.DecisionOutcomeShadowIgnoredNonApproved
-	case "REVERTED":
-		decision.Outcome = inbox.DecisionOutcomeReversalPending
 	default:
 		decision.Outcome = inbox.DecisionOutcomeDeadLetterUnknownStatus
 	}
 	return decision, true
+}
+
+func evaluateRevertedEvent(
+	event inbox.Event,
+	targetInstanceCode string,
+	instance ApprovalInstance,
+) inbox.Decision {
+	decision := inbox.Decision{
+		EventKey: event.Key, ApprovalCode: event.ApprovalCode,
+		InstanceCode: targetInstanceCode, EventStatus: event.Status,
+		AuthorityStatus: instance.Status, Outcome: inbox.DecisionOutcomeReversalPending,
+		OpenIDHash: HashEvidence(instance.OpenID), FormSHA256: HashEvidence(instance.FormJSON),
+		StartTime: instance.StartTime, Reverted: instance.Reverted,
+		ApprovalReversal: &inbox.ApprovalReversalDraft{
+			TargetInstanceCode:    targetInstanceCode,
+			AuthorityApprovalCode: instance.ApprovalCode,
+			AuthorityInstanceCode: instance.InstanceCode,
+			AuthorityStatus:       instance.Status,
+			AuthorityReverted:     instance.Reverted,
+		},
+	}
+	if event.ApprovalCode == "" || targetInstanceCode == "" ||
+		instance.ApprovalCode != event.ApprovalCode ||
+		instance.InstanceCode != targetInstanceCode || !instance.Reverted {
+		decision.ApprovalReversal.Result = inbox.ApprovalReversalResultAuthorityMismatch
+		decision.ApprovalReversal.Reason = inbox.ApprovalReversalReasonAuthorityMismatch
+	}
+	return decision
 }
 
 func evaluateApprovedEvent(event inbox.Event, instance ApprovalInstance) (inbox.Decision, error) {

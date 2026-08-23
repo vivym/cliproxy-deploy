@@ -100,6 +100,40 @@ func TestDuplicateEventIDRejectsDifferentPayload(t *testing.T) {
 	}
 }
 
+func TestV2RevertedInstanceCodeIsDurableAndPartOfDuplicateIdentity(t *testing.T) {
+	store := openStore(t, filepath.Join(t.TempDir(), "controller.sqlite"))
+	handler := newEncryptedHandler(t, store)
+	event := loadLarkFixture(t, "approval_reverted_v2.json")
+	body, headers := encryptedV2Request(t, event)
+	response := postRaw(t, handler, body, headers)
+	if response.Code != http.StatusOK {
+		t.Fatalf("reverted event status = %d, want %d; body=%s", response.Code, http.StatusOK, response.Body.String())
+	}
+	recorded, err := store.Get(context.Background(), "lark:v2:evt-reverted-001")
+	if err != nil {
+		t.Fatalf("get reverted event: %v", err)
+	}
+	if recorded.RevertedInstanceCode != "instance-original-v2" {
+		t.Fatalf("reverted instance code = %q, want instance-original-v2", recorded.RevertedInstanceCode)
+	}
+
+	changed := loadLarkFixture(t, "approval_reverted_v2.json")
+	changed["event"].(map[string]any)["reverted_instance_code"] = "instance-other"
+	changedBody, changedHeaders := encryptedV2Request(t, changed)
+	conflict := postRaw(t, handler, changedBody, changedHeaders)
+	if conflict.Code != http.StatusConflict ||
+		!strings.Contains(conflict.Body.String(), "event_id_payload_mismatch") {
+		t.Fatalf("changed reversal identity: status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+	recorded, err = store.Get(context.Background(), "lark:v2:evt-reverted-001")
+	if err != nil {
+		t.Fatalf("get original reverted event after conflict: %v", err)
+	}
+	if recorded.RevertedInstanceCode != "instance-original-v2" || recorded.DuplicateCount != 0 {
+		t.Fatalf("conflicting reversal changed original event: %+v", recorded)
+	}
+}
+
 func TestContactUserDeletedEventCreatesHeldSealedDisableJob(t *testing.T) {
 	store := openStore(t, filepath.Join(t.TempDir(), "controller.sqlite"))
 	handler := newEncryptedHandler(t, store)

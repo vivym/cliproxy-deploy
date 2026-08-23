@@ -1,0 +1,13 @@
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "approval_code": "approval-wallet-v1",
+    "instance_code": "instance-original-v2",
+    "status": "APPROVED",
+    "open_id": "ou_sanitized_requester",
+    "start_time": "1787270300000",
+    "form": "[{\"custom_id\":\"wallet_package\",\"type\":\"radioV2\",\"value\":\"Small\"}]",
+    "reverted": true
+  }
+}

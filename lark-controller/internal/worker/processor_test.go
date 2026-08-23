@@ -16,9 +16,11 @@ import (
 )
 
 type approvalFetcher struct {
-	calls    int
-	instance worker.ApprovalInstance
-	failures []error
+	calls         int
+	instance      worker.ApprovalInstance
+	failures      []error
+	instanceCodes []string
+	locales       []string
 }
 
 type approvalResolver struct {
@@ -40,6 +42,8 @@ func (r *approvalResolver) ResolveApproval(request policy.ApprovalRequest) (poli
 
 func (f *approvalFetcher) Fetch(_ context.Context, instanceCode, locale string) (worker.ApprovalInstance, error) {
 	f.calls++
+	f.instanceCodes = append(f.instanceCodes, instanceCode)
+	f.locales = append(f.locales, locale)
 	if f.calls <= len(f.failures) {
 		return worker.ApprovalInstance{}, f.failures[f.calls-1]
 	}
@@ -54,6 +58,376 @@ func (f *approvalFetcher) Fetch(_ context.Context, instanceCode, locale string) 
 		StartTime:    "1787270300000",
 		FormJSON:     `[{"custom_id":"wallet_package","value":"Small"}]`,
 	}, nil
+}
+
+func TestShadowProcessorFetchesExplicitReversalTargetAndRecordsMissingOriginal(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	_, err = store.Record(ctx, inbox.Event{
+		Key: "lark:v2:evt-reversal-explicit", SchemaVersion: "2.0",
+		EventID: "evt-reversal-explicit", EventType: "approval.instance.status_changed_v4",
+		AppID: "cli_test", TenantKey: "tenant-test", ApprovalCode: "approval-wallet-v1",
+		InstanceCode: "instance-reversal", RevertedInstanceCode: "instance-original",
+		Status: "REVERTED", PayloadJSON: `{"status":"REVERTED"}`,
+	})
+	if err != nil {
+		t.Fatalf("record reversal event: %v", err)
+	}
+	fetcher := &approvalFetcher{instance: worker.ApprovalInstance{
+		ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-original",
+		Status: "APPROVED", OpenID: "ou-requester", StartTime: "1787270300000",
+		FormJSON: `[]`, Reverted: true,
+	}}
+	resolver := &approvalResolver{resolution: verifiedWalletResolution()}
+	processor, err := worker.NewShadowProcessor(store, fetcher, resolver, "zh-CN")
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process reversal: processed=%t err=%v", processed, err)
+	}
+	if fetcher.calls != 1 || len(fetcher.instanceCodes) != 1 ||
+		fetcher.instanceCodes[0] != "instance-original" || fetcher.locales[0] != "zh-CN" {
+		t.Fatalf("reversal fetch calls=%d instances=%v locales=%v", fetcher.calls, fetcher.instanceCodes, fetcher.locales)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("reversal invoked approval policy resolver %d times, want 0", resolver.calls)
+	}
+	reversal, err := store.GetApprovalReversal(ctx, "lark:v2:evt-reversal-explicit")
+	if err != nil {
+		t.Fatalf("get reversal ledger: %v", err)
+	}
+	if reversal.Result != inbox.ApprovalReversalResultOriginalMissing ||
+		reversal.Reason != inbox.ApprovalReversalReasonOriginalMissing ||
+		reversal.TargetInstanceCode != "instance-original" ||
+		reversal.AuthorityStatus != "APPROVED" || !reversal.AuthorityReverted {
+		t.Fatalf("unexpected reversal ledger: %+v", reversal)
+	}
+	decision, err := store.GetDecision(ctx, "lark:v2:evt-reversal-explicit")
+	if err != nil {
+		t.Fatalf("get reversal decision: %v", err)
+	}
+	if decision.Outcome != inbox.DecisionOutcomeReversalPending ||
+		decision.InstanceCode != "instance-original" || !decision.Reverted {
+		t.Fatalf("unexpected reversal decision: %+v", decision)
+	}
+}
+
+func TestShadowProcessorUsesEventInstanceAsReversalFallbackTarget(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordReversalEvent(t, ctx, store, "fallback", "instance-original", "")
+	fetcher := &approvalFetcher{instance: worker.ApprovalInstance{
+		ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-original",
+		Status: "APPROVED", OpenID: "ou-requester", StartTime: "1787270300000",
+		FormJSON: `[]`, Reverted: true,
+	}}
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process fallback reversal: processed=%t err=%v", processed, err)
+	}
+	if len(fetcher.instanceCodes) != 1 || fetcher.instanceCodes[0] != "instance-original" {
+		t.Fatalf("fallback fetch targets = %v, want exact event instance", fetcher.instanceCodes)
+	}
+	reversal, err := store.GetApprovalReversal(ctx, "lark:v2:fallback")
+	if err != nil {
+		t.Fatalf("get fallback reversal: %v", err)
+	}
+	if reversal.TargetInstanceCode != "instance-original" {
+		t.Fatalf("fallback target = %q, want instance-original", reversal.TargetInstanceCode)
+	}
+}
+
+func TestShadowProcessorDoesNotFetchWithoutExactReversalTarget(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordReversalEvent(t, ctx, store, "missing-target", "", "")
+	fetcher := &approvalFetcher{}
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process targetless reversal: processed=%t err=%v", processed, err)
+	}
+	if fetcher.calls != 0 {
+		t.Fatalf("targetless reversal made %d fetches, want 0", fetcher.calls)
+	}
+	reversal, err := store.GetApprovalReversal(ctx, "lark:v2:missing-target")
+	if err != nil {
+		t.Fatalf("get targetless reversal: %v", err)
+	}
+	if reversal.Result != inbox.ApprovalReversalResultAuthorityMismatch ||
+		reversal.Reason != inbox.ApprovalReversalReasonTargetMissing ||
+		reversal.TargetInstanceCode != "" {
+		t.Fatalf("targetless reversal = %+v", reversal)
+	}
+}
+
+func TestShadowProcessorAuthorityMismatchCannotFenceOriginalGrant(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		instance worker.ApprovalInstance
+	}{
+		{
+			name: "approval code mismatch",
+			instance: worker.ApprovalInstance{
+				ApprovalCode: "approval-other", InstanceCode: "instance-original",
+				Status: "APPROVED", OpenID: "ou-requester", StartTime: "1787270300000",
+				FormJSON: `[]`, Reverted: true,
+			},
+		},
+		{
+			name: "instance code mismatch",
+			instance: worker.ApprovalInstance{
+				ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-other",
+				Status: "APPROVED", OpenID: "ou-requester", StartTime: "1787270300000",
+				FormJSON: `[]`, Reverted: true,
+			},
+		},
+		{
+			name: "not authoritatively reverted",
+			instance: worker.ApprovalInstance{
+				ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-original",
+				Status: "APPROVED", OpenID: "ou-requester", StartTime: "1787270300000",
+				FormJSON: `[]`, Reverted: false,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			externalID := processVerifiedOriginalGrant(t, ctx, store, "original")
+			recordReversalEvent(t, ctx, store, "mismatch", "instance-reversal", "instance-original")
+			processor, err := worker.NewShadowProcessor(
+				store,
+				&approvalFetcher{instance: test.instance},
+				&approvalResolver{resolution: verifiedWalletResolution()},
+				"zh-CN",
+			)
+			if err != nil {
+				t.Fatalf("new reversal processor: %v", err)
+			}
+			if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+				t.Fatalf("process mismatched reversal: processed=%t err=%v", processed, err)
+			}
+			reversal, err := store.GetApprovalReversal(ctx, "lark:v2:mismatch")
+			if err != nil {
+				t.Fatalf("get mismatched reversal: %v", err)
+			}
+			if reversal.Result != inbox.ApprovalReversalResultAuthorityMismatch ||
+				reversal.OriginalExternalID != "" {
+				t.Fatalf("mismatched reversal = %+v", reversal)
+			}
+			grant, err := store.GetEntitlementGrantJob(ctx, externalID)
+			if err != nil {
+				t.Fatalf("get original grant: %v", err)
+			}
+			if grant.Status != inbox.EntitlementGrantJobStatusHeldShadow {
+				t.Fatalf("authority mismatch fenced grant as %q", grant.Status)
+			}
+		})
+	}
+}
+
+func TestShadowProcessorRetriesReversalFetchBeforeResolvingOriginal(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordReversalEvent(t, ctx, store, "retry-reversal", "instance-reversal", "instance-original")
+	fetcher := &approvalFetcher{
+		failures: []error{&worker.ApprovalFetchError{
+			Reason: worker.ApprovalFetchServerError, Retryable: true,
+		}},
+		instance: worker.ApprovalInstance{
+			ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-original",
+			Status: "APPROVED", OpenID: "ou-requester", StartTime: "1787270300000",
+			FormJSON: `[]`, Reverted: true,
+		},
+	}
+	processor, err := worker.NewShadowProcessor(
+		store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+		worker.WithRetryPolicy(worker.RetryPolicy{
+			Schedule: []time.Duration{time.Nanosecond}, MaxDelay: time.Hour,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("schedule reversal retry: processed=%t err=%v", processed, err)
+	}
+	if _, err := store.GetApprovalReversal(ctx, "lark:v2:retry-reversal"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("retrying reversal was finalized early: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("finish reversal retry: processed=%t err=%v", processed, err)
+	}
+	reversal, err := store.GetApprovalReversal(ctx, "lark:v2:retry-reversal")
+	if err != nil {
+		t.Fatalf("get retried reversal: %v", err)
+	}
+	if reversal.Result != inbox.ApprovalReversalResultOriginalMissing || fetcher.calls != 2 {
+		t.Fatalf("retried reversal=%+v fetch_calls=%d", reversal, fetcher.calls)
+	}
+}
+
+func TestAuthoritativeReversalDenyFenceBlocksLaterApprovedGrant(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	recordReversalEvent(t, ctx, store, "reversal-first", "instance-reversal", "instance-original")
+	reversalProcessor, err := worker.NewShadowProcessor(
+		store,
+		&approvalFetcher{instance: worker.ApprovalInstance{
+			ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-original",
+			Status: "APPROVED", OpenID: "ou-requester", StartTime: "1787270300000",
+			FormJSON: `[]`, Reverted: true,
+		}},
+		&approvalResolver{resolution: verifiedWalletResolution()},
+		"zh-CN",
+	)
+	if err != nil {
+		t.Fatalf("new reversal processor: %v", err)
+	}
+	if processed, err := reversalProcessor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process leading reversal: processed=%t err=%v", processed, err)
+	}
+
+	recordApprovedEvent(t, ctx, store, "original")
+	keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant keyring: %v", err)
+	}
+	approvedProcessor, err := worker.NewShadowProcessorWithGrantSealer(
+		store,
+		&approvalFetcher{instance: worker.ApprovalInstance{
+			ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-original",
+			Status: "APPROVED", OpenID: "ou-requester", StartTime: "1787270300000",
+			FormJSON: `[{"custom_id":"wallet_package","value":"Small"}]`, Reverted: false,
+		}},
+		&approvalResolver{resolution: verifiedWalletResolution()},
+		"zh-CN",
+		keyring,
+	)
+	if err != nil {
+		t.Fatalf("new approved processor: %v", err)
+	}
+	if processed, err := approvedProcessor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process approval after reversal: processed=%t err=%v", processed, err)
+	}
+	decision, err := store.GetDecision(ctx, "lark:v2:original")
+	if err != nil {
+		t.Fatalf("get denied approval decision: %v", err)
+	}
+	if decision.Outcome != inbox.DecisionOutcomeShadowAuthorityRejected ||
+		decision.FailureReason != "approval_reverted" {
+		t.Fatalf("approval after reversal decision = %+v", decision)
+	}
+	if _, err := store.GetEntitlementCommandShadow(ctx, "lark:v2:original"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("approval after reversal left a command shadow: %v", err)
+	}
+	if _, err := store.GetEntitlementGrantJob(ctx, "lark:wallet-topup:instance-original"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("approval after reversal left a grant job: %v", err)
+	}
+}
+
+func TestShadowProcessorFinalizesReversalFetchFailuresAsManualPending(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		failures   []error
+		schedule   []time.Duration
+		wantResult inbox.ApprovalReversalResult
+		wantReason inbox.ApprovalReversalReason
+	}{
+		{
+			name: "terminal",
+			failures: []error{&worker.ApprovalFetchError{
+				Reason: worker.ApprovalFetchClientError,
+			}},
+			schedule:   []time.Duration{time.Nanosecond},
+			wantResult: inbox.ApprovalReversalResultFetchTerminalError,
+			wantReason: inbox.ApprovalReversalReason(worker.ApprovalFetchClientError),
+		},
+		{
+			name: "retry exhausted",
+			failures: []error{
+				&worker.ApprovalFetchError{Reason: worker.ApprovalFetchRateLimited, Retryable: true},
+				&worker.ApprovalFetchError{Reason: worker.ApprovalFetchRateLimited, Retryable: true},
+			},
+			schedule:   []time.Duration{time.Nanosecond},
+			wantResult: inbox.ApprovalReversalResultFetchRetryExhausted,
+			wantReason: "retry_exhausted_rate_limited",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			recordReversalEvent(t, ctx, store, "failed-reversal", "instance-reversal", "instance-original")
+			fetcher := &approvalFetcher{failures: test.failures}
+			processor, err := worker.NewShadowProcessor(
+				store, fetcher, &approvalResolver{resolution: verifiedWalletResolution()}, "zh-CN",
+				worker.WithRetryPolicy(worker.RetryPolicy{
+					Schedule: test.schedule, MaxDelay: time.Hour,
+				}),
+			)
+			if err != nil {
+				t.Fatalf("new processor: %v", err)
+			}
+			for range test.failures {
+				if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+					t.Fatalf("process failed reversal: processed=%t err=%v", processed, err)
+				}
+			}
+			reversal, err := store.GetApprovalReversal(ctx, "lark:v2:failed-reversal")
+			if err != nil {
+				t.Fatalf("get failed reversal: %v", err)
+			}
+			if reversal.Result != test.wantResult || reversal.Reason != test.wantReason {
+				t.Fatalf("failed reversal = %+v", reversal)
+			}
+			decision, err := store.GetDecision(ctx, "lark:v2:failed-reversal")
+			if err != nil {
+				t.Fatalf("get failed reversal decision: %v", err)
+			}
+			if decision.Outcome != inbox.DecisionOutcomeReversalPending {
+				t.Fatalf("failed reversal outcome = %q", decision.Outcome)
+			}
+		})
+	}
 }
 
 func TestShadowProcessorRejectsTypedNilDependencies(t *testing.T) {
@@ -337,7 +711,7 @@ func TestShadowProcessorFailsClosedAcrossEventStatusMatrix(t *testing.T) {
 		{status: "DELETED", fetchCalls: 0, outcome: "shadow_ignored_non_approved"},
 		{status: "OVERTIME_CLOSE", fetchCalls: 0, outcome: "shadow_ignored_non_approved"},
 		{status: "OVERTIME_RECOVER", fetchCalls: 1, outcome: "shadow_authority_verified"},
-		{status: "REVERTED", fetchCalls: 0, outcome: "reversal_pending"},
+		{status: "REVERTED", fetchCalls: 1, outcome: "reversal_pending"},
 		{status: "UNKNOWN_FUTURE_STATUS", fetchCalls: 0, outcome: "dead_letter_unknown_status"},
 	}
 	for _, test := range tests {
@@ -361,6 +735,7 @@ func TestShadowProcessorFailsClosedAcrossEventStatusMatrix(t *testing.T) {
 			fetcher := &approvalFetcher{instance: worker.ApprovalInstance{
 				ApprovalCode: "approval-wallet-v1", InstanceCode: "instance-" + test.status,
 				Status: "APPROVED", OpenID: "ou_requester", StartTime: "1787270300000", FormJSON: `[]`,
+				Reverted: test.status == "REVERTED",
 			}}
 			resolver := &approvalResolver{resolution: verifiedWalletResolution()}
 			processor, err := worker.NewShadowProcessor(store, fetcher, resolver, "zh-CN")
@@ -789,4 +1164,53 @@ func recordApprovedEvent(t *testing.T, ctx context.Context, store *inbox.Store, 
 	if err != nil {
 		t.Fatalf("record approved event: %v", err)
 	}
+}
+
+func recordReversalEvent(
+	t *testing.T,
+	ctx context.Context,
+	store *inbox.Store,
+	eventID string,
+	instanceCode string,
+	revertedInstanceCode string,
+) {
+	t.Helper()
+	_, err := store.Record(ctx, inbox.Event{
+		Key: "lark:v2:" + eventID, SchemaVersion: "2.0", EventID: eventID,
+		EventType: "approval.instance.status_changed_v4", AppID: "cli_test",
+		TenantKey: "tenant-test", ApprovalCode: "approval-wallet-v1",
+		InstanceCode: instanceCode, RevertedInstanceCode: revertedInstanceCode,
+		Status: "REVERTED", PayloadJSON: `{"status":"REVERTED"}`,
+	})
+	if err != nil {
+		t.Fatalf("record reversal event: %v", err)
+	}
+}
+
+func processVerifiedOriginalGrant(
+	t *testing.T,
+	ctx context.Context,
+	store *inbox.Store,
+	eventID string,
+) string {
+	t.Helper()
+	recordApprovedEvent(t, ctx, store, eventID)
+	keyring, err := newapi.NewGrantKeyring(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatalf("new grant keyring: %v", err)
+	}
+	processor, err := worker.NewShadowProcessorWithGrantSealer(
+		store,
+		&approvalFetcher{},
+		&approvalResolver{resolution: verifiedWalletResolution()},
+		"zh-CN",
+		keyring,
+	)
+	if err != nil {
+		t.Fatalf("new original grant processor: %v", err)
+	}
+	if processed, err := processor.RunOnce(ctx); err != nil || !processed {
+		t.Fatalf("process original grant: processed=%t err=%v", processed, err)
+	}
+	return "lark:wallet-topup:instance-" + eventID
 }

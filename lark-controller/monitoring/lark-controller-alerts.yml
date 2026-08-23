@@ -1,0 +1,11 @@
+groups:
+  - name: lark-controller
+    rules:
+      - alert: LarkApprovalReversalPending
+        expr: sum(lark_approval_reversal_pending) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Lark approval reversal requires operator review
+          description: The controller has at least one durable approval reversal awaiting manual correction.

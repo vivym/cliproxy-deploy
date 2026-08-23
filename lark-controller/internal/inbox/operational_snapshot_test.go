@@ -161,6 +161,27 @@ func TestOperationalSnapshotReportsNewAPIGrantShadows(t *testing.T) {
 	}
 }
 
+func TestOperationalSnapshotReportsBoundedApprovalReversalResults(t *testing.T) {
+	ctx := context.Background()
+	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	completeVerifiedReversal(t, ctx, store, "missing-original", "instance-missing")
+
+	snapshot, err := store.OperationalSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("read operational snapshot: %v", err)
+	}
+	if snapshot.ApprovalReversals["original_missing"] != 1 {
+		t.Fatalf("approval reversal counters = %v", snapshot.ApprovalReversals)
+	}
+	if snapshot.ApprovalReversalPending["original_missing"] != 1 {
+		t.Fatalf("pending approval reversal gauges = %v", snapshot.ApprovalReversalPending)
+	}
+}
+
 func TestOperationalSnapshotIncludesBaseSubscriptionGrantAudit(t *testing.T) {
 	ctx := context.Background()
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))

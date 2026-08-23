@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账和运行期 stale claim 恢复；完整 approval/reversal reconciliation、WP4/WP5 未实施，尚未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复和事件驱动 approval reversal 栅栏；周期性 approval reconciliation、管理员纠正流程、WP4/WP5 未实施，尚未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1086,6 +1086,7 @@ New API fork 同时给 `subscription_plans` 增加 `managed_only boolean NOT NUL
 | `approval_policy_bindings` | approval code、locale、schema fingerprint 和 definition manifest |
 | `lark_event_inbox` | webhook 去重、规范化 event、处理状态 |
 | `approval_instances` | 回查结果摘要、schema hash、处理决策 |
+| `approval_reversals` | 脱敏撤销证据、唯一原 external ID、原 grant 摘要和 bounded manual-review result/reason |
 | `entitlement_command_shadows` | 脱敏 grant receipt、external ID/request hash 重放账本 |
 | `base_subscription_grants` | userinfo 基础订阅的确定性 external ID、hash、policy/catalog/level/quota 重放账本 |
 | `base_subscription_audit` | 无 webhook event key 的基础订阅 plan/replay/result/retry/dead-letter 审计 |
@@ -1482,7 +1483,7 @@ New API 检查：
 - webhook 验签、解密和 URL challenge。
 - v1 `uuid` 与 v2 `event_id` 去重。
 - APPROVED 事件总是回查实例。
-- `PENDING/REJECTED/CANCELED/DELETED/OVERTIME_CLOSE/OVERTIME_RECOVER/REVERTED` 和未知状态按状态矩阵处理；使用脱敏的真实 Lark event/instance fixture。
+- `PENDING/REJECTED/CANCELED/DELETED/OVERTIME_CLOSE/OVERTIME_RECOVER/REVERTED` 和未知状态按状态矩阵处理；使用仓库内按真实 Lark 协议结构脱敏固化的 v1/v2 event 与 instance fixture。
 - REVERTED 使用当前 event/API 可用的显式关联码或已登记原 `instance_code` 精确找到原 grant，歧义时进入 `reversal_pending`。
 - 429、5xx 和 `Retry-After` 重试。
 - 每日在职巡检只有权威终态或两次健康全量扫描的 not-found 才停用；权限、scope、分页、`429`、`5xx` 和应用范围错误只告警。
@@ -1676,7 +1677,24 @@ processing lease recovery：默认每分钟扫描一次，将持续 `processing`
 迟到 worker 的整个事务回滚，grant/disable 则沿用既有 attempts fencing 和幂等 external ID。
 recovery 不释放 `held_shadow`，不提前处理 future `retry_wait`，也不改终态；审计只记录 bounded
 queue/count。配置门禁要求 lease 加扫描周期小于 readiness queue age，避免恢复窗口晚于默认告警。
-完整 approval/reversal reconciliation、Compose 接入和生产验证仍未实现。
+事件驱动 approval reversal 也已实现：inbox 持久化 `reverted_instance_code`；旧库启动迁移会从
+normalized `payload_json` 事务性回填非空关联码并重算 durable payload hash，保证待处理旧事件和合法
+重投仍使用相同显式 target。处理时优先使用该
+显式关联码，否则只回退到 event 自身的精确 `instance_code`；Controller 回查目标实例并要求
+`approval_code`、target instance code 完全匹配且权威 `reverted=true`。原 grant 只能由同 tenant、
+同 approval/instance 的 `shadow_authority_verified` decision 与 command shadow 联表解析，legacy
+unresolved evidence 不合格；多个 source event 指向同一个 distinct external ID 可接受，零个或多于
+一个 external ID 均进入人工待处理。`approval_reversals` 仅保存 normalized code、权威状态、原
+external ID、grant type/quota/policy/business 摘要和 bounded result/reason，不保存 open_id 或表单
+原文。若原 grant job 仍是 `held_shadow/pending/processing/retry_wait`，同一 SQLite 事务把它改为
+`reversal_pending` 并保留 attempts，晚到 worker completion 因 status/attempt fence 失败；无论原
+grant 是否可能已由 New API 应用，都不会自动扣钱包或降订阅。终态或耗尽的 reversal fetch 失败
+同样进入 manual pending，不混入普通 approval dead-letter。Prometheus 通过
+`lark_approval_reversal_total{result}` 暴露 bounded 结果，并通过
+`lark_approval_reversal_pending{reason}` 暴露当前待人工处理数；仓库内
+`lark-controller/monitoring/lark-controller-alerts.yml` 提供 `LarkApprovalReversalPending` 告警规则。
+生产环境仍必须显式加载该 rule 并配置 Alertmanager operator route，当前没有部署这部分监控配置。
+周期性 approval reconciliation、管理员 correction command、Compose 接入和生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的

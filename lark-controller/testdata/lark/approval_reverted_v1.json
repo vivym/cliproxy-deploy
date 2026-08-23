@@ -1,0 +1,16 @@
+{
+  "ts": "1787270400",
+  "uuid": "uuid-reverted-001",
+  "token": "verification-token",
+  "type": "event_callback",
+  "event": {
+    "type": "approval_instance",
+    "app_id": "cli_test",
+    "tenant_key": "tenant-test",
+    "approval_code": "approval-wallet-v1",
+    "instance_code": "instance-reversal-v1",
+    "reverted_instance_code": "instance-original-v1",
+    "status": "REVERTED",
+    "operate_time": "1787270400000"
+  }
+}

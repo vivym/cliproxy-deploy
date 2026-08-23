@@ -102,6 +102,10 @@ func (h *Handler) metrics(response http.ResponseWriter, request *http.Request) {
 		boundedCounts(snapshot.ProcessingRecoveries, allowedProcessingRecoveryQueues))
 	writeCounterMap(&output, "lark_approval_fetch_total", "result",
 		boundedCounts(snapshot.ApprovalFetches, allowedFetchResults))
+	writeCounterMap(&output, "lark_approval_reversal_total", "result",
+		boundedCounts(snapshot.ApprovalReversals, allowedApprovalReversalResults))
+	writeGaugeMap(&output, "lark_approval_reversal_pending", "reason",
+		boundedCounts(snapshot.ApprovalReversalPending, allowedApprovalReversalReasons))
 	writeCounterMap(&output, "lark_new_api_grant_total", "result",
 		boundedCounts(snapshot.NewAPIGrants, allowedNewAPIGrantResults))
 	writeScalar(&output, "lark_policy_validation_failure_total", "counter",
@@ -252,7 +256,7 @@ var (
 	)
 	allowedInboxStates                     = labels("pending", "processing", "shadow_recorded", "reversal_pending", "dead_letter", "principal_disabled")
 	allowedJobStates                       = labels("pending", "processing", "retry_wait", "succeeded", "reversal_pending", "dead_letter")
-	allowedEntitlementGrantJobStates       = labels("held_shadow", "pending", "processing", "retry_wait", "succeeded", "dead_letter")
+	allowedEntitlementGrantJobStates       = labels("held_shadow", "pending", "processing", "retry_wait", "reversal_pending", "succeeded", "dead_letter")
 	allowedEntitlementGrantTypes           = labels("wallet_quota", "subscription_level")
 	allowedEntitlementGrantStatuses        = labels("applied", "replayed", "noop", "ignored_stale")
 	allowedEntitlementGrantFailureReasons  = entitlementGrantFailureReasonLabels()
@@ -271,7 +275,42 @@ var (
 		inbox.ProcessingRecoveryQueueEntitlementGrant,
 		inbox.ProcessingRecoveryQueuePrincipalDisable,
 	)
-	allowedFetchResults       = labels("success", "retryable_error", "terminal_error")
+	allowedFetchResults            = labels("success", "retryable_error", "terminal_error")
+	allowedApprovalReversalResults = labels(
+		"grant_fenced",
+		"grant_already_pending",
+		"grant_terminal",
+		"grant_status_unknown",
+		"grant_job_missing",
+		"original_missing",
+		"original_ambiguous",
+		"authority_mismatch",
+		"fetch_terminal_error",
+		"fetch_retry_exhausted",
+	)
+	allowedApprovalReversalReasons = labels(
+		"manual_review_required",
+		"original_missing",
+		"original_ambiguous",
+		"grant_job_missing",
+		"grant_status_unknown",
+		"authority_mismatch",
+		"target_missing",
+		"approval_code_missing",
+		"rate_limited",
+		"server_error",
+		"client_error",
+		"timeout",
+		"transport_error",
+		"invalid_response",
+		"unclassified_error",
+		"retry_exhausted_rate_limited",
+		"retry_exhausted_server_error",
+		"retry_exhausted_client_error",
+		"retry_exhausted_timeout",
+		"retry_exhausted_transport_error",
+		"retry_exhausted_invalid_response",
+	)
 	allowedNewAPIGrantResults = labels(
 		"shadow_planned",
 		"shadow_replayed",

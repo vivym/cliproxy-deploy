@@ -1,0 +1,18 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt-reverted-001",
+    "event_type": "approval.instance.status_changed_v4",
+    "app_id": "cli_test",
+    "tenant_key": "tenant-test",
+    "create_time": "1787270400000",
+    "token": "verification-token"
+  },
+  "event": {
+    "approval_code": "approval-wallet-v1",
+    "instance_code": "instance-reversal-v2",
+    "reverted_instance_code": "instance-original-v2",
+    "status": "REVERTED",
+    "operate_time": "1787270400000"
+  }
+}

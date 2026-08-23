@@ -240,16 +240,17 @@ func (h *Handler) recordV2Event(ctx context.Context, envelope eventEnvelope) err
 		return err
 	}
 	_, err = h.recorder.Record(ctx, inbox.Event{
-		Key:           "lark:v2:" + envelope.Header.EventID,
-		SchemaVersion: envelope.Schema,
-		EventID:       envelope.Header.EventID,
-		EventType:     envelope.Header.EventType,
-		AppID:         envelope.Header.AppID,
-		TenantKey:     envelope.Header.TenantKey,
-		ApprovalCode:  approval.ApprovalCode,
-		InstanceCode:  approval.InstanceCode,
-		Status:        approval.Status,
-		PayloadJSON:   string(normalized),
+		Key:                  "lark:v2:" + envelope.Header.EventID,
+		SchemaVersion:        envelope.Schema,
+		EventID:              envelope.Header.EventID,
+		EventType:            envelope.Header.EventType,
+		AppID:                envelope.Header.AppID,
+		TenantKey:            envelope.Header.TenantKey,
+		ApprovalCode:         approval.ApprovalCode,
+		InstanceCode:         approval.InstanceCode,
+		RevertedInstanceCode: approval.RevertedInstanceCode,
+		Status:               approval.Status,
+		PayloadJSON:          string(normalized),
 	})
 	if err != nil {
 		if errors.Is(err, inbox.ErrEventPayloadMismatch) {
@@ -332,16 +333,17 @@ func (h *Handler) recordV1Event(ctx context.Context, envelope eventEnvelope) err
 		return err
 	}
 	_, err = h.recorder.Record(ctx, inbox.Event{
-		Key:           "lark:v1:" + envelope.UUID,
-		SchemaVersion: "1.0",
-		EventID:       envelope.UUID,
-		EventType:     event.Type,
-		AppID:         event.AppID,
-		TenantKey:     event.TenantKey,
-		ApprovalCode:  event.ApprovalCode,
-		InstanceCode:  event.InstanceCode,
-		Status:        event.Status,
-		PayloadJSON:   string(normalized),
+		Key:                  "lark:v1:" + envelope.UUID,
+		SchemaVersion:        "1.0",
+		EventID:              envelope.UUID,
+		EventType:            event.Type,
+		AppID:                event.AppID,
+		TenantKey:            event.TenantKey,
+		ApprovalCode:         event.ApprovalCode,
+		InstanceCode:         event.InstanceCode,
+		RevertedInstanceCode: event.RevertedInstanceCode,
+		Status:               event.Status,
+		PayloadJSON:          string(normalized),
 	})
 	if err != nil {
 		if errors.Is(err, inbox.ErrEventPayloadMismatch) {

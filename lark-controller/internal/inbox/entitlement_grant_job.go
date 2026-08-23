@@ -16,12 +16,13 @@ type EntitlementGrantJobStatus string
 type EntitlementGrantFailureReason string
 
 const (
-	EntitlementGrantJobStatusHeldShadow EntitlementGrantJobStatus = "held_shadow"
-	EntitlementGrantJobStatusPending    EntitlementGrantJobStatus = "pending"
-	EntitlementGrantJobStatusProcessing EntitlementGrantJobStatus = "processing"
-	EntitlementGrantJobStatusRetryWait  EntitlementGrantJobStatus = "retry_wait"
-	EntitlementGrantJobStatusSucceeded  EntitlementGrantJobStatus = "succeeded"
-	EntitlementGrantJobStatusDeadLetter EntitlementGrantJobStatus = "dead_letter"
+	EntitlementGrantJobStatusHeldShadow      EntitlementGrantJobStatus = "held_shadow"
+	EntitlementGrantJobStatusPending         EntitlementGrantJobStatus = "pending"
+	EntitlementGrantJobStatusProcessing      EntitlementGrantJobStatus = "processing"
+	EntitlementGrantJobStatusRetryWait       EntitlementGrantJobStatus = "retry_wait"
+	EntitlementGrantJobStatusReversalPending EntitlementGrantJobStatus = "reversal_pending"
+	EntitlementGrantJobStatusSucceeded       EntitlementGrantJobStatus = "succeeded"
+	EntitlementGrantJobStatusDeadLetter      EntitlementGrantJobStatus = "dead_letter"
 )
 
 const (

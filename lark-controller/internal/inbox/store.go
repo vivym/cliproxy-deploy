@@ -20,21 +20,22 @@ import (
 const sqliteBusyTimeout = 500 * time.Millisecond
 
 type Event struct {
-	Key                 string
-	SchemaVersion       string
-	EventID             string
-	EventType           string
-	AppID               string
-	TenantKey           string
-	ApprovalCode        string
-	InstanceCode        string
-	Status              string
-	PayloadJSON         string
-	ProcessingState     ProcessingState
-	DuplicateCount      int64
-	ReceivedAt          time.Time
-	LastSeenAt          time.Time
-	PrincipalDisableJob *PrincipalDisableJobDraft
+	Key                  string
+	SchemaVersion        string
+	EventID              string
+	EventType            string
+	AppID                string
+	TenantKey            string
+	ApprovalCode         string
+	InstanceCode         string
+	RevertedInstanceCode string
+	Status               string
+	PayloadJSON          string
+	ProcessingState      ProcessingState
+	DuplicateCount       int64
+	ReceivedAt           time.Time
+	LastSeenAt           time.Time
+	PrincipalDisableJob  *PrincipalDisableJobDraft
 }
 
 type ProcessingState string
@@ -114,6 +115,7 @@ type Decision struct {
 	CreatedAt           time.Time
 	EntitlementCommand  *EntitlementCommandShadow
 	EntitlementGrantJob *EntitlementGrantJobDraft
+	ApprovalReversal    *ApprovalReversalDraft
 }
 
 func Open(path string) (*Store, error) {
@@ -156,6 +158,7 @@ CREATE TABLE IF NOT EXISTS lark_event_inbox (
     tenant_key TEXT NOT NULL,
     approval_code TEXT NOT NULL DEFAULT '',
     instance_code TEXT NOT NULL DEFAULT '',
+    reverted_instance_code TEXT NOT NULL DEFAULT '',
     event_status TEXT NOT NULL DEFAULT '',
     payload_json TEXT NOT NULL,
     payload_hash TEXT NOT NULL,
@@ -202,6 +205,27 @@ CREATE TABLE IF NOT EXISTS approval_instances (
     reverted INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS approval_reversals (
+    event_key TEXT PRIMARY KEY REFERENCES lark_event_inbox(event_key) ON DELETE CASCADE,
+    approval_code TEXT NOT NULL,
+    target_instance_code TEXT NOT NULL,
+    authority_approval_code TEXT NOT NULL DEFAULT '',
+    authority_instance_code TEXT NOT NULL DEFAULT '',
+    authority_status TEXT NOT NULL DEFAULT '',
+    authority_reverted INTEGER NOT NULL DEFAULT 0,
+    original_external_id TEXT NOT NULL DEFAULT '',
+    original_grant_status TEXT NOT NULL DEFAULT '',
+    original_grant_type TEXT NOT NULL DEFAULT '',
+    original_quota_delta INTEGER NOT NULL DEFAULT 0,
+    original_monthly_quota INTEGER NOT NULL DEFAULT 0,
+    original_policy_version TEXT NOT NULL DEFAULT '',
+    original_business_code TEXT NOT NULL DEFAULT '',
+    result TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_approval_reversals_result
+    ON approval_reversals(result, created_at, event_key);
 CREATE TABLE IF NOT EXISTS controller_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     event_key TEXT NOT NULL REFERENCES lark_event_inbox(event_key) ON DELETE CASCADE,
@@ -429,6 +453,9 @@ WHERE processing_state = 'processing'
 	if err := s.ensureApprovalDecisionColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureInboxColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensurePolicyVersionColumns(ctx); err != nil {
 		return err
 	}
@@ -467,6 +494,111 @@ func (s *Store) ensureApprovalDecisionColumns(ctx context.Context) error {
 		}
 		if _, err := s.database.ExecContext(ctx, column.ddl); err != nil {
 			return fmt.Errorf("add approval decision column %q: %w", column.name, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureInboxColumns(ctx context.Context) error {
+	columns, err := s.tableColumns(ctx, "lark_event_inbox")
+	if err != nil {
+		return err
+	}
+	tx, err := s.database.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin inbox column migration: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, exists := columns["reverted_instance_code"]; !exists {
+		if _, err := tx.ExecContext(
+			ctx,
+			"ALTER TABLE lark_event_inbox ADD COLUMN reverted_instance_code TEXT NOT NULL DEFAULT ''",
+		); err != nil {
+			return fmt.Errorf("add inbox column %q: %w", "reverted_instance_code", err)
+		}
+	}
+	if err := backfillLegacyRevertedInstanceCodes(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit inbox column migration: %w", err)
+	}
+	return nil
+}
+
+type legacyReversalIdentity struct {
+	event              Event
+	revertedInstanceID string
+}
+
+func backfillLegacyRevertedInstanceCodes(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+SELECT event_key, schema_version, event_id, event_type, app_id, tenant_key,
+       approval_code, instance_code, event_status, payload_json
+FROM lark_event_inbox
+WHERE event_status = 'REVERTED' AND reverted_instance_code = ''`)
+	if err != nil {
+		return fmt.Errorf("query legacy approval reversals: %w", err)
+	}
+	backfills := make([]legacyReversalIdentity, 0)
+	for rows.Next() {
+		var identity legacyReversalIdentity
+		if err := rows.Scan(
+			&identity.event.Key,
+			&identity.event.SchemaVersion,
+			&identity.event.EventID,
+			&identity.event.EventType,
+			&identity.event.AppID,
+			&identity.event.TenantKey,
+			&identity.event.ApprovalCode,
+			&identity.event.InstanceCode,
+			&identity.event.Status,
+			&identity.event.PayloadJSON,
+		); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("scan legacy approval reversal: %w", err)
+		}
+		var payload struct {
+			RevertedInstanceCode string `json:"reverted_instance_code"`
+		}
+		if err := json.Unmarshal([]byte(identity.event.PayloadJSON), &payload); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("decode legacy approval reversal %q: %w", identity.event.Key, err)
+		}
+		if payload.RevertedInstanceCode == "" {
+			continue
+		}
+		identity.revertedInstanceID = payload.RevertedInstanceCode
+		identity.event.RevertedInstanceCode = payload.RevertedInstanceCode
+		backfills = append(backfills, identity)
+	}
+	if err := closeRows(rows, "legacy approval reversals"); err != nil {
+		return err
+	}
+	for _, backfill := range backfills {
+		payloadHash, err := hashEvent(backfill.event)
+		if err != nil {
+			return fmt.Errorf("hash legacy approval reversal %q: %w", backfill.event.Key, err)
+		}
+		result, err := tx.ExecContext(ctx, `
+UPDATE lark_event_inbox
+SET reverted_instance_code = ?, payload_hash = ?
+WHERE event_key = ? AND reverted_instance_code = ''`,
+			backfill.revertedInstanceID,
+			payloadHash,
+			backfill.event.Key,
+		)
+		if err != nil {
+			return fmt.Errorf("backfill legacy approval reversal %q: %w", backfill.event.Key, err)
+		}
+		affected, err := result.RowsAffected()
+		if err != nil || affected != 1 {
+			return fmt.Errorf(
+				"backfill legacy approval reversal %q affected %d rows: %w",
+				backfill.event.Key,
+				affected,
+				err,
+			)
 		}
 	}
 	return nil
@@ -573,6 +705,8 @@ WHERE outcome = ? AND event_key IN (
 func (s *Store) tableColumns(ctx context.Context, table string) (map[string]struct{}, error) {
 	var query string
 	switch table {
+	case "lark_event_inbox":
+		query = "PRAGMA table_info(lark_event_inbox)"
 	case "approval_instances":
 		query = "PRAGMA table_info(approval_instances)"
 	case "policy_versions":
@@ -624,9 +758,10 @@ func (s *Store) Record(ctx context.Context, event Event) (bool, error) {
 	const insertEvent = `
 INSERT INTO lark_event_inbox (
     event_key, schema_version, event_id, event_type, app_id, tenant_key,
-    approval_code, instance_code, event_status, payload_json, payload_hash,
-    processing_state, duplicate_count, received_at, last_seen_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+    approval_code, instance_code, reverted_instance_code, event_status,
+    payload_json, payload_hash, processing_state, duplicate_count,
+    received_at, last_seen_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
 ON CONFLICT(event_key) DO NOTHING`
 	tx, err := s.database.BeginTx(ctx, nil)
 	if err != nil {
@@ -640,7 +775,8 @@ ON CONFLICT(event_key) DO NOTHING`
 	result, err := tx.ExecContext(ctx, insertEvent,
 		event.Key, event.SchemaVersion, event.EventID, event.EventType,
 		event.AppID, event.TenantKey, event.ApprovalCode, event.InstanceCode,
-		event.Status, event.PayloadJSON, payloadHash, initialState, now, now,
+		event.RevertedInstanceCode, event.Status, event.PayloadJSON, payloadHash,
+		initialState, now, now,
 	)
 	if err != nil {
 		return false, fmt.Errorf("record inbox event: %w", err)
@@ -710,6 +846,7 @@ func hashEvent(event Event) (string, error) {
 		TenantKey            string `json:"tenant_key"`
 		ApprovalCode         string `json:"approval_code"`
 		InstanceCode         string `json:"instance_code"`
+		RevertedInstanceCode string `json:"reverted_instance_code,omitempty"`
 		Status               string `json:"status"`
 		PayloadJSON          string `json:"payload_json"`
 		DisableExternalID    string `json:"disable_external_id"`
@@ -719,7 +856,8 @@ func hashEvent(event Event) (string, error) {
 		SchemaVersion: event.SchemaVersion, EventID: event.EventID,
 		EventType: event.EventType, AppID: event.AppID, TenantKey: event.TenantKey,
 		ApprovalCode: event.ApprovalCode, InstanceCode: event.InstanceCode,
-		Status: event.Status, PayloadJSON: event.PayloadJSON,
+		RevertedInstanceCode: event.RevertedInstanceCode,
+		Status:               event.Status, PayloadJSON: event.PayloadJSON,
 		DisableExternalID: disableExternalID, DisableRequestSHA256: disableRequestSHA256,
 		DisableSubjectSHA256: disableSubjectSHA256,
 	})
@@ -736,7 +874,7 @@ func (s *Store) Get(ctx context.Context, key string) (Event, error) {
 	}
 	const query = `
 SELECT event_key, schema_version, event_id, event_type, app_id, tenant_key,
-       approval_code, instance_code, event_status, payload_json,
+       approval_code, instance_code, reverted_instance_code, event_status, payload_json,
        processing_state, duplicate_count, received_at, last_seen_at
 FROM lark_event_inbox WHERE event_key = ?`
 	var event Event
@@ -745,7 +883,7 @@ FROM lark_event_inbox WHERE event_key = ?`
 	err := s.database.QueryRowContext(ctx, query, key).Scan(
 		&event.Key, &event.SchemaVersion, &event.EventID, &event.EventType,
 		&event.AppID, &event.TenantKey, &event.ApprovalCode, &event.InstanceCode,
-		&event.Status, &event.PayloadJSON, &event.ProcessingState,
+		&event.RevertedInstanceCode, &event.Status, &event.PayloadJSON, &event.ProcessingState,
 		&event.DuplicateCount, &receivedAt, &lastSeenAt,
 	)
 	if err != nil {
@@ -776,7 +914,7 @@ func (s *Store) ClaimNext(ctx context.Context) (Job, bool, error) {
 	const query = `
 SELECT j.id, j.attempts, i.event_key, i.schema_version, i.event_id, i.event_type,
        i.app_id, i.tenant_key, i.approval_code, i.instance_code,
-       i.event_status, i.payload_json, i.processing_state,
+       i.reverted_instance_code, i.event_status, i.payload_json, i.processing_state,
        i.duplicate_count, i.received_at, i.last_seen_at
 FROM jobs j
 JOIN lark_event_inbox i ON i.event_key = j.event_key
@@ -789,7 +927,7 @@ LIMIT 1`
 	err = tx.QueryRowContext(ctx, query, jobStatusPending, jobStatusRetryWait, now).Scan(
 		&job.ID, &job.Attempts, &job.Event.Key, &job.Event.SchemaVersion, &job.Event.EventID,
 		&job.Event.EventType, &job.Event.AppID, &job.Event.TenantKey,
-		&job.Event.ApprovalCode, &job.Event.InstanceCode, &job.Event.Status,
+		&job.Event.ApprovalCode, &job.Event.InstanceCode, &job.Event.RevertedInstanceCode, &job.Event.Status,
 		&job.Event.PayloadJSON, &job.Event.ProcessingState, &job.Event.DuplicateCount,
 		&receivedAt, &lastSeenAt,
 	)
@@ -841,6 +979,28 @@ func (s *Store) CompleteDecision(ctx context.Context, job Job, decision Decision
 	if err != nil {
 		return err
 	}
+	var reversal *ApprovalReversal
+	if decision.ApprovalReversal != nil {
+		if decision.Outcome != DecisionOutcomeReversalPending ||
+			decision.EntitlementCommand != nil || decision.EntitlementGrantJob != nil {
+			return errors.New("invalid approval reversal decision")
+		}
+		resolved, resolveErr := prepareApprovalReversal(
+			ctx,
+			tx,
+			job.Event,
+			decision,
+			*decision.ApprovalReversal,
+			createdAt,
+		)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		reversal = &resolved
+		decision.FailureReason = string(resolved.Reason)
+	} else if decision.Outcome == DecisionOutcomeReversalPending {
+		return errors.New("reversal pending decision requires approval reversal")
+	}
 	const insertDecision = `
 INSERT INTO approval_instances (
     event_key, approval_code, instance_code, event_status, authority_status,
@@ -860,8 +1020,16 @@ INSERT INTO approval_instances (
 	); err != nil {
 		return fmt.Errorf("store approval decision: %w", err)
 	}
+	if reversal != nil {
+		if err := insertApprovalReversal(ctx, tx, *reversal, createdAt); err != nil {
+			return err
+		}
+	}
 	commandOutcome := ""
 	if decision.EntitlementCommand != nil {
+		if err := rejectEntitlementCommandAfterReversal(ctx, tx, job.Event, decision); err != nil {
+			return err
+		}
 		commandOutcome, err = insertEntitlementCommandShadow(
 			ctx,
 			tx,
@@ -872,6 +1040,14 @@ INSERT INTO approval_instances (
 		)
 		if err != nil {
 			return err
+		}
+	}
+	if reversal != nil {
+		if _, err := tx.ExecContext(ctx,
+			"INSERT INTO controller_audit (event_key, action, outcome, created_at) VALUES (?, 'approval_reversal', ?, ?)",
+			decision.EventKey, reversal.Result, createdAt,
+		); err != nil {
+			return fmt.Errorf("store approval reversal audit: %w", err)
 		}
 	}
 	if decision.EntitlementGrantJob != nil {
@@ -905,6 +1081,13 @@ INSERT INTO approval_instances (
 	} else if decision.Outcome == DecisionOutcomeDeadLetterApprovalFetch {
 		fetchResult = "terminal_error"
 		if strings.HasPrefix(decision.FailureReason, "retry_exhausted_") {
+			fetchResult = "retryable_error"
+		}
+	} else if reversal != nil {
+		switch reversal.Result {
+		case ApprovalReversalResultFetchTerminalError:
+			fetchResult = "terminal_error"
+		case ApprovalReversalResultFetchRetryExhausted:
 			fetchResult = "retryable_error"
 		}
 	}

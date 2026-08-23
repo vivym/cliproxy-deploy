@@ -109,6 +109,12 @@ func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 			"approval": 2, "entitlement_grant": 1, "unexpected": 4,
 		},
 		ApprovalFetches: map[string]int64{"success": 4, "retryable_error": 2},
+		ApprovalReversals: map[string]int64{
+			"grant_fenced": 2, "authority_mismatch": 1, "unexpected": 3,
+		},
+		ApprovalReversalPending: map[string]int64{
+			"manual_review_required": 2, "original_missing": 1, "unexpected": 3,
+		},
 		NewAPIGrants: map[string]int64{
 			"shadow_planned": 3, "shadow_replayed": 1, "applied": 5, "unexpected": 2,
 		},
@@ -156,6 +162,12 @@ func TestMetricsExposeBoundedOperationalLabelsAndQueueAge(t *testing.T) {
 		`lark_controller_processing_recovered_total{queue="entitlement_grant"} 1`,
 		`lark_controller_processing_recovered_total{queue="other"} 4`,
 		`lark_approval_fetch_total{result="retryable_error"} 2`,
+		`lark_approval_reversal_total{result="authority_mismatch"} 1`,
+		`lark_approval_reversal_total{result="grant_fenced"} 2`,
+		`lark_approval_reversal_total{result="other"} 3`,
+		`lark_approval_reversal_pending{reason="manual_review_required"} 2`,
+		`lark_approval_reversal_pending{reason="original_missing"} 1`,
+		`lark_approval_reversal_pending{reason="other"} 3`,
 		`lark_new_api_grant_total{result="applied"} 5`,
 		`lark_new_api_grant_total{result="shadow_planned"} 3`,
 		`lark_new_api_grant_total{result="shadow_replayed"} 1`,

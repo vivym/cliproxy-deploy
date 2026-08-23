@@ -7,12 +7,52 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/larkapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/worker"
 )
+
+func TestApprovalFetcherParsesSanitizedRevertedInstanceFixture(t *testing.T) {
+	fixture, err := os.ReadFile(filepath.Join("..", "..", "testdata", "lark", "approval_instance_reverted.json"))
+	if err != nil {
+		t.Fatalf("read approval instance fixture: %v", err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			writeTestJSON(t, response, map[string]any{
+				"code": 0, "msg": "ok", "tenant_access_token": "tenant-token", "expire": 7200,
+			})
+		case "/open-apis/approval/v4/instances/instance-original-v2":
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write(fixture)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+
+	fetcher, err := larkapi.NewApprovalFetcher(larkapi.Config{
+		AppID: "cli_fixture", AppSecret: "app-secret", BaseURL: server.URL,
+	})
+	if err != nil {
+		t.Fatalf("new approval fetcher: %v", err)
+	}
+	instance, err := fetcher.Fetch(context.Background(), "instance-original-v2", "zh-CN")
+	if err != nil {
+		t.Fatalf("fetch reverted approval instance: %v", err)
+	}
+	if instance.ApprovalCode != "approval-wallet-v1" ||
+		instance.InstanceCode != "instance-original-v2" ||
+		instance.Status != "APPROVED" || !instance.Reverted ||
+		instance.OpenID != "ou_sanitized_requester" || instance.FormJSON == "" {
+		t.Fatalf("unexpected reverted approval instance: %+v", instance)
+	}
+}
 
 func TestApprovalFetcherUsesTenantTokenAndFixedLocale(t *testing.T) {
 	var tokenRequests int

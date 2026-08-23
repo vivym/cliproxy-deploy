@@ -22,8 +22,8 @@ The controller supports a locally verified `shadow` mode and an explicit
 - validates the configured Verification Token, application ID, and tenant key;
 - durably deduplicates v1 `uuid` and v2 `event_id` values in single-replica
   SQLite WAL storage;
-- fetches authoritative Approval v4 instances for `APPROVED` and
-  `OVERTIME_RECOVER` events;
+- fetches authoritative Approval v4 instances for `APPROVED`,
+  `OVERTIME_RECOVER`, and `REVERTED` events;
 - loads immutable historical policy catalogs and approval definition manifests
   from operator-mounted strict JSON files;
 - resolves `radioV2` values by exact display text and persists only sanitized
@@ -36,6 +36,15 @@ The controller supports a locally verified `shadow` mode and an explicit
   rotation;
 - records same-payload external-ID reuse as `shadow_replayed` and dead-letters
   payload mismatches without replacing the first shadow ledger entry;
+- resolves a `REVERTED` event only by its explicit `reverted_instance_code`, or
+  by the event's exact `instance_code` when the explicit relation is absent;
+  exact approval/instance matching and authoritative `reverted=true` are
+  required before a validated original command can be resolved;
+- records sanitized reversal evidence and stable results in
+  `approval_reversals`, atomically moves an original `held_shadow`, `pending`,
+  `processing`, or `retry_wait` grant job to `reversal_pending`, and uses the
+  existing status/attempt fence to reject a late worker completion; it never
+  subtracts wallet quota or downgrades a subscription automatically;
 - persists 256-bit OAuth state, login-code, and access-handle credentials only
   by SHA-256 digest, with atomic single-use consumption and fixed five-minute
   or 60-second expiry windows; consumption atomically deletes the row, while
@@ -73,7 +82,8 @@ The controller supports a locally verified `shadow` mode and an explicit
   forwarded client addresses are used only when the immediate peer belongs to
   an explicitly configured trusted proxy CIDR;
 - classifies Approval v4 failures, honors bounded `Retry-After`, and applies a
-  six-step jittered retry schedule before durable dead-lettering;
+  six-step jittered retry schedule before durable dead-lettering for approval
+  grants or manual `reversal_pending` resolution for reversals;
 - recovers interrupted jobs with their attempt counters after restart, and
   periodically requeues claims that remain `processing` beyond a bounded lease;
   the attempt counter fences late approval completions and all New API writes
@@ -84,9 +94,9 @@ The controller supports a locally verified `shadow` mode and an explicit
   persists sanitized results, and applies the documented retry/dead-letter
   matrices;
 - exposes liveness, readiness, and bounded-label Prometheus metrics for inbox,
-  jobs, approval fetches, New API shadow grants, held grant jobs, policy
-  failures, principal disable jobs, processing recovery, dead letters, and
-  queue age;
+  jobs, approval fetches, approval reversals, New API shadow grants, held grant
+  jobs, policy failures, principal disable jobs, processing recovery, dead
+  letters, and queue age;
 - keeps queryable columns limited to normalized event data, hashes, decisions,
   stable failure reasons, and sanitized New API receipts; the complete grant
   request exists only as authenticated ciphertext; and
@@ -207,6 +217,9 @@ Approval fetches retry after `5s, 15s, 1m, 5m, 15m, 1h`, with deterministic
 business code `99991400`, request timeouts, and transport failures are
 retryable; other `4xx`, token rejection, malformed success responses, and
 unclassified failures are terminal. Only stable failure reasons are persisted.
+For `REVERTED`, transient failures use the same retry schedule, but terminal or
+exhausted fetch failures remain `reversal_pending` with bounded reasons instead
+of entering the ordinary approval dead-letter queue.
 
 The active grant executor uses `5s, 15s, 1m, 5m, 15m, 1h` for retryable New API
 transport, timeout, and `temporarily_unavailable` failures. Once that
@@ -247,6 +260,28 @@ runtime startup/release gate reject any nonterminal base job from a non-active
 policy, including an already released or restart-recovered job; a policy switch
 cannot proceed until the documented drain or explicit migration is complete.
 `held_shadow` jobs remain excluded from ready-queue age.
+
+Approval reversal processing is event-driven in this slice. The controller
+persists only normalized codes, authoritative status/reverted evidence, the
+resolved external ID, original grant metadata, and bounded result/reason
+values. Multiple validated source events are accepted when they resolve to one
+distinct external ID; zero or multiple IDs stay pending for manual review.
+Legacy `shadow_authority_verified_legacy_unresolved` decisions never qualify.
+An already-applied wallet grant or subscription upgrade also stays pending for
+an operator because New API may have committed before the controller fenced its
+local job. On startup, legacy inbox rows are migrated transactionally: a
+non-empty `reverted_instance_code` retained in normalized `payload_json` is
+backfilled into its indexed column and the durable event hash is recomputed, so
+an already-pending reversal and a legitimate redelivery keep the same explicit
+target.
+
+Outstanding manual work is exposed as
+`lark_approval_reversal_pending{reason}`. The checked-in
+`monitoring/lark-controller-alerts.yml` rule turns any durable pending reversal
+into `LarkApprovalReversalPending`; the deployment must load that rule and route
+the alert through Alertmanager to an operator destination. The rule and metric
+are implemented locally, but production Prometheus/Alertmanager wiring has not
+been performed.
 
 Principal-disable jobs use an independent durable ledger and audit table. A
 real-time contact event binds its optional inbox event key, while the job model
@@ -333,7 +368,8 @@ Active grant and real-time principal-disable execution, the durable opaque
 OAuth credential store, the outbound Lark token/userinfo adapter, and the
 public OAuth authorize/callback handlers, internal token/userinfo handlers,
 and idempotent base-subscription dispatch are implemented locally. Employment
-reconciliation and runtime stale-claim recovery are also implemented locally.
-Full approval/reversal reconciliation, Compose wiring, operational runbooks,
-and production validation remain follow-up work. Do not enable active mode in
-production before those gates are complete.
+reconciliation, runtime stale-claim recovery, and event-driven approval
+reversal fencing are also implemented locally. Periodic approval
+reconciliation, operator correction workflows, Compose wiring, operational
+runbooks, and production validation remain follow-up work. Do not enable active
+mode in production before those gates are complete.
