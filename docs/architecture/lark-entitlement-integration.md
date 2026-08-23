@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏、周期性 approval reconciliation 和管理员一次性纠正流程；WP4 已完成本地 Compose/profile/network/volume/least-privilege secret/verify 基础接入，并用独立 `lark-ops` target 隔离 correction credential，但镜像 digest、quiesce backup/restore、全相邻网络探测和生产配置仍未完成；WP5 未实施，未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏、周期性 approval reconciliation 和管理员一次性纠正流程；WP4 已完成本地 Compose/profile/network/volume/least-privilege secret/verify 基础接入、correction credential 隔离和 offline quiesce backup/restore 同包合同，但镜像 digest、全相邻网络探测、真实租户配置和生产恢复演练仍未完成；WP5 未实施，未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1363,7 +1363,7 @@ Lark 的审批订阅接口目前要求 `approval:approval` 或 `approval:definit
 
 ## 当前本地部署拓扑（尚未生产验收）
 
-当前根 Compose 已在 `lark` profile 中本地接入 `lark-quota-controller`、`:3001` integration listener、`lark-integration` network、policy mount、Controller volume 和按 consumer 隔离的 file-backed secrets，并提供 current/next integration credential window。基础 New API 与常驻 Controller 均不挂 correction credential；`lark-ops` profile 使用独立 correction image target 和临时、无 edge/Traefik/host-port 的 New API endpoint。`--list-pending` 走无网络、无 secret、Controller SQLite 只读挂载的独立 service，不启动 New API endpoint。write-path host runner 用 Docker service state（不依赖健康探针）排除正在运行的常驻服务，在整个临时 endpoint/CLI 生命周期持有共享 maintenance lock，并在加锁后重新检查；只有确认命名 one-shot CLI 与 endpoint container 均已删除才释放 lock，无法确认时保留 lock 并失败。基础 New API/Controller 与临时写服务因此互斥。该接入只完成本地渲染、镜像构建和测试，尚未发布不可变 image digest、配置真实 tenant 或完成生产网络/backup barrier 验收。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
+当前根 Compose 已在 `lark` profile 中本地接入 `lark-quota-controller`、`:3001` integration listener、`lark-integration` network、policy mount、Controller volume 和按 consumer 隔离的 file-backed secrets，并提供 current/next integration credential window。基础 New API 与常驻 Controller 均不挂 correction credential；`lark-ops` profile 使用独立 correction image target 和临时、无 edge/Traefik/host-port 的 New API endpoint。`--list-pending` 走无网络、无 secret、Controller SQLite 只读挂载的独立 service，不启动 New API endpoint。backup、restore 和 correction runner 共用 host-only `maintenance.session` mutex 与带 `backup/restore/correction/readonly` mode 的容器启动 lock；任意 lock mode 都阻止常驻 New API/Controller 启动，临时写服务只接受 `correction`。readonly runner 使用固定名 one-off container，强删并精确验空后才释放边界。restore 在受控启动前释放容器 lock，但直到 readiness 结束始终持有 session，因而其他 host runner 不能抢占；handoff 内任何非零退出都会重建 restore lock 并停掉部分启动的 writer。无法确认临时 snapshot/restore/correction container 已清理时同时保留 session/lock 并失败。该接入只完成本地渲染、镜像构建和测试，尚未发布不可变 image digest、配置真实 tenant 或完成生产网络和恢复演练。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
 
 网络：
 
@@ -1456,15 +1456,15 @@ New API production debug 必须保持关闭。
 
 ## 备份与恢复
 
-现有 New API Postgres 备份会包含 fork 新增的 principal、policy、grant、assignment 和 outbox 表，但 Controller SQLite 是另一个事务域。把两个文件放进同一压缩包不等于一致截点；备份脚本必须建立显式 quiesce barrier：
+现有 New API Postgres 备份会包含 fork 新增的 principal、policy、grant、assignment 和 outbox 表，但 Controller SQLite 是另一个事务域。把两个文件放进同一压缩包不等于一致截点。当前本地实现选择明确停机的 offline quiesce barrier，不声称无停机或 SQLite online backup：
 
-1. Controller 进入 maintenance，OAuth callback 和 webhook readiness 关闭，使 Lark 重试而不是丢事件；暂停所有 worker 和每日 reconciliation。
-2. New API integration listener 拒绝新 command，等待 Controller -> New API 的在途请求、PostgreSQL 事务和 outbox producer 全部 drain，并记录 barrier ID、最后 event key 和最后 external ID。
-3. 在 barrier 保持期间，以固定顺序先执行 SQLite `wal_checkpoint` 并使用 online backup API 生成单文件一致快照，再执行 Postgres transaction-consistent dump/snapshot。若任一步失败，整组备份作废。
-4. 将两份快照、schema/migration version、policy bundle hash、barrier receipt、时间戳和校验和放入同一 backup package。
-5. 完成校验后解除 barrier；HTTP 收件和 worker 按先 inbox、后处理的顺序恢复。
+1. backup runner 先原子取得 host-only `maintenance.session`，再取得 `maintenance.lock/mode=backup`。session 排斥其他 host runner；lock 存在时常驻 New API/Controller entrypoint 一律拒绝启动，correction 写服务因 mode 不匹配也拒绝启动。
+2. runner 记录原运行集合，按 Traefik、Controller、New API、Sub2API 顺序停止入口和全部应用 writer。已经停止的服务保持停止；Controller webhook 连接失败由 Lark 重试。此后没有 Controller -> New API 在途命令、Postgres producer 或 Redis writer。
+3. Lark enabled 配置必须与 `new-api-lark-controller-data` 同时存在，并要求完整 `approval-bindings.json` 与至少一个 versioned policy；disabled 配置必须没有 Controller volume。前者在 writer 停止后把整个 volume（`controller.sqlite` 以及存在时的 WAL/SHM）归档，后者写显式 absent marker。
+4. barrier 保持期间，再依次生成两个 Postgres custom dump、两个 Redis 持久化副本和 deployment runtime/policy 归档。任一步失败都不发布最终包。
+5. `backup-manifest.json` 保存 format version、package ID、barrier ID、UTC 时间、原先停止的服务集合、Lark enabled/absent receipt，以及所有 payload 的 size/SHA-256；`SHA256SUMS` 必须精确覆盖 manifest 和全部 payload。只有确认命名 snapshot container 不存在后才发布 `.tgz`、解除锁并逆序恢复原运行集合。长期 Lark secret 不进入包。
 
-恢复时先保持所有 public/integration worker 关闭，校验 package hash 和 schema compatibility，再恢复 Postgres、恢复同包 SQLite、启动 New API 内部 listener，最后以 shadow/reconciliation 模式启动 Controller。不能把不同 package 的 Postgres 与 SQLite 混合恢复。
+恢复先在临时目录验证外层和 Controller 内层 archive path/type、根目录唯一 regular `controller.sqlite`、checksum 完整覆盖、manifest inventory/digest、listener/Controller/policy 配对和 Compose render；这些步骤不改变部署。随后取得 session 与 `mode=restore` lock 并执行 `compose down`。enabled 包删除旧 Controller volume、恢复同包 volume 与 policy，强制 `LARK_CONTROLLER_MODE=shadow`、`LARK_OAUTH_PUBLIC_ENABLED=false`；absent 或兼容的 pre-v2 disabled 包删除旧 Controller volume 和旧 policy，保留 host secrets/ops。Postgres/Redis 和 runtime 全部恢复完成并确认 restore container 不存在后，释放容器 lock、在 session 保护下启动服务；readiness 失败则重建 restore lock、再次停止并核实 writer。`restore-new-api.sh` 同时拒绝 enabled/Lark-artifact 源包和 listener、Controller/correction、Controller volume 任一存在的目标，不能把不同 package 的 Postgres 与 SQLite 混合恢复。破坏性阶段失败会保留 session、restore lock 和停机状态；确认恢复前不得人工删锁。
 
 恢复后必须执行 reconciliation：
 
@@ -1871,7 +1871,7 @@ job 年龄，未来的 `retry_wait` 不会被误判为卡死。
 - [x] 增加显式命名为 `new-api-lark-integration` 的 `lark-integration` network、分离的 events/OAuth Traefik exact-path router 和 Controller volume。
 - [ ] 发布并固定 New API fork 和 Controller image digest；当前模板只提供 repository/tag 输入和本地 Controller build。
 - [x] 扩展 `.env.example` 和按 `shared/controller/new-api` consumer 隔离的 file-backed secret mount，但不提交任何 secret；Controller/correction image target 已分离，integration current/next rotation window 与 correction 三方独立性检查已接入。
-- [ ] 扩展带 quiesce barrier、receipt 和同包校验的 backup、restore 脚本；当前脚本同时检查 `.env`、运行容器 effective listener 和残留 Controller volume，明确拒绝生成或恢复不含 Controller SQLite 的伪完整包。
+- [x] 扩展带 offline quiesce barrier、v2 manifest/receipt、精确 checksum coverage 和 Lark enabled/absent 同包校验的 backup/restore 脚本；restore 强制 shadow/OAuth-off，New API-only restore 拒绝拆分 enabled 包。生产恢复与 reconciliation 演练仍待执行。
 - [x] 本地 verify 已检查公网 integration path 为 `404`、New API 容器内无凭证访问 `:3001` 为 `401`、Controller `readyz` 和 OAuth 灰度门禁。
 - [ ] 在获准的生产维护窗口从 `edge`、`new-api-data` 和 `lark-integration` 各自独立 probe，完成公网与所有相邻网络验收。
 - [x] 增加 Compose 灰度、secret/policy/rotation 配置、host-side correction maintenance lock 和回滚 runbook；Lark 后台实租户配置、dead-letter 和 reversal 演练仍待执行。

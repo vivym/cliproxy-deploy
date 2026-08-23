@@ -80,11 +80,20 @@ Obtain separate production authorization before running these commands. The
 temporary endpoint is deliberately not on `edge`, has no Traefik labels or host
 port, and is started only by the host-side runner. The runner rejects a running
 primary New API or Controller by Docker service state, independent of health
-status, then holds an atomic
-`lark-runtime/ops/maintenance.lock`; both regular services refuse startup while
-it exists, and both temporary services refuse startup without it. Stop both services first so two New API processes do not
+status, then holds a host-only `lark-runtime/ops/maintenance.session` mutex and
+`maintenance.lock` with `mode=correction`; `--list-pending` uses the same mutex
+with `mode=readonly` and fixed container name
+`new-api-lark-correction-readonly-ops`. Both regular
+services refuse startup for any lock mode, while both temporary write services
+accept only `correction` and reject `backup`, `restore`, or `readonly`. Stop both services first so two New API processes do not
 run background work against the same Postgres/Redis state and the CLI does not
 write Controller SQLite beside its worker:
+
+The lock directory is `0755` and its non-secret mode marker is `0644`, so the
+UID `10001` containers can read it through the read-only bind mount. Ownership
+of the directory remains with the host runner; containers cannot change it.
+The runner force-removes and exactly queries either named correction container
+before unlocking; uncertain cleanup retains both the lock and session.
 
 ```bash
 umask 077
@@ -247,13 +256,14 @@ order:
 
 ```bash
 test ! -e lark-runtime/ops/maintenance.lock
+test ! -e lark-runtime/ops/maintenance.session
 docker compose --profile lark-ops ps
 docker compose up -d new-api
 docker compose --profile lark up -d lark-quota-controller
 scripts/verify-deployment.sh
 ```
 
-Confirm no `lark-ops` container or maintenance lock remains, then complete credential rotation or
+Confirm no `lark-ops` container, maintenance lock, or maintenance session remains, then complete credential rotation or
 revocation and remove the short-lived host file according to the change ticket.
 If the remote commit outcome is uncertain, preserve the original command and
 attempt record and follow the exact-replay recovery rules before closing the

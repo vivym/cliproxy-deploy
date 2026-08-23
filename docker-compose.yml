@@ -214,7 +214,7 @@ services:
     command:
       - |
         if [ -e /run/lark-ops/maintenance.lock ]; then
-          echo "refusing to start New API while Lark correction maintenance is active" >&2
+          echo "refusing to start New API while deployment maintenance is active" >&2
           exit 1
         fi
         exec /new-api
@@ -270,7 +270,7 @@ services:
     command:
       - |
         if [ -e /run/lark-ops/maintenance.lock ]; then
-          echo "refusing to start Lark Controller while correction maintenance is active" >&2
+          echo "refusing to start Lark Controller while deployment maintenance is active" >&2
           exit 1
         fi
         exec /usr/local/bin/lark-controller
@@ -355,8 +355,8 @@ services:
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        if [ ! -e /run/lark-ops/maintenance.lock ]; then
-          echo "refusing to start without the host-side Lark correction maintenance lock" >&2
+        if [ "$(cat /run/lark-ops/maintenance.lock/mode 2>/dev/null || true)" != "correction" ]; then
+          echo "refusing to start without the host-side Lark correction maintenance lock in correction mode" >&2
           exit 1
         fi
         exec /new-api
@@ -423,8 +423,8 @@ services:
       - /bin/sh
       - -ec
       - |
-        if [ ! -e /run/lark-ops/maintenance.lock ]; then
-          echo "refusing to run without the host-side Lark correction maintenance lock" >&2
+        if [ "$(cat /run/lark-ops/maintenance.lock/mode 2>/dev/null || true)" != "correction" ]; then
+          echo "refusing to run without the host-side Lark correction maintenance lock in correction mode" >&2
           exit 1
         fi
         exec /usr/local/bin/lark-correction "$@"

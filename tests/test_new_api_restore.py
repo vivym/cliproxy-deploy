@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "docker-compose.yml"
 RESTORE_SCRIPT = ROOT / "scripts" / "restore-new-api.sh"
 DOTENV_READER = ROOT / "scripts" / "read-dotenv.py"
+MANIFEST_TOOL = ROOT / "scripts" / "deployment-backup-manifest.py"
 ENV_EXAMPLE = ROOT / ".env.example"
 
 
@@ -23,6 +24,9 @@ class NewApiRestoreTests(unittest.TestCase):
         restore_script.chmod(0o755)
         (scripts / "read-dotenv.py").write_text(
             DOTENV_READER.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        (scripts / "deployment-backup-manifest.py").write_text(
+            MANIFEST_TOOL.read_text(encoding="utf-8"), encoding="utf-8"
         )
         return restore_script
 
@@ -266,6 +270,333 @@ exit 99
             self.assertIn("SHA256SUMS", result.stderr)
             self.assertFalse(docker_marker.exists())
 
+    def test_new_api_only_restore_rejects_lark_enabled_full_package(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+            (root / ".env").write_text("placeholder=true\n", encoding="utf-8")
+            backup_src = root / "backup-src"
+            backup_src.mkdir()
+            runtime_src = root / "runtime-src"
+            runtime_src.mkdir()
+            (runtime_src / ".env").write_text(
+                "NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001\n",
+                encoding="utf-8",
+            )
+            subprocess.run(
+                ["tar", "-czf", str(backup_src / "deployment-runtime.tgz"), "."],
+                cwd=runtime_src,
+                check=True,
+            )
+            for name in ["sub2api-postgres.dump", "new-api-postgres.dump"]:
+                (backup_src / name).write_text("postgres\n", encoding="utf-8")
+            for name in ["sub2api-redis-data", "new-api-redis-data"]:
+                directory = backup_src / name
+                directory.mkdir()
+                (directory / "dump.rdb").write_text("redis\n", encoding="utf-8")
+            controller_src = root / "controller-src"
+            controller_src.mkdir()
+            (controller_src / "controller.sqlite").write_text(
+                "sqlite\n", encoding="utf-8"
+            )
+            subprocess.run(
+                [
+                    "tar",
+                    "-czf",
+                    str(backup_src / "lark-controller-data.tgz"),
+                    ".",
+                ],
+                cwd=controller_src,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    "python3",
+                    str(MANIFEST_TOOL),
+                    "create",
+                    "--root",
+                    str(backup_src),
+                    "--created-at",
+                    "2026-08-23T00:00:00Z",
+                    "--lark-state",
+                    "enabled",
+                ],
+                check=True,
+            )
+            package = root / "backup.tgz"
+            self.write_backup_package(backup_src, package)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker_marker = root / "docker-called"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"#!/usr/bin/env bash\ntouch {docker_marker}\nexit 99\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("full restore", result.stderr)
+            self.assertFalse(docker_marker.exists())
+
+            (backup_src / "backup-manifest.json").unlink()
+            (backup_src / "SHA256SUMS").unlink()
+            package_without_manifest = root / "backup-without-manifest.tgz"
+            self.write_backup_package(backup_src, package_without_manifest)
+            result = subprocess.run(
+                [str(restore_script), str(package_without_manifest), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("requires backup-manifest.json", result.stderr)
+            self.assertFalse(docker_marker.exists())
+
+    def test_new_api_only_restore_rejects_lark_enabled_target_before_docker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+            (root / ".env").write_text(
+                "NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001\n",
+                encoding="utf-8",
+            )
+            backup_src = root / "backup-src"
+            backup_src.mkdir()
+            (backup_src / "new-api-postgres.dump").write_text(
+                "postgres dump\n", encoding="utf-8"
+            )
+            (backup_src / "new-api-redis-data").mkdir()
+            package = root / "backup.tgz"
+            self.write_backup_package(backup_src, package)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker_marker = root / "docker-called"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"#!/usr/bin/env bash\ntouch {docker_marker}\nexit 99\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("full restore", result.stderr)
+            self.assertFalse(docker_marker.exists())
+
+    def test_new_api_only_restore_rejects_existing_controller_volume_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+            (root / ".env").write_text(
+                "\n".join(
+                    [
+                        "NEW_API_HOST=ai.example.test",
+                        "NEW_API_IMAGE_TAG=v1.2.3",
+                        "NEW_API_POSTGRES_USER=new_api",
+                        "NEW_API_POSTGRES_DB=new_api",
+                        "NEW_API_POSTGRES_PASSWORD=postgres-secret",
+                        "NEW_API_REDIS_PASSWORD=redis-secret",
+                        "NEW_API_SESSION_SECRET=session-secret",
+                        "NEW_API_CRYPTO_SECRET=crypto-secret",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            backup_src = root / "backup-src"
+            backup_src.mkdir()
+            (backup_src / "new-api-postgres.dump").write_text(
+                "postgres dump\n", encoding="utf-8"
+            )
+            (backup_src / "new-api-redis-data").mkdir()
+            package = root / "backup.tgz"
+            self.write_backup_package(backup_src, package)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            mutation_marker = root / "docker-mutated"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+if [[ "$*" == "compose ps --services --filter status=running" ]]; then
+  exit 0
+fi
+if [[ "$*" == "volume inspect new-api-lark-controller-data" ]]; then
+  exit 0
+fi
+touch {mutation_marker}
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Controller state", result.stderr)
+            self.assertFalse(mutation_marker.exists())
+            self.assertFalse(
+                (root / "lark-runtime/ops/maintenance.lock").exists()
+            )
+            self.assertFalse(
+                (root / "lark-runtime/ops/maintenance.session").exists()
+            )
+
+    def test_boundary_marker_permission_failure_releases_session_and_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+            (root / ".env").write_text(
+                "\n".join(
+                    [
+                        "NEW_API_HOST=ai.example.test",
+                        "NEW_API_IMAGE_TAG=v1.2.3",
+                        "NEW_API_POSTGRES_USER=new_api",
+                        "NEW_API_POSTGRES_DB=new_api",
+                        "NEW_API_POSTGRES_PASSWORD=postgres-secret",
+                        "NEW_API_REDIS_PASSWORD=redis-secret",
+                        "NEW_API_SESSION_SECRET=session-secret",
+                        "NEW_API_CRYPTO_SECRET=crypto-secret",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            backup_src = root / "backup-src"
+            backup_src.mkdir()
+            (backup_src / "new-api-postgres.dump").write_text(
+                "postgres dump\n", encoding="utf-8"
+            )
+            (backup_src / "new-api-redis-data").mkdir()
+            package = root / "backup.tgz"
+            self.write_backup_package(backup_src, package)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            chmod = bin_dir / "chmod"
+            chmod.write_text(
+                """#!/usr/bin/env bash
+if [[ "$1" == "600" && "$2" == */maintenance.lock/mode ]]; then
+  exit 42
+fi
+exec /bin/chmod "$@"
+""",
+                encoding="utf-8",
+            )
+            chmod.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 42, result.stderr)
+            self.assertFalse((root / "lark-runtime/ops/maintenance.lock").exists())
+            self.assertFalse((root / "lark-runtime/ops/maintenance.session").exists())
+
+    def test_boundary_cleanup_failure_retains_session_with_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+            (root / ".env").write_text(
+                "\n".join(
+                    [
+                        "NEW_API_HOST=ai.example.test",
+                        "NEW_API_IMAGE_TAG=v1.2.3",
+                        "NEW_API_POSTGRES_USER=new_api",
+                        "NEW_API_POSTGRES_DB=new_api",
+                        "NEW_API_POSTGRES_PASSWORD=postgres-secret",
+                        "NEW_API_REDIS_PASSWORD=redis-secret",
+                        "NEW_API_SESSION_SECRET=session-secret",
+                        "NEW_API_CRYPTO_SECRET=crypto-secret",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            backup_src = root / "backup-src"
+            backup_src.mkdir()
+            (backup_src / "new-api-postgres.dump").write_text(
+                "postgres dump\n", encoding="utf-8"
+            )
+            (backup_src / "new-api-redis-data").mkdir()
+            package = root / "backup.tgz"
+            self.write_backup_package(backup_src, package)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+if [[ "$*" == "compose ps --services --filter status=running" ]]; then
+  touch {root / 'lark-runtime/ops/maintenance.lock/obstruction'}
+  exit 42
+fi
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Could not release deployment maintenance lock", result.stderr)
+            self.assertTrue((root / "lark-runtime/ops/maintenance.lock").is_dir())
+            self.assertTrue((root / "lark-runtime/ops/maintenance.session").is_dir())
+
     def test_restore_allows_unverified_legacy_package_only_by_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)
@@ -291,7 +622,6 @@ exit 99
                 encoding="utf-8",
             )
             docker.chmod(0o755)
-
             result = subprocess.run(
                 [str(restore_script), str(package), str(root)],
                 cwd=root,
@@ -345,6 +675,12 @@ exit 99
             docker.write_text(
                 f"""#!/usr/bin/env bash
 printf '%s\\n' "$*" >> {calls_file}
+if [[ "$*" == "compose ps --services --filter status=running" ]]; then
+  exit 0
+fi
+if [[ "$*" == "volume inspect new-api-lark-controller-data" ]]; then
+  exit 1
+fi
 if [[ "$*" == "compose stop new-api" ]]; then
   exit 42
 fi
@@ -368,6 +704,242 @@ exit 99
             calls = calls_file.read_text(encoding="utf-8")
             self.assertNotIn(" run ", calls)
             self.assertNotIn(" create ", calls)
+            lock = root / "lark-runtime" / "ops" / "maintenance.lock"
+            self.assertEqual((lock / "mode").read_text(encoding="utf-8"), "restore\n")
+            self.assertTrue(
+                (root / "lark-runtime/ops/maintenance.session").is_dir()
+            )
+
+    def test_new_api_start_failure_restores_lock_and_stops_restored_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+            (root / ".env").write_text(
+                "\n".join(
+                    [
+                        "NEW_API_HOST=ai.example.test",
+                        "NEW_API_IMAGE_TAG=v1.2.3",
+                        "NEW_API_POSTGRES_USER=new_api",
+                        "NEW_API_POSTGRES_DB=new_api",
+                        "NEW_API_POSTGRES_PASSWORD=postgres-secret",
+                        "NEW_API_REDIS_PASSWORD=redis-secret",
+                        "NEW_API_SESSION_SECRET=session-secret",
+                        "NEW_API_CRYPTO_SECRET=crypto-secret",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            backup_src = root / "backup-src"
+            backup_src.mkdir()
+            (backup_src / "new-api-postgres.dump").write_text(
+                "postgres dump\n", encoding="utf-8"
+            )
+            redis_data = backup_src / "new-api-redis-data"
+            redis_data.mkdir()
+            (redis_data / "dump.rdb").write_text("redis\n", encoding="utf-8")
+            package = root / "backup.tgz"
+            self.write_backup_package(backup_src, package)
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+case "$*" in
+  "compose ps --services --filter status=running"|\
+  "compose stop new-api"|\
+  "compose stop new-api-postgres"|\
+  "compose stop new-api-redis"|\
+  "compose create new-api-postgres"|\
+  "compose create new-api-redis"|\
+  "compose up -d new-api-postgres"|\
+  "compose up -d new-api-redis"|\
+  "compose exec -T new-api-postgres pg_isready "*)
+    ;;
+  "compose up -d --wait --wait-timeout 120 new-api")
+    echo 'new-api readiness failed' >&2
+    exit 42
+    ;;
+  "volume inspect new-api-lark-controller-data")
+    exit 1
+    ;;
+  "compose ps -aq "*)
+    printf '%s-container\\n' "${{@: -1}}"
+    ;;
+  "inspect "*)
+    case "${{@: -1}}" in
+      new-api-postgres-container) printf 'new-api-postgres-data-volume\\n' ;;
+      new-api-redis-container) printf 'new-api-redis-data-volume\\n' ;;
+    esac
+    ;;
+  "run "*)
+    ;;
+  "compose exec -T new-api-postgres pg_restore "*)
+    cat >/dev/null
+    ;;
+  *)
+    echo "unexpected docker call: $*" >&2
+    exit 99
+    ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 42, result.stderr)
+            self.assertIn("new-api readiness failed", result.stderr)
+            lock = root / "lark-runtime" / "ops" / "maintenance.lock"
+            self.assertEqual((lock / "mode").read_text(encoding="utf-8"), "restore\n")
+            self.assertTrue(
+                (root / "lark-runtime/ops/maintenance.session").is_dir()
+            )
+            calls = calls_file.read_text(encoding="utf-8").splitlines()
+            for service in ["new-api", "new-api-postgres", "new-api-redis"]:
+                self.assertEqual(calls.count(f"compose stop {service}"), 2)
+
+    def test_new_api_session_release_failure_restores_lock_and_stops_services(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+            (root / ".env").write_text(
+                "\n".join(
+                    [
+                        "NEW_API_HOST=ai.example.test",
+                        "NEW_API_IMAGE_TAG=v1.2.3",
+                        "NEW_API_POSTGRES_USER=new_api",
+                        "NEW_API_POSTGRES_DB=new_api",
+                        "NEW_API_POSTGRES_PASSWORD=postgres-secret",
+                        "NEW_API_REDIS_PASSWORD=redis-secret",
+                        "NEW_API_SESSION_SECRET=session-secret",
+                        "NEW_API_CRYPTO_SECRET=crypto-secret",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            backup_src = root / "backup-src"
+            backup_src.mkdir()
+            (backup_src / "new-api-postgres.dump").write_text(
+                "postgres dump\n", encoding="utf-8"
+            )
+            redis_data = backup_src / "new-api-redis-data"
+            redis_data.mkdir()
+            (redis_data / "dump.rdb").write_text("redis\n", encoding="utf-8")
+            package = root / "backup.tgz"
+            self.write_backup_package(backup_src, package)
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+case "$*" in
+  "compose ps --services --filter status=running"|\
+  "compose stop new-api"|\
+  "compose stop new-api-postgres"|\
+  "compose stop new-api-redis"|\
+  "compose create new-api-postgres"|\
+  "compose create new-api-redis"|\
+  "compose up -d new-api-postgres"|\
+  "compose up -d new-api-redis"|\
+  "compose exec -T new-api-postgres pg_isready "*)
+    ;;
+  "compose up -d --wait --wait-timeout 120 new-api")
+    touch {root / 'lark-runtime/ops/maintenance.session/obstruction'}
+    ;;
+  "volume inspect new-api-lark-controller-data")
+    exit 1
+    ;;
+  "compose ps -aq "*)
+    printf '%s-container\\n' "${{@: -1}}"
+    ;;
+  "inspect "*)
+    case "${{@: -1}}" in
+      new-api-postgres-container) printf 'new-api-postgres-data-volume\\n' ;;
+      new-api-redis-container) printf 'new-api-redis-data-volume\\n' ;;
+    esac
+    ;;
+  "run "*)
+    ;;
+  "compose exec -T new-api-postgres pg_restore "*)
+    cat >/dev/null
+    ;;
+  *)
+    echo "unexpected docker call: $*" >&2
+    exit 99
+    ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+            chmod_count = root / "maintenance-mode-chmod-count"
+            chmod = bin_dir / "chmod"
+            chmod.write_text(
+                f"""#!/usr/bin/env bash
+if [[ "$1" == "600" && "$2" == */maintenance.lock/mode ]]; then
+  count=0
+  if [[ -f {chmod_count} ]]; then
+    count="$(cat {chmod_count})"
+  fi
+  count=$((count + 1))
+  printf '%s\\n' "$count" > {chmod_count}
+  if [[ "$count" -eq 2 ]]; then
+    exit 42
+  fi
+fi
+exec /bin/chmod "$@"
+""",
+                encoding="utf-8",
+            )
+            chmod.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Could not release deployment maintenance session", result.stderr)
+            self.assertIn(
+                "Could not secure re-established deployment maintenance lock",
+                result.stderr,
+            )
+            lock = root / "lark-runtime" / "ops" / "maintenance.lock"
+            self.assertEqual((lock / "mode").read_text(encoding="utf-8"), "restore\n")
+            self.assertTrue(
+                (root / "lark-runtime/ops/maintenance.session").is_dir()
+            )
+            calls = calls_file.read_text(encoding="utf-8").splitlines()
+            for service in ["new-api", "new-api-postgres", "new-api-redis"]:
+                self.assertEqual(calls.count(f"compose stop {service}"), 2)
 
     def test_restore_refuses_to_clear_volumes_when_service_remains_running(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -411,6 +983,12 @@ fi
 if [[ "$*" == "compose ps --services --filter status=running" ]]; then
   printf '%s\\n' new-api
   exit 0
+fi
+if [[ "$*" == "compose exec -T new-api sh -c "* ]]; then
+  exit 0
+fi
+if [[ "$*" == "volume inspect new-api-lark-controller-data" ]]; then
+  exit 1
 fi
 exit 99
 """,

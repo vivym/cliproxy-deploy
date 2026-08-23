@@ -2,7 +2,7 @@
 
 ## 状态和边界
 
-本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。当前代码已完成本地 Compose 渲染和 Controller 镜像构建，但未发布 New API fork/Controller 镜像 digest，未配置真实 Lark tenant，也未实现 Controller SQLite 与 New API Postgres 的 quiesce backup/restore barrier。因此当前不能据此宣称生产可上线。
+本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。当前代码已完成本地 Compose 渲染、Controller 镜像构建和 offline quiesce backup/restore 合同，但未发布 New API fork/Controller 镜像 digest，未配置真实 Lark tenant，也未做获准的生产恢复/reconciliation 演练。因此当前不能据此宣称生产可上线。
 
 基础 New API 迁移和 Lark rollout 是两个独立变更。先按 `migrate-to-new-api-deploy.md` 完成并验收基础迁移；不要在同一个维护窗口首次启用 Lark profile。
 
@@ -17,9 +17,9 @@
 3. `lark-runtime/policies/` 包含完整历史 `*.policy.json` 和 `approval-bindings.json`，且 active version 与 `LARK_ACTIVE_POLICY_VERSION` 一致。
 4. `lark-runtime/secrets/{shared,controller,new-api}/` 三个 consumer 子目录及其中所有 secret 的 owner 固定为 Controller runtime UID/GID `10001:10001`，子目录为 `0700`、文件为 `0600`；`scripts/verify-lark-secret-permissions.sh` 已通过，且没有 secret 进入 `.env`、Git、镜像或日志。顶层 `secrets/` 只负责组织这些 bind source，不作为容器内权限边界。
 5. New API Custom OAuth provider、Lark app 可用范围、审批定义和事件订阅已有独立变更记录，但 shadow 第一步尚不开放 OAuth。
-6. Controller SQLite 的受控备份/恢复方案和回滚负责人已确认。该门禁在 barrier 脚本完成前保持未通过。
+6. Controller SQLite 的受控备份/恢复方案、恢复后 reconciliation 清单和回滚负责人已确认；至少一份生产形态测试包已在隔离环境完成全量恢复演练。
 
-当前 `backup-deployment.sh` 和 `restore-deployment.sh` 会检查 `.env`、运行中 New API 的 effective listener 和 `new-api-lark-controller-data` volume。listener 非空或任何 Controller SQLite volume 已存在时直接失败，即使 Controller 已停止或删除。这是防止不一致包的临时安全盾，不是 quiesce barrier 的实现。
+`backup-deployment.sh`、两个 restore runner 和 correction runner 现在共用 host-only `maintenance.session` 互斥目录与带 `backup/restore/correction/readonly` mode 的容器启动锁，并以停写方式把 Controller volume、两个 Postgres、两个 Redis、runtime 和 policy 绑定到 v2 manifest。enabled 配置和 Controller volume 必须同时存在；disabled 包带显式 absent marker。该实现已本地测试但尚未完成生产恢复演练，因此启动门禁第 6 项仍未通过。
 
 初始 callback 合约固定为 `https://ai.x2r.store/oauth/lark`，Controller callback 固定为 `https://ai.x2r.store/integrations/lark/oauth/callback`。启用前 `NEW_API_HOST` 必须为 `ai.x2r.store`；更换域名需要先修改并重新验证两个代码库的 callback contract，不能只改 Compose。
 
@@ -106,7 +106,7 @@ docker compose --profile lark-ops build lark-correction
 sudo scripts/verify-lark-secret-permissions.sh
 ```
 
-渲染结果必须满足：Controller 没有 `ports`，基础 New API `3001` 没有 host publish 或 Traefik service，Controller 不在 `new-api-data`，且 `LARK_OAUTH_PUBLIC_ENABLED=false`。`new-api-correction-endpoint`、`lark-correction` 和无网络/无 secret/SQLite 只读的 `lark-correction-readonly` 只出现在 `lark-ops` profile；写路径两服务均无 Traefik label/host port，常驻 Controller 镜像 target 不包含 correction CLI。基础 New API 和 Controller 在 `lark-runtime/ops/maintenance.lock` 存在时拒绝启动，临时 write endpoint/CLI 在 lock 不存在时拒绝启动；lock 只能由 `scripts/run-lark-correction.sh` 管理，CLI 或 endpoint 清理无法确认时必须保留。
+渲染结果必须满足：Controller 没有 `ports`，基础 New API `3001` 没有 host publish 或 Traefik service，Controller 不在 `new-api-data`，且 `LARK_OAUTH_PUBLIC_ENABLED=false`。`new-api-correction-endpoint`、`lark-correction` 和无网络/无 secret/SQLite 只读的 `lark-correction-readonly` 只出现在 `lark-ops` profile；写路径两服务均无 Traefik label/host port，常驻 Controller 镜像 target 不包含 correction CLI。基础 New API 和 Controller 在 `lark-runtime/ops/maintenance.lock` 任意 mode 存在时拒绝启动，临时 write endpoint/CLI 只接受 `mode=correction`；只读 pending runner 使用 `mode=readonly` 和固定名 `new-api-lark-correction-readonly-ops`，清理并精确验空后才解锁。`maintenance.session` 只在 host 上仲裁 runner，不挂入容器。两者只能由 backup/restore/correction host runner 管理，临时 container 清理无法确认时必须同时保留。
 
 ## Webhook-only shadow
 
@@ -149,6 +149,45 @@ LARK_RECONCILIATION_HEALTH_OPEN_ID=ou_known_active_employee
 ```
 
 active 切换是另一项审批变更。启动后先限制到测试员工和最小 wallet package，逐项按架构文档 WP5 放量。
+
+## 联合备份与恢复
+
+这是停机备份，不是在线快照。另行取得生产操作授权和维护窗口后，才在部署根目录执行：
+
+```bash
+BACKUP_DIR=/var/backups/new-api scripts/backup-deployment.sh
+```
+
+runner 会先取得 `lark-runtime/ops/maintenance.session`，再取得 `maintenance.lock/mode=backup`，停止原本正在运行的 Traefik、Controller、New API、Sub2API 和两个 Redis，再生成 v2 同包归档。成功后只重启原本运行的服务，最后释放 session。检查输出包权限为 `0600`，在隔离位置解包并确认存在：
+
+```text
+backup-manifest.json
+SHA256SUMS
+deployment-runtime.tgz
+sub2api-postgres.dump
+new-api-postgres.dump
+sub2api-redis-data/
+new-api-redis-data/
+lark-controller-data.tgz       # enabled package
+lark-controller-data.absent    # disabled package, exactly one of the two
+```
+
+enabled 包的 runtime 还包含 `lark-runtime/policies/`，但不包含 `lark-runtime/secrets/`。长期 Lark secret 必须由独立 secret backup/rotation 流程负责，不能为了方便塞进普通部署包。backup 失败时，如果命名 snapshot container 的清理无法确认，runner 会保留 maintenance lock 和 session 且不重启 writer；先确认 `new-api-lark-backup-snapshot` 不存在，再按错误信息删除 `mode`、空 lock 目录和空 session 目录并恢复原服务。
+
+全量恢复会替换两个 Postgres、两个 Redis、Sub2API runtime，并恢复或删除 Controller volume，必须使用隔离环境演练过的完整包：
+
+```bash
+scripts/restore-deployment.sh /path/to/backup-package.tgz
+```
+
+archive/checksum/manifest/listener/policy/Compose 校验，以及 Controller archive 根目录中唯一 regular `controller.sqlite` 的校验，都在部署变更前完成。进入 `compose down` 后任何失败都会保留 `maintenance.session` 和 `mode=restore`，禁止 writer 自动启动；Compose readiness 窗口先释放容器门禁但始终持有 host session，启动失败会重建 restore lock、再次 `compose down` 并核实全部服务停止。优先修复原因，不要混入其他包的 dump 或手工删除 lock/session。enabled 恢复会保留现有 host secret 文件，恢复同包 policy/Controller state，并把 `.env` 强制改为：
+
+```text
+LARK_CONTROLLER_MODE=shadow
+LARK_OAUTH_PUBLIC_ENABLED=false
+```
+
+restore 只在 Compose `--wait` 确认服务 readiness 后报告成功；keyring/secret 与恢复状态不兼容会使命令失败而不是产生假成功。absent/legacy-absent 恢复会删除旧 Controller volume 和旧 policy，但保留 `lark-runtime/secrets/` 与 `ops/`。恢复成功后先保持这两个值，完成架构文档“恢复后必须执行 reconciliation”清单：核对 barrier/package ID、policy manifest、`processing`/retry/reversal 队列、applied grant replay、New API outbox/deny fence、managed subscription projection 和 disabled principal。再把 OAuth 或 active mode 作为两个独立审批变更打开。`restore-new-api.sh` 只允许源包和目标部署均无 Lark state：缺 manifest 却含 Lark marker/archive、enabled manifest、目标 listener、运行中的 Controller/correction 或现存 Controller volume都会要求 full restore；其破坏性失败同样保留 session/restore lock。
 
 ## 网络验收
 

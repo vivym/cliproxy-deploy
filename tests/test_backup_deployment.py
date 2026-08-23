@@ -1,5 +1,6 @@
 import pathlib
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -8,6 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "backup-deployment.sh"
 LEGACY_SCRIPT = ROOT / "scripts" / "migrations" / "backup-legacy-deployment.sh"
 DOTENV_READER = ROOT / "scripts" / "read-dotenv.py"
+MANIFEST_TOOL = ROOT / "scripts" / "deployment-backup-manifest.py"
 
 
 class BackupDeploymentTests(unittest.TestCase):
@@ -19,6 +21,9 @@ class BackupDeploymentTests(unittest.TestCase):
         backup_script.chmod(0o755)
         (scripts / "read-dotenv.py").write_text(
             DOTENV_READER.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        (scripts / "deployment-backup-manifest.py").write_text(
+            MANIFEST_TOOL.read_text(encoding="utf-8"), encoding="utf-8"
         )
         return backup_script
 
@@ -75,8 +80,9 @@ class BackupDeploymentTests(unittest.TestCase):
         self.assertIn("new-api-redis-data", text)
         self.assertIn("deployment-runtime.tgz", text)
         self.assertIn("SHA256SUMS", text)
-        self.assertIn("Lark quiesce backup barrier is not implemented", text)
-        self.assertIn("running New API integration listener", text)
+        self.assertIn("backup-manifest.json", MANIFEST_TOOL.read_text(encoding="utf-8"))
+        self.assertIn("maintenance_lock", text)
+        self.assertIn("Running New API integration listener", text)
         self.assertIn("new-api-lark-controller-data", text)
         for service in ["traefik", "sub2api", "new-api"]:
             self.assertIn(f"stop_running_service {service}", text)
@@ -108,7 +114,84 @@ class BackupDeploymentTests(unittest.TestCase):
         ]:
             self.assertNotIn(legacy_term, text)
 
-    def test_backup_rejects_enabled_lark_before_docker(self):
+    def test_boundary_marker_permission_failure_releases_all_locks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            self.prepare_runtime(root)
+            backup_root = tmp_root / "backups"
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            chmod = bin_dir / "chmod"
+            chmod.write_text(
+                """#!/usr/bin/env bash
+if [[ "$1" == "600" && "$2" == */maintenance.lock/mode ]]; then
+  exit 42
+fi
+exec /bin/chmod "$@"
+""",
+                encoding="utf-8",
+            )
+            chmod.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(backup_root),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 42, result.stderr)
+            self.assertFalse((backup_root / ".backup.lock").exists())
+            self.assertFalse((root / "lark-runtime/ops/maintenance.lock").exists())
+            self.assertFalse((root / "lark-runtime/ops/maintenance.session").exists())
+
+    def test_boundary_cleanup_failure_retains_session_with_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            self.prepare_runtime(root)
+            backup_root = tmp_root / "backups"
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            date = bin_dir / "date"
+            date.write_text(
+                f"""#!/usr/bin/env bash
+touch {root / 'lark-runtime/ops/maintenance.lock/obstruction'}
+exit 42
+""",
+                encoding="utf-8",
+            )
+            date.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(backup_root),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Could not release deployment maintenance lock", result.stderr)
+            self.assertTrue((root / "lark-runtime/ops/maintenance.lock").is_dir())
+            self.assertTrue((root / "lark-runtime/ops/maintenance.session").is_dir())
+            self.assertFalse((backup_root / ".backup.lock").exists())
+
+    def test_backup_rejects_enabled_lark_without_controller_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = pathlib.Path(tmp)
             root = tmp_root / "repo"
@@ -120,10 +203,17 @@ class BackupDeploymentTests(unittest.TestCase):
 
             bin_dir = root / "bin"
             bin_dir.mkdir()
-            docker_marker = root / "docker-called"
+            calls_file = root / "docker-calls"
             docker = bin_dir / "docker"
             docker.write_text(
-                f"#!/usr/bin/env bash\ntouch {docker_marker}\nexit 99\n",
+                f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> {calls_file}
+case "$*" in
+  "compose ps --services --filter status=running") exit 0 ;;
+  "volume inspect new-api-lark-controller-data") exit 1 ;;
+esac
+exit 99
+""",
                 encoding="utf-8",
             )
             docker.chmod(0o755)
@@ -141,8 +231,14 @@ class BackupDeploymentTests(unittest.TestCase):
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Lark quiesce backup barrier is not implemented", result.stderr)
-            self.assertFalse(docker_marker.exists())
+            self.assertIn("Controller SQLite state is absent", result.stderr)
+            self.assertEqual(
+                calls_file.read_text(encoding="utf-8").splitlines(),
+                [
+                    "compose ps --services --filter status=running",
+                    "volume inspect new-api-lark-controller-data",
+                ],
+            )
 
     def test_backup_rejects_stale_env_when_running_new_api_listener_is_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,7 +284,7 @@ exit 99
             )
 
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn("running New API integration listener", result.stderr)
+            self.assertIn("Running New API integration listener", result.stderr)
             self.assertNotIn("compose stop", calls_file.read_text(encoding="utf-8"))
 
     def test_backup_rejects_stopped_controller_state_volume(self):
@@ -210,7 +306,7 @@ printf '%s\\n' "$*" >> {calls_file}
 if [[ "$*" == "compose ps --services --filter status=running" ]]; then
   exit 0
 fi
-if [[ "$*" == "volume ls --quiet --filter name=new-api-lark-controller-data" ]]; then
+if [[ "$*" == "volume inspect new-api-lark-controller-data" ]]; then
   printf '%s\\n' new-api-lark-controller-data
   exit 0
 fi
@@ -236,6 +332,132 @@ exit 99
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Controller SQLite state exists", result.stderr)
             self.assertNotIn("compose stop", calls_file.read_text(encoding="utf-8"))
+
+    def test_lark_enabled_backup_pairs_controller_state_with_quiesced_databases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            self.prepare_runtime(root)
+            with (root / ".env").open("a", encoding="utf-8") as env_file:
+                env_file.write("NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001\n")
+            policies = root / "lark-runtime" / "policies"
+            policies.mkdir(parents=True)
+            (policies / "approval-bindings.json").write_text(
+                '{"version":1}\n', encoding="utf-8"
+            )
+            (policies / "2026-08.policy.json").write_text(
+                '{"policy_version":"2026-08"}\n', encoding="utf-8"
+            )
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+case "$*" in
+  "compose ps --services --filter status=running")
+    printf '%s\\n' traefik lark-quota-controller new-api sub2api sub2api-redis new-api-redis
+    ;;
+  "compose exec -T new-api sh -c "*)
+    printf '0.0.0.0:3001'
+    ;;
+  "volume inspect new-api-lark-controller-data"|\
+  "volume ls --quiet --filter name=new-api-lark-controller-data")
+    printf '%s\\n' new-api-lark-controller-data
+    ;;
+  "compose stop "*|\
+  "compose start "*)
+    ;;
+  "compose exec -T sub2api-postgres pg_dump "*)
+    test "$(cat {root / 'lark-runtime/ops/maintenance.lock/mode'})" = backup
+    printf 'sub2api postgres dump\\n'
+    ;;
+  "compose exec -T new-api-postgres pg_dump "*)
+    printf 'newapi postgres dump\\n'
+    ;;
+  "compose exec -T sub2api-redis redis-cli SAVE"|\
+  "compose exec -T new-api-redis redis-cli "*)
+    ;;
+  "compose cp sub2api-redis:/data "*)
+    destination="${{@: -1}}"
+    mkdir -p "$destination"
+    printf 'sub2api redis\\n' > "$destination/dump.rdb"
+    ;;
+  "compose cp new-api-redis:/data "*)
+    destination="${{@: -1}}"
+    mkdir -p "$destination"
+    printf 'newapi redis\\n' > "$destination/dump.rdb"
+    ;;
+  "run "*"new-api-lark-controller-data:/source:ro"*":/backup"*)
+    backup_mount=""
+    previous=""
+    for argument in "$@"; do
+      if [[ "$previous" == "-v" && "$argument" == *":/backup" ]]; then
+        backup_mount="${{argument%:/backup}}"
+      fi
+      previous="$argument"
+    done
+    test -n "$backup_mount"
+    state_dir="$(mktemp -d)"
+    printf 'sqlite main\\n' > "$state_dir/controller.sqlite"
+    printf 'sqlite wal\\n' > "$state_dir/controller.sqlite-wal"
+    printf 'sqlite shm\\n' > "$state_dir/controller.sqlite-shm"
+    tar -czf "$backup_mount/lark-controller-data.tgz" -C "$state_dir" .
+    rm -rf "$state_dir"
+    ;;
+  "container ls -aq --filter name=^/new-api-lark-backup-snapshot$"|\
+  "container rm -f new-api-lark-backup-snapshot")
+    ;;
+  *)
+    echo "unexpected docker call: $*" >&2
+    exit 99
+    ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            prefix = "Backup package written to "
+            package = pathlib.Path(result.stdout.strip()[len(prefix) :])
+            extract_dir = tmp_root / "extracted-lark"
+            extract_dir.mkdir()
+            subprocess.run(
+                ["tar", "-xzf", str(package), "-C", str(extract_dir)], check=True
+            )
+            self.assertTrue((extract_dir / "backup-manifest.json").is_file())
+            self.assertTrue((extract_dir / "lark-controller-data.tgz").is_file())
+            self.assertFalse((extract_dir / "lark-controller-data.absent").exists())
+            with tarfile.open(extract_dir / "lark-controller-data.tgz", "r:gz") as archive:
+                members = {member.name.removeprefix("./") for member in archive.getmembers()}
+            self.assertTrue(
+                {"controller.sqlite", "controller.sqlite-wal", "controller.sqlite-shm"}
+                <= members
+            )
+            calls = calls_file.read_text(encoding="utf-8").splitlines()
+            first_dump = next(i for i, call in enumerate(calls) if " pg_dump " in call)
+            for service in ["traefik", "lark-quota-controller", "new-api", "sub2api"]:
+                self.assertLess(calls.index(f"compose stop {service}"), first_dump)
+                self.assertIn(f"compose start {service}", calls)
+            self.assertFalse((root / "lark-runtime/ops/maintenance.lock").exists())
 
     def test_backup_package_is_complete_and_write_services_are_quiesced(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -321,9 +543,12 @@ esac
                 "sub2api-redis-data/dump.rdb",
                 "new-api-redis-data/dump.rdb",
                 "deployment-runtime.tgz",
+                "backup-manifest.json",
+                "lark-controller-data.absent",
                 "SHA256SUMS",
             ]:
                 self.assertTrue((extract_dir / relative_path).exists(), relative_path)
+            self.assertFalse((extract_dir / "lark-controller-data.tgz").exists())
 
             calls = calls_file.read_text(encoding="utf-8").splitlines()
             snapshot_index = next(
@@ -401,6 +626,80 @@ esac
             self.assertIn("start sub2api", calls)
             self.assertNotIn("start traefik", calls)
             self.assertEqual(list(backup_root.glob("*.partial")), [])
+
+    def test_uncertain_controller_snapshot_cleanup_retains_lock_and_stops_writers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            self.prepare_runtime(root)
+            with (root / ".env").open("a", encoding="utf-8") as env_file:
+                env_file.write("NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001\n")
+            policies = root / "lark-runtime" / "policies"
+            policies.mkdir(parents=True)
+            (policies / "approval-bindings.json").write_text("{}\n", encoding="utf-8")
+            (policies / "test.policy.json").write_text("{}\n", encoding="utf-8")
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+case "$*" in
+  "compose ps --services --filter status=running")
+    printf '%s\\n' lark-quota-controller new-api
+    ;;
+  "compose exec -T new-api sh -c "*)
+    printf '0.0.0.0:3001'
+    ;;
+  "volume inspect new-api-lark-controller-data")
+    ;;
+  "compose stop "*)
+    ;;
+  "run "*"new-api-lark-controller-data:/source:ro"*)
+    exit 42
+    ;;
+  "container rm -f new-api-lark-backup-snapshot")
+    exit 1
+    ;;
+  "container ls -aq --filter name=^/new-api-lark-backup-snapshot$")
+    printf '%s\\n' uncertain-snapshot-container
+    ;;
+  *)
+    echo "unexpected docker call: $*" >&2
+    exit 99
+    ;;
+esac
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            lock = root / "lark-runtime" / "ops" / "maintenance.lock"
+            self.assertEqual((lock / "mode").read_text(encoding="utf-8"), "backup\n")
+            self.assertIn("maintenance lock retained", result.stderr)
+            self.assertEqual(list((tmp_root / "backups").glob("*.tgz")), [])
+            calls = calls_file.read_text(encoding="utf-8")
+            self.assertIn("stop lark-quota-controller", calls)
+            self.assertIn("stop new-api", calls)
+            self.assertNotIn("compose start", calls)
 
     def test_legacy_mode_adapts_the_source_compose_and_service_names(self):
         with tempfile.TemporaryDirectory() as tmp:

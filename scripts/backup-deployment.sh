@@ -3,6 +3,7 @@ set -euo pipefail
 
 script_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 dotenv_reader="${script_repo_root}/scripts/read-dotenv.py"
+manifest_tool="${script_repo_root}/scripts/deployment-backup-manifest.py"
 
 usage() {
   echo "Usage: scripts/backup-deployment.sh [DEPLOYMENT_DIR]" >&2
@@ -95,10 +96,7 @@ if [[ ! -f .env ]]; then
 fi
 python3 "$dotenv_reader" --validate .env
 
-if [[ -n "$(dotenv_value NEW_API_INTEGRATION_LISTEN_ADDR true)" ]]; then
-  echo "Lark quiesce backup barrier is not implemented; disable the integration before backup" >&2
-  exit 1
-fi
+configured_lark_listener="$(dotenv_value NEW_API_INTEGRATION_LISTEN_ADDR true)"
 
 env_backup_root="$(dotenv_value BACKUP_DIR true)"
 backup_root="${BACKUP_DIR:-${env_backup_root:-/var/backups/new-api}}"
@@ -151,6 +149,71 @@ release_lock() {
 }
 trap release_lock EXIT
 
+lock_root="${deployment_dir}/lark-runtime/ops"
+maintenance_session="${lock_root}/maintenance.session"
+maintenance_lock="${lock_root}/maintenance.lock"
+maintenance_session_owned=false
+maintenance_lock_owned=false
+
+release_maintenance_lock() {
+  rm -f "${maintenance_lock}/mode"
+  if ! rmdir "$maintenance_lock"; then
+    echo "Could not release deployment maintenance lock: $maintenance_lock" >&2
+    return 1
+  fi
+  maintenance_lock_owned=false
+}
+
+release_maintenance_session() {
+  if ! rmdir "$maintenance_session"; then
+    echo "Could not release deployment maintenance session: $maintenance_session" >&2
+    return 1
+  fi
+  maintenance_session_owned=false
+}
+
+cleanup_boundary_acquire() {
+  local status=$?
+  trap - EXIT
+  if [[ "$maintenance_lock_owned" == true ]]; then
+    release_maintenance_lock || status=1
+  fi
+  if [[ "$maintenance_session_owned" == true && "$maintenance_lock_owned" == false ]]; then
+    release_maintenance_session || status=1
+  fi
+  release_lock
+  exit "$status"
+}
+
+mkdir -p "$lock_root"
+trap cleanup_boundary_acquire EXIT
+if ! mkdir "$maintenance_session"; then
+  echo "Another deployment maintenance session owns: $maintenance_session" >&2
+  exit 1
+fi
+maintenance_session_owned=true
+if ! mkdir "$maintenance_lock"; then
+  echo "Another deployment maintenance session owns: $maintenance_lock" >&2
+  exit 1
+fi
+maintenance_lock_owned=true
+printf 'backup\n' > "${maintenance_lock}/mode"
+chmod 600 "${maintenance_lock}/mode"
+
+cleanup_early_exit() {
+  local status=$?
+  trap - EXIT
+  if [[ "$maintenance_lock_owned" == true ]]; then
+    release_maintenance_lock || status=1
+  fi
+  if [[ "$maintenance_session_owned" == true && "$maintenance_lock_owned" == false ]]; then
+    release_maintenance_session || status=1
+  fi
+  release_lock
+  exit "$status"
+}
+trap cleanup_early_exit EXIT
+
 timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
 dest="${backup_root}/${timestamp}"
 partial_dest="${dest}.partial"
@@ -181,16 +244,13 @@ checksum_file() {
 
 stopped_services=()
 running_services="$(compose ps --services --filter status=running)"
+snapshot_container=new-api-lark-backup-snapshot
+snapshot_container_used=false
 
 service_is_running() {
   local service="$1"
   printf '%s\n' "$running_services" | grep -qx "$service"
 }
-
-if service_is_running lark-quota-controller; then
-  echo "Lark quiesce backup barrier is not implemented; refusing an incomplete Controller backup" >&2
-  exit 1
-fi
 
 if service_is_running new-api; then
   effective_lark_listener="$(
@@ -199,19 +259,44 @@ if service_is_running new-api; then
     compose exec -T new-api sh -c \
       'printf "%s" "${INTEGRATION_LISTEN_ADDR:-}"'
   )"
-  if [[ -n "$effective_lark_listener" ]]; then
-    echo "Lark quiesce backup barrier is not implemented; refusing a backup with a running New API integration listener" >&2
+  if [[ -n "$effective_lark_listener" && -z "$configured_lark_listener" ]]; then
+    echo "Running New API integration listener disagrees with the disabled deployment configuration" >&2
+    exit 1
+  fi
+  if [[ -z "$effective_lark_listener" && -n "$configured_lark_listener" ]]; then
+    echo "Running New API integration listener disagrees with the enabled deployment configuration" >&2
     exit 1
   fi
 fi
 
-lark_controller_volumes="$(
-  docker_cli volume ls --quiet --filter name=new-api-lark-controller-data
-)"
-if printf '%s\n' "$lark_controller_volumes" | grep -qx new-api-lark-controller-data; then
-  echo "Lark quiesce backup barrier is not implemented; refusing a backup while Controller SQLite state exists" >&2
+lark_controller_volume_exists=false
+if docker_cli volume inspect new-api-lark-controller-data >/dev/null 2>&1; then
+  lark_controller_volume_exists=true
+fi
+if [[ -n "$configured_lark_listener" && "$lark_controller_volume_exists" != true ]]; then
+  echo "Lark integration is enabled but Controller SQLite state is absent" >&2
   exit 1
 fi
+if [[ -z "$configured_lark_listener" && "$lark_controller_volume_exists" == true ]]; then
+  echo "Controller SQLite state exists while the Lark integration is disabled" >&2
+  exit 1
+fi
+if [[ -n "$configured_lark_listener" ]]; then
+  if [[ ! -f lark-runtime/policies/approval-bindings.json ]]; then
+    echo "Missing required backup source: lark-runtime/policies/approval-bindings.json" >&2
+    exit 1
+  fi
+  if ! compgen -G 'lark-runtime/policies/*.policy.json' >/dev/null; then
+    echo "Missing required backup source: lark-runtime/policies/*.policy.json" >&2
+    exit 1
+  fi
+fi
+for service in new-api-correction-endpoint lark-correction; do
+  if service_is_running "$service"; then
+    echo "Refusing backup while Lark correction service is running: $service" >&2
+    exit 1
+  fi
+done
 
 stop_running_service() {
   local service="$1"
@@ -238,11 +323,30 @@ restart_stopped_services() {
 
 cleanup_on_exit() {
   local status=$?
+  local snapshot_ids
+  local retain_maintenance_lock=false
   trap - EXIT
-  restart_stopped_services true
+  if [[ "$snapshot_container_used" == true ]]; then
+    docker_cli container rm -f "$snapshot_container" >/dev/null 2>&1 || true
+    if ! snapshot_ids="$(
+      docker_cli container ls -aq --filter "name=^/${snapshot_container}$"
+    )" || [[ -n "$snapshot_ids" ]]; then
+      echo "Could not confirm Controller snapshot container removal; maintenance lock retained: $maintenance_lock" >&2
+      retain_maintenance_lock=true
+      status=1
+    fi
+  fi
   if [[ "$status" -ne 0 ]]; then
     rm -rf "$partial_dest"
     rm -f "$partial_package" "$checksum_tmp"
+  fi
+  if [[ "$retain_maintenance_lock" == false && "$maintenance_lock_owned" == true ]]; then
+    if release_maintenance_lock; then
+      restart_stopped_services true
+      release_maintenance_session || status=1
+    else
+      status=1
+    fi
   fi
   release_lock
   exit "$status"
@@ -253,8 +357,23 @@ mkdir "$partial_dest"
 chmod 700 "$partial_dest"
 
 stop_running_service traefik
+stop_running_service lark-quota-controller
 stop_running_service new-api
 stop_running_service sub2api
+
+if [[ "$lark_controller_volume_exists" == true ]]; then
+  snapshot_container_used=true
+  docker_cli run \
+    --name "$snapshot_container" \
+    --rm \
+    -v "new-api-lark-controller-data:/source:ro" \
+    -v "${partial_dest}:/backup" \
+    alpine:3.22 \
+    sh -ec \
+    'test -f /source/controller.sqlite; tar -czf /backup/lark-controller-data.tgz -C /source .; chmod 0644 /backup/lark-controller-data.tgz'
+else
+  printf 'new-api-lark-controller-data absent\n' > "${partial_dest}/lark-controller-data.absent"
+fi
 
 compose exec -T "$sub2api_postgres_service" pg_dump \
   -U "$SUB2API_POSTGRES_USER" \
@@ -278,10 +397,30 @@ compose exec -T "$new_api_redis_service" redis-cli \
 stop_running_service "$new_api_redis_service"
 compose cp "${new_api_redis_service}:/data" "${partial_dest}/new-api-redis-data"
 
-tar -czf "${partial_dest}/deployment-runtime.tgz" \
-  .env \
-  "$sub2api_app_data_dir" \
-  letsencrypt
+runtime_paths=(.env "$sub2api_app_data_dir" letsencrypt)
+if [[ "$lark_controller_volume_exists" == true ]]; then
+  runtime_paths+=(lark-runtime/policies)
+fi
+tar -czf "${partial_dest}/deployment-runtime.tgz" "${runtime_paths[@]}"
+
+manifest_args=(
+  create
+  --root "$partial_dest"
+  --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  --lark-state absent
+)
+if [[ "$lark_controller_volume_exists" == true ]]; then
+  manifest_args=(
+    create
+    --root "$partial_dest"
+    --created-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    --lark-state enabled
+  )
+fi
+for service in "${stopped_services[@]}"; do
+  manifest_args+=(--stopped-service "$service")
+done
+python3 "$manifest_tool" "${manifest_args[@]}"
 
 (
   cd "$partial_dest"
@@ -299,10 +438,21 @@ mv "$checksum_tmp" "${partial_dest}/SHA256SUMS"
   tar -czf "$partial_package" .
 )
 chmod 600 "$partial_package"
+
+if [[ "$snapshot_container_used" == true ]]; then
+  snapshot_ids="$(
+    docker_cli container ls -aq --filter "name=^/${snapshot_container}$"
+  )"
+  if [[ -n "$snapshot_ids" ]]; then
+    echo "Controller snapshot container still exists; maintenance lock retained: $maintenance_lock" >&2
+    exit 1
+  fi
+fi
 mv "$partial_package" "$package"
 rm -rf "$partial_dest"
-
+release_maintenance_lock
 restart_stopped_services false
+release_maintenance_session
 release_lock
 trap - EXIT
 

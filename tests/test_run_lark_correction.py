@@ -80,11 +80,13 @@ if [[ "$*" == *" ps --services --filter status=running" ]]; then
   exit 0
 fi
 if [[ "$*" == *" up -d --wait --wait-timeout 60 new-api-correction-endpoint" ]]; then
-  test -d {ops_dir / 'maintenance.lock'}
+  test "$(cat {ops_dir / 'maintenance.lock/mode'})" = correction
+  test "$(stat -f %Lp {ops_dir / 'maintenance.lock'} 2>/dev/null || stat -c %a {ops_dir / 'maintenance.lock'})" = 755
+  test "$(stat -f %Lp {ops_dir / 'maintenance.lock/mode'} 2>/dev/null || stat -c %a {ops_dir / 'maintenance.lock/mode'})" = 644
   exit 0
 fi
 if [[ "$*" == *" run --name new-api-lark-correction-ops --rm --no-deps lark-correction "* ]]; then
-  test -d {ops_dir / 'maintenance.lock'}
+  test "$(cat {ops_dir / 'maintenance.lock/mode'})" = correction
   printf '%s\\n' '{{"mode":"pending"}}'
   exit 0
 fi
@@ -200,10 +202,13 @@ printf '%s\\n' "$*" >> {calls_file}
 case "$*" in
   *" ps --services --filter status=running"*) exit 0 ;;
   *"volume inspect new-api-lark-controller-data"*) exit 0 ;;
-  *" run --rm --no-deps lark-correction-readonly "*)
+  *" run --name new-api-lark-correction-readonly-ops --rm --no-deps lark-correction-readonly "*)
+    test "$(cat {root / 'lark-runtime/ops/maintenance.lock/mode'})" = readonly
     printf '%s\\n' '{{"mode":"pending"}}'
     exit 0
     ;;
+  *"container rm -f new-api-lark-correction-readonly-ops"*|\
+  *"container ls -aq --filter name=^/new-api-lark-correction-readonly-ops$"*) exit 0 ;;
 esac
 echo "unexpected docker call: $*" >&2
 exit 99
@@ -215,9 +220,112 @@ exit 99
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('"mode":"pending"', result.stdout)
             self.assertFalse((ops_dir / "maintenance.lock").exists())
+            self.assertFalse((ops_dir / "maintenance.session").exists())
             calls = calls_file.read_text(encoding="utf-8")
             self.assertNotIn("new-api-correction-endpoint", calls)
             self.assertNotIn("lark_correction_secret", calls)
+
+    def test_list_pending_refuses_an_existing_maintenance_session_before_docker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            marker = root / "docker-called"
+            runner, bin_dir, ops_dir = self.prepare_runtime(
+                root,
+                f"#!/usr/bin/env bash\ntouch {marker}\nexit 99\n",
+            )
+            (ops_dir / "maintenance.session").mkdir()
+
+            result = self.run_runner(runner, bin_dir, "--list-pending")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("maintenance session", result.stderr)
+            self.assertFalse(marker.exists())
+            self.assertTrue((ops_dir / "maintenance.session").is_dir())
+
+    def test_boundary_marker_permission_failure_releases_session_and_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            runner, bin_dir, ops_dir = self.prepare_runtime(
+                root,
+                """#!/usr/bin/env bash
+if [[ "$*" == *" ps --services --filter status=running" ]]; then
+  exit 0
+fi
+exit 99
+""",
+            )
+            chmod = bin_dir / "chmod"
+            chmod.write_text(
+                """#!/usr/bin/env bash
+if [[ "$1" == "644" && "$2" == */maintenance.lock/mode ]]; then
+  exit 42
+fi
+exec /bin/chmod "$@"
+""",
+                encoding="utf-8",
+            )
+            chmod.chmod(0o755)
+
+            result = self.run_runner(runner, bin_dir)
+
+            self.assertEqual(result.returncode, 42, result.stderr)
+            self.assertFalse((ops_dir / "maintenance.lock").exists())
+            self.assertFalse((ops_dir / "maintenance.session").exists())
+
+    def test_readonly_boundary_marker_failure_releases_session_and_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            runner, bin_dir, ops_dir = self.prepare_runtime(
+                root,
+                "#!/usr/bin/env bash\nexit 99\n",
+            )
+            chmod = bin_dir / "chmod"
+            chmod.write_text(
+                """#!/usr/bin/env bash
+if [[ "$1" == "644" && "$2" == */maintenance.lock/mode ]]; then
+  exit 42
+fi
+exec /bin/chmod "$@"
+""",
+                encoding="utf-8",
+            )
+            chmod.chmod(0o755)
+
+            result = self.run_runner(runner, bin_dir, "--list-pending")
+
+            self.assertEqual(result.returncode, 42, result.stderr)
+            self.assertFalse((ops_dir / "maintenance.lock").exists())
+            self.assertFalse((ops_dir / "maintenance.session").exists())
+
+    def test_list_pending_retains_readonly_boundary_when_container_cleanup_is_uncertain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            runner, bin_dir, ops_dir = self.prepare_runtime(
+                root,
+                """#!/usr/bin/env bash
+case "$*" in
+  *" ps --services --filter status=running"*) exit 0 ;;
+  *"volume inspect new-api-lark-controller-data"*) exit 0 ;;
+  *" run --name new-api-lark-correction-readonly-ops --rm --no-deps lark-correction-readonly "*) exit 42 ;;
+  *"container rm -f new-api-lark-correction-readonly-ops"*) exit 1 ;;
+  *"container ls -aq --filter name=^/new-api-lark-correction-readonly-ops$"*)
+    printf '%s\n' uncertain-readonly-container
+    exit 0
+    ;;
+esac
+exit 99
+""",
+            )
+
+            result = self.run_runner(runner, bin_dir, "--list-pending")
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("readonly correction container", result.stderr.lower())
+            self.assertEqual(
+                (ops_dir / "maintenance.lock/mode").read_text(encoding="utf-8"),
+                "readonly\n",
+            )
+            self.assertTrue((ops_dir / "maintenance.session").is_dir())
 
     def test_list_pending_refuses_a_running_controller_before_readonly_container(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -271,6 +379,10 @@ exit 99
 
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue((ops_dir / "maintenance.lock").exists())
+            self.assertEqual(
+                (ops_dir / "maintenance.lock" / "mode").read_text(encoding="utf-8"),
+                "correction\n",
+            )
             self.assertIn("maintenance lock retained", result.stderr)
             self.assertIn("rmdir", result.stderr)
 
@@ -299,6 +411,10 @@ exit 99
 
             self.assertNotEqual(result.returncode, 0)
             self.assertTrue((ops_dir / "maintenance.lock").exists())
+            self.assertEqual(
+                (ops_dir / "maintenance.lock" / "mode").read_text(encoding="utf-8"),
+                "correction\n",
+            )
             self.assertIn("correction CLI removal", result.stderr)
 
 

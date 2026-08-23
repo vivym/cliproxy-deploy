@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 dotenv_reader="${repo_root}/scripts/read-dotenv.py"
+manifest_tool="${repo_root}/scripts/deployment-backup-manifest.py"
 
 usage() {
   echo "Usage: scripts/restore-new-api.sh BACKUP_PACKAGE [DEPLOYMENT_DIR]" >&2
@@ -116,6 +117,7 @@ verify_checksums() {
     return 0
   fi
 
+  python3 "$manifest_tool" validate-checksums --root "$backup_dir"
   (
     cd "$backup_dir"
     if command -v sha256sum >/dev/null 2>&1; then
@@ -141,7 +143,7 @@ dotenv_value() {
 set_env_if_missing_or_blank() {
   local key="$1"
   local value="$2"
-  local env_file="${deployment_dir}/.env"
+  local env_file="$3"
   local escaped_value
   local existing_value
   local tmp_env
@@ -192,6 +194,7 @@ quote_env_value() {
 }
 
 seed_new_api_env_from_backup() {
+  local target_env="$1"
   local runtime_archive
   local runtime_format
 
@@ -215,33 +218,33 @@ seed_new_api_env_from_backup() {
   python3 "$dotenv_reader" --validate "$runtime_env"
 
   if [[ "$runtime_format" == "current" ]]; then
-    set_env_if_missing_or_blank NEW_API_HOST "$(dotenv_value "$runtime_env" NEW_API_HOST true)"
-    set_env_if_missing_or_blank NEW_API_IMAGE_TAG "$(dotenv_value "$runtime_env" NEW_API_IMAGE_TAG true)"
-    set_env_if_missing_or_blank NEW_API_POSTGRES_USER "$(dotenv_value "$runtime_env" NEW_API_POSTGRES_USER true)"
-    set_env_if_missing_or_blank NEW_API_POSTGRES_DB "$(dotenv_value "$runtime_env" NEW_API_POSTGRES_DB true)"
-    set_env_if_missing_or_blank NEW_API_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" NEW_API_POSTGRES_PASSWORD true)"
-    set_env_if_missing_or_blank NEW_API_REDIS_PASSWORD "$(dotenv_value "$runtime_env" NEW_API_REDIS_PASSWORD true)"
-    set_env_if_missing_or_blank NEW_API_POSTGRES_USER "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_USER true)"
-    set_env_if_missing_or_blank NEW_API_POSTGRES_DB "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_DB true)"
-    set_env_if_missing_or_blank NEW_API_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_PASSWORD true)"
-    set_env_if_missing_or_blank NEW_API_REDIS_PASSWORD "$(dotenv_value "$runtime_env" NEWAPI_REDIS_PASSWORD true)"
-    set_env_if_missing_or_blank NEW_API_SESSION_SECRET "$(dotenv_value "$runtime_env" NEW_API_SESSION_SECRET true)"
-    set_env_if_missing_or_blank NEW_API_CRYPTO_SECRET "$(dotenv_value "$runtime_env" NEW_API_CRYPTO_SECRET true)"
+    set_env_if_missing_or_blank NEW_API_HOST "$(dotenv_value "$runtime_env" NEW_API_HOST true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_IMAGE_TAG "$(dotenv_value "$runtime_env" NEW_API_IMAGE_TAG true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_USER "$(dotenv_value "$runtime_env" NEW_API_POSTGRES_USER true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_DB "$(dotenv_value "$runtime_env" NEW_API_POSTGRES_DB true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" NEW_API_POSTGRES_PASSWORD true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_REDIS_PASSWORD "$(dotenv_value "$runtime_env" NEW_API_REDIS_PASSWORD true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_USER "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_USER true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_DB "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_DB true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" NEWAPI_POSTGRES_PASSWORD true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_REDIS_PASSWORD "$(dotenv_value "$runtime_env" NEWAPI_REDIS_PASSWORD true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_SESSION_SECRET "$(dotenv_value "$runtime_env" NEW_API_SESSION_SECRET true)" "$target_env"
+    set_env_if_missing_or_blank NEW_API_CRYPTO_SECRET "$(dotenv_value "$runtime_env" NEW_API_CRYPTO_SECRET true)" "$target_env"
     return
   fi
 
-  set_env_if_missing_or_blank NEW_API_HOST "$(dotenv_value "$runtime_env" AI_HOST true)"
-  set_env_if_missing_or_blank NEW_API_IMAGE_TAG "$(dotenv_value "$runtime_env" NEW_API_IMAGE_TAG true)"
-  set_env_if_missing_or_blank NEW_API_POSTGRES_USER "$(dotenv_value "$runtime_env" POSTGRES_USER true)"
-  set_env_if_missing_or_blank NEW_API_POSTGRES_DB "$(dotenv_value "$runtime_env" POSTGRES_DB true)"
-  set_env_if_missing_or_blank NEW_API_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" POSTGRES_PASSWORD true)"
-  set_env_if_missing_or_blank NEW_API_REDIS_PASSWORD "$(dotenv_value "$runtime_env" REDIS_PASSWORD true)"
-  set_env_if_missing_or_blank NEW_API_SESSION_SECRET "$(dotenv_value "$runtime_env" NEW_API_SESSION_SECRET true)"
-  set_env_if_missing_or_blank NEW_API_CRYPTO_SECRET "$(dotenv_value "$runtime_env" NEW_API_CRYPTO_SECRET true)"
+  set_env_if_missing_or_blank NEW_API_HOST "$(dotenv_value "$runtime_env" AI_HOST true)" "$target_env"
+  set_env_if_missing_or_blank NEW_API_IMAGE_TAG "$(dotenv_value "$runtime_env" NEW_API_IMAGE_TAG true)" "$target_env"
+  set_env_if_missing_or_blank NEW_API_POSTGRES_USER "$(dotenv_value "$runtime_env" POSTGRES_USER true)" "$target_env"
+  set_env_if_missing_or_blank NEW_API_POSTGRES_DB "$(dotenv_value "$runtime_env" POSTGRES_DB true)" "$target_env"
+  set_env_if_missing_or_blank NEW_API_POSTGRES_PASSWORD "$(dotenv_value "$runtime_env" POSTGRES_PASSWORD true)" "$target_env"
+  set_env_if_missing_or_blank NEW_API_REDIS_PASSWORD "$(dotenv_value "$runtime_env" REDIS_PASSWORD true)" "$target_env"
+  set_env_if_missing_or_blank NEW_API_SESSION_SECRET "$(dotenv_value "$runtime_env" NEW_API_SESSION_SECRET true)" "$target_env"
+  set_env_if_missing_or_blank NEW_API_CRYPTO_SECRET "$(dotenv_value "$runtime_env" NEW_API_CRYPTO_SECRET true)" "$target_env"
 }
 
 load_new_api_env() {
-  local env_file="${deployment_dir}/.env"
+  local env_file="$1"
   local required_name
   local required_value
 
@@ -262,7 +265,7 @@ load_new_api_env() {
   NEW_API_POSTGRES_DB="$(dotenv_value "$env_file" NEW_API_POSTGRES_DB)"
 }
 
-compose() {
+docker_cli() {
   local -a clean_env=(env -i "PATH=$PATH" "HOME=${HOME:-/nonexistent}")
   local docker_variable
 
@@ -271,9 +274,13 @@ compose() {
       clean_env+=("${docker_variable}=${!docker_variable}")
     fi
   done
+  "${clean_env[@]}" docker "$@"
+}
+
+compose() {
   (
     cd "$deployment_dir"
-    "${clean_env[@]}" docker compose "$@"
+    docker_cli compose "$@"
   )
 }
 
@@ -341,8 +348,187 @@ wait_for_postgres() {
 }
 
 verify_checksums
-seed_new_api_env_from_backup
-load_new_api_env
+if [[ -f "${backup_dir}/backup-manifest.json" ]]; then
+  package_lark_state="$(
+    python3 "$manifest_tool" validate \
+      --root "$backup_dir" \
+      --print-lark-state
+  )"
+  if [[ "$package_lark_state" == enabled ]]; then
+    echo "Lark-enabled packages require scripts/restore-deployment.sh full restore" >&2
+    exit 1
+  fi
+elif [[ -e "${backup_dir}/lark-controller-data.tgz" || -e "${backup_dir}/lark-controller-data.absent" ]]; then
+  echo "Lark backup state requires backup-manifest.json and scripts/restore-deployment.sh full restore" >&2
+  exit 1
+fi
+
+python3 "$dotenv_reader" --validate "${deployment_dir}/.env"
+current_lark_listener="$(
+  dotenv_value "${deployment_dir}/.env" NEW_API_INTEGRATION_LISTEN_ADDR true
+)"
+if [[ -n "$current_lark_listener" ]]; then
+  echo "Lark-enabled targets require scripts/restore-deployment.sh full restore" >&2
+  exit 1
+fi
+
+candidate_env="${restore_tmp}/target.env"
+cp -p "${deployment_dir}/.env" "$candidate_env"
+seed_new_api_env_from_backup "$candidate_env"
+load_new_api_env "$candidate_env"
+
+lock_root="${deployment_dir}/lark-runtime/ops"
+maintenance_session="${lock_root}/maintenance.session"
+maintenance_lock="${lock_root}/maintenance.lock"
+maintenance_session_owned=false
+maintenance_lock_owned=false
+
+release_maintenance_lock() {
+  rm -f "${maintenance_lock}/mode"
+  if ! rmdir "$maintenance_lock"; then
+    echo "Could not release deployment maintenance lock: $maintenance_lock" >&2
+    return 1
+  fi
+  maintenance_lock_owned=false
+}
+
+release_maintenance_session() {
+  if ! rmdir "$maintenance_session"; then
+    echo "Could not release deployment maintenance session: $maintenance_session" >&2
+    return 1
+  fi
+  maintenance_session_owned=false
+}
+
+cleanup_boundary_acquire() {
+  local status=$?
+  trap - EXIT
+  if [[ "$maintenance_lock_owned" == true ]]; then
+    release_maintenance_lock || status=1
+  fi
+  if [[ "$maintenance_session_owned" == true && "$maintenance_lock_owned" == false ]]; then
+    release_maintenance_session || status=1
+  fi
+  rm -rf "$restore_tmp"
+  exit "$status"
+}
+
+mkdir -p "$lock_root"
+trap cleanup_boundary_acquire EXIT
+if ! mkdir "$maintenance_session"; then
+  echo "Another deployment maintenance session owns: $maintenance_session" >&2
+  exit 1
+fi
+maintenance_session_owned=true
+if ! mkdir "$maintenance_lock"; then
+  echo "Another deployment maintenance session owns: $maintenance_lock" >&2
+  exit 1
+fi
+maintenance_lock_owned=true
+printf 'restore\n' > "${maintenance_lock}/mode"
+chmod 600 "${maintenance_lock}/mode"
+restore_mutated=false
+target_env_tmp=""
+startup_handoff_active=false
+
+recover_startup_handoff() {
+  local recovery_failed=false
+  local running_services
+  local service
+
+  if [[ "$maintenance_lock_owned" != true ]]; then
+    if mkdir "$maintenance_lock"; then
+      maintenance_lock_owned=true
+      if ! printf 'restore\n' > "${maintenance_lock}/mode"; then
+        echo "Could not write re-established deployment maintenance lock after New API startup failure: $maintenance_lock" >&2
+        recovery_failed=true
+      elif ! chmod 600 "${maintenance_lock}/mode"; then
+        echo "Could not secure re-established deployment maintenance lock after New API startup failure: $maintenance_lock" >&2
+        recovery_failed=true
+      fi
+    else
+      echo "Could not re-establish deployment maintenance lock after New API startup failure: $maintenance_lock" >&2
+      recovery_failed=true
+    fi
+  fi
+  for service in new-api new-api-postgres new-api-redis; do
+    if ! compose stop "$service" >/dev/null; then
+      echo "Could not stop service after New API restore startup failure: $service" >&2
+      recovery_failed=true
+    fi
+  done
+  if ! running_services="$(compose ps --services --filter status=running)"; then
+    echo "Could not verify services stopped after New API restore startup failure" >&2
+    recovery_failed=true
+  else
+    for service in new-api new-api-postgres new-api-redis; do
+      if printf '%s\n' "$running_services" | grep -qx "$service"; then
+        echo "Service remains running after New API restore startup failure: $service" >&2
+        recovery_failed=true
+      fi
+    done
+  fi
+  [[ "$recovery_failed" == false ]]
+}
+
+cleanup_restore() {
+  local status=$?
+  trap - EXIT
+  if [[ "$startup_handoff_active" == true ]]; then
+    startup_handoff_active=false
+    if ! recover_startup_handoff; then
+      status=1
+    fi
+  fi
+  if [[ -n "$target_env_tmp" ]]; then
+    rm -f "$target_env_tmp"
+  fi
+  rm -rf "$restore_tmp"
+  if [[ "$maintenance_lock_owned" == true ]]; then
+    if [[ "$restore_mutated" == true ]]; then
+      echo "New API-only restore did not complete; maintenance lock retained: $maintenance_lock" >&2
+    elif ! release_maintenance_lock; then
+      status=1
+    fi
+  fi
+  if [[ "$maintenance_session_owned" == true && "$maintenance_lock_owned" == false && "$restore_mutated" == false ]]; then
+    if ! release_maintenance_session; then
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+trap cleanup_restore EXIT
+
+current_running_services="$(compose ps --services --filter status=running)"
+for service in lark-quota-controller new-api-correction-endpoint lark-correction; do
+  if printf '%s\n' "$current_running_services" | grep -qx "$service"; then
+    echo "Lark Controller or correction state requires scripts/restore-deployment.sh full restore: $service" >&2
+    exit 1
+  fi
+done
+if printf '%s\n' "$current_running_services" | grep -qx new-api; then
+  effective_lark_listener="$(
+    # Expand inside the container, not on the host.
+    # shellcheck disable=SC2016
+    compose exec -T new-api sh -c 'printf "%s" "${INTEGRATION_LISTEN_ADDR:-}"'
+  )"
+  if [[ -n "$effective_lark_listener" ]]; then
+    echo "Running Lark-enabled New API requires scripts/restore-deployment.sh full restore" >&2
+    exit 1
+  fi
+fi
+if docker_cli volume inspect new-api-lark-controller-data >/dev/null 2>&1; then
+  echo "Existing Lark Controller state requires scripts/restore-deployment.sh full restore" >&2
+  exit 1
+fi
+
+restore_mutated=true
+target_env_tmp="$(mktemp "${deployment_dir}/.env.restore.XXXXXX")"
+cp "$candidate_env" "$target_env_tmp"
+chmod 600 "$target_env_tmp"
+mv "$target_env_tmp" "${deployment_dir}/.env"
+target_env_tmp=""
 
 for service in new-api new-api-postgres new-api-redis; do
   if ! compose stop "$service" >/dev/null; then
@@ -376,6 +562,10 @@ compose exec -T new-api-postgres pg_restore \
   < "$new_api_postgres_dump"
 
 compose up -d new-api-redis
-compose up -d new-api
+startup_handoff_active=true
+release_maintenance_lock
+compose up -d --wait --wait-timeout 120 new-api
+release_maintenance_session
+startup_handoff_active=false
 
 echo "New API-only restore completed from ${backup_package}"

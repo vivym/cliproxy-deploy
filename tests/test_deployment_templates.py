@@ -80,6 +80,8 @@ class DeploymentTemplateTests(unittest.TestCase):
         self.assertNotIn("lark-runtime/secrets/controller", endpoint_block)
         self.assertIn('profiles: ["lark-ops"]', endpoint_block)
         self.assertIn("host-side Lark correction maintenance lock", endpoint_block)
+        self.assertIn('cat /run/lark-ops/maintenance.lock/mode', endpoint_block)
+        self.assertIn('!= "correction"', endpoint_block)
         self.assertNotIn("http://new-api:", endpoint_block)
         self.assertNotIn("http://lark-quota-controller:", endpoint_block)
         self.assertNotIn("traefik", endpoint_block)
@@ -92,6 +94,8 @@ class DeploymentTemplateTests(unittest.TestCase):
         self.assertNotIn("lark-runtime/secrets/controller", correction_block)
         self.assertIn('profiles: ["lark-ops"]', correction_block)
         self.assertIn("host-side Lark correction maintenance lock", correction_block)
+        self.assertIn('cat /run/lark-ops/maintenance.lock/mode', correction_block)
+        self.assertIn('!= "correction"', correction_block)
         self.assertNotIn(
             '"./lark-runtime/secrets:/run/secrets/lark-controller:ro"', text
         )

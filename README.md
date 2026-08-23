@@ -97,10 +97,13 @@ Runtime credentials are files under consumer-specific
 The long-running New API and Controller do not mount the short-lived correction
 credential. The `lark-ops` profile supplies a separate correction image and a
 temporary internal New API endpoint with no edge network, Traefik labels, or
-host ports. `scripts/run-lark-correction.sh` owns a shared maintenance lock that
-blocks regular New API/Controller startup for the full temporary endpoint/CLI
-lifecycle. Follow the correction runbook; never start `lark-ops` services
-directly.
+host ports. Backup, restore, and `scripts/run-lark-correction.sh` share a host
+`maintenance.session` mutex and a mode-bearing container startup lock. Any lock
+mode blocks regular New API/Controller startup; temporary write-capable
+`lark-ops` services accept only `correction`. Read-only pending inspection uses
+its own `readonly` mode and a fixed-name container whose removal is verified
+before either boundary is released.
+Follow the correction runbook; never start `lark-ops` services directly.
 Reviewed policy bundles live under `lark-runtime/policies/`. Webhook-only
 shadow mode keeps `LARK_OAUTH_PUBLIC_ENABLED=false`; setting it to `true` is a
 separate OAuth rollout action. When disabled, the Controller does not register
@@ -108,7 +111,8 @@ the public authorize/callback handlers, so the exact Traefik paths return 404.
 
 This wiring is not yet a production authorization. Published fork/controller
 image digests, real policy and Lark configuration, cross-network probes, and
-the two-database quiesce backup/restore path remain launch gates. Follow
+an authorized production backup/restore and reconciliation drill remain launch
+gates. Follow
 [`docs/runbooks/lark-controller-compose-rollout.md`](docs/runbooks/lark-controller-compose-rollout.md)
 before using the profile.
 
@@ -136,10 +140,13 @@ Create a consistent backup outside the repository:
 BACKUP_DIR=/var/backups/new-api scripts/backup-deployment.sh
 ```
 
-Until the Lark quiesce barrier is implemented, backup and full restore fail
-closed when `.env` or the running New API enables the integration listener, or
-when the Controller SQLite volume exists even if its container is stopped or
-removed. They do not claim to capture or restore Controller SQLite.
+This is an offline quiesce backup: it atomically owns the host maintenance
+session and `lark-runtime/ops/maintenance.lock`, stops ingress and every running writer,
+captures the complete Controller volume before both Postgres dumps and Redis
+copies, then restarts only the services that were running. A v2 JSON manifest
+binds all payload hashes, a barrier ID, policy state, and either the Controller
+archive or an explicit Lark-absent marker. Lark configuration and Controller
+volume presence must agree. Long-lived Lark secrets are deliberately excluded.
 
 Restore every state domain from a backup produced by that command:
 
@@ -148,8 +155,15 @@ scripts/restore-deployment.sh /path/to/backup-package.tgz
 ```
 
 Full restore is destructive. It replaces Sub2API runtime state, both Postgres
-databases, and both Redis data domains after validating archive paths,
-checksums, required files, and the restored Compose environment.
+databases, both Redis data domains, and either restores the same-package
+Controller volume and policy bundle or removes stale Controller state and policy
+for an absent package while preserving host secrets and ops state. Validation
+completes before the restore lock and destructive steps. The host session stays
+owned through Compose readiness. A failure after `compose down` re-establishes
+and retains the `restore` lock, retains the session, and keeps writers stopped.
+Enabled restores force Controller `shadow` mode and public OAuth off before
+starting the `lark` profile; complete the runbook
+reconciliation before re-enabling either setting.
 
 Restore only New API data from a compatible deployment or historical API-site
 backup without modifying Sub2API state:
@@ -162,6 +176,8 @@ The New API-only restore uses `new-api-postgres.dump` and
 `new-api-redis-data/`. It also accepts the historical `newapi-postgres.dump`
 and `redis-data/` names at the restore boundary. Historical runtime metadata
 may seed missing New API environment values, but never replaces Sub2API state.
+It rejects Lark-enabled v2 full packages because partial restore would break
+the Postgres/Controller same-package contract.
 Packages without `SHA256SUMS` are rejected by default. After verifying a
 historical package by an independent receipt, opt in for that one restore with
 `ALLOW_UNVERIFIED_LEGACY_BACKUP=true`.
@@ -204,6 +220,7 @@ implementation status are specified in
 The locally wired, not-yet-deployed operator correction workflow is in
 [`docs/runbooks/lark-entitlement-correction.md`](docs/runbooks/lark-entitlement-correction.md).
 The Controller, policy bundle, secret boundaries, and `lark-ops` maintenance
-path are already part of the single root Compose deployment; immutable images,
-real tenant configuration, quiesce backup/restore, and production acceptance
-remain open gates.
+path are already part of the single root Compose deployment. The offline
+quiesce backup/restore contract is locally implemented and tested; immutable
+images, real tenant configuration, a production restore/reconciliation drill,
+and production acceptance remain open gates.
