@@ -125,7 +125,10 @@ func run() error {
 
 	mux := http.NewServeMux()
 	mux.Handle("POST /integrations/lark/events", eventHandler)
-	oauthHandler.Register(mux)
+	oauthHandler.RegisterInternal(mux)
+	if loaded.OAuthPublicEnabled {
+		oauthHandler.RegisterPublic(mux)
+	}
 	operationalHandler.Register(mux)
 	server := newControllerHTTPServer(loaded.ListenAddress, mux)
 	listener, err := net.Listen("tcp", loaded.ListenAddress)

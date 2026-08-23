@@ -1,0 +1,8 @@
+.git
+.gitignore
+secrets
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+lark-controller
+lark-correction

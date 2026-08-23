@@ -18,6 +18,10 @@ class DeploymentTemplateTests(unittest.TestCase):
             "new-api-postgres:",
             "new-api-redis:",
             "new-api:",
+            "lark-quota-controller:",
+            "new-api-correction-endpoint:",
+            "lark-correction-readonly:",
+            "lark-correction:",
         ]:
             self.assertIn(service, text)
         self.assertIn("name: new-api-edge", text)
@@ -25,12 +29,72 @@ class DeploymentTemplateTests(unittest.TestCase):
         self.assertIn("name: new-api-data", text)
         self.assertIn("name: new-api-postgres-data", text)
         self.assertIn("name: new-api-redis-data", text)
+        self.assertIn("name: new-api-lark-integration", text)
+        self.assertIn("name: new-api-lark-controller-data", text)
         self.assertIn("traefik.http.routers.new-api.rule", text)
         self.assertIn("traefik.http.routers.sub2api-admin.rule", text)
         self.assertIn("!PathPrefix(`/v1`)", text)
         self.assertNotIn("traefik.http.routers.sub2api-api.rule", text)
         self.assertNotIn("cliproxyapi:", text)
         self.assertNotIn("cpa-usage-keeper:", text)
+        self.assertNotIn("calciumion/new-api", text)
+        self.assertIn('profiles: ["lark"]', text)
+        self.assertIn("INTEGRATION_LISTEN_ADDR", text)
+        self.assertIn("LARK_INTEGRATION_SECRET_FILE", text)
+        self.assertIn("LARK_CORRECTION_SECRET_FILE", text)
+        self.assertIn("LARK_INTEGRATION_SECRET_NEXT_FILE", text)
+        self.assertIn("traefik.http.routers.lark-events.rule", text)
+        self.assertIn("traefik.http.routers.lark-oauth.rule", text)
+        self.assertIn("LARK_OAUTH_PUBLIC_ENABLED", text)
+        self.assertNotIn("lark-oauth-disabled.invalid", text)
+        self.assertIn("traefik.http.routers.lark-events.priority", text)
+        self.assertNotIn('"3001:3001"', text)
+        self.assertNotIn("traefik.http.services.new-api-integration", text)
+        new_api_block = text.split("  new-api:", 1)[1].split(
+            "\n  lark-quota-controller:", 1
+        )[0]
+        controller_block = text.split("  lark-quota-controller:", 1)[1].split(
+            "\n  new-api-correction-endpoint:", 1
+        )[0]
+        endpoint_block = text.split("  new-api-correction-endpoint:", 1)[1].split(
+            "\n  lark-correction-readonly:", 1
+        )[0]
+        readonly_block = text.split("  lark-correction-readonly:", 1)[1].split(
+            "\n  lark-correction:", 1
+        )[0]
+        correction_block = text.split("\n  lark-correction:", 1)[1].split(
+            "\nnetworks:", 1
+        )[0]
+        self.assertIn("lark-runtime/secrets/shared", new_api_block)
+        self.assertNotIn("lark-runtime/secrets/controller", new_api_block)
+        self.assertNotIn("lark-runtime/secrets/new-api", new_api_block)
+        self.assertNotIn("LARK_CORRECTION_SECRET_FILE", new_api_block)
+        self.assertIn("maintenance.lock", new_api_block)
+        self.assertIn("lark-runtime/secrets/controller", controller_block)
+        self.assertIn("lark-runtime/secrets/shared", controller_block)
+        self.assertNotIn("lark-runtime/secrets/new-api", controller_block)
+        self.assertNotIn("LARK_CORRECTION_SECRET_FILE", controller_block)
+        self.assertIn("maintenance.lock", controller_block)
+        self.assertIn("lark-runtime/secrets/shared", endpoint_block)
+        self.assertIn("lark-runtime/secrets/new-api", endpoint_block)
+        self.assertNotIn("lark-runtime/secrets/controller", endpoint_block)
+        self.assertIn('profiles: ["lark-ops"]', endpoint_block)
+        self.assertIn("host-side Lark correction maintenance lock", endpoint_block)
+        self.assertNotIn("http://new-api:", endpoint_block)
+        self.assertNotIn("http://lark-quota-controller:", endpoint_block)
+        self.assertNotIn("traefik", endpoint_block)
+        self.assertIn("lark-controller-data:/var/lib/lark-controller:ro", readonly_block)
+        self.assertIn("network_mode: none", readonly_block)
+        self.assertNotIn("lark-runtime/secrets", readonly_block)
+        self.assertNotIn("maintenance.lock", readonly_block)
+        self.assertIn("lark-runtime/secrets/new-api", correction_block)
+        self.assertNotIn("lark-runtime/secrets/shared", correction_block)
+        self.assertNotIn("lark-runtime/secrets/controller", correction_block)
+        self.assertIn('profiles: ["lark-ops"]', correction_block)
+        self.assertIn("host-side Lark correction maintenance lock", correction_block)
+        self.assertNotIn(
+            '"./lark-runtime/secrets:/run/secrets/lark-controller:ro"', text
+        )
         self.assertFalse((ROOT / "docker-compose.newapi.yml").exists())
 
     def test_environment_template_describes_new_api_entry_and_sub2api_upstream(self):
@@ -45,6 +109,21 @@ class DeploymentTemplateTests(unittest.TestCase):
             "SUB2API_ADMIN_HOST=",
             "BACKUP_DIR=",
             "NEW_API_TEST_API_KEY=",
+            "NEW_API_IMAGE_REPOSITORY=",
+            "LARK_CONTROLLER_IMAGE_REPOSITORY=",
+            "LARK_CONTROLLER_IMAGE_TAG=",
+            "LARK_CORRECTION_IMAGE_REPOSITORY=",
+            "LARK_CORRECTION_IMAGE_TAG=",
+            "NEW_API_INTEGRATION_LISTEN_ADDR=",
+            "NEW_API_LARK_INTEGRATION_SECRET_NEXT_FILE=",
+            "LARK_CONTROLLER_MODE=",
+            "LARK_CONTROLLER_INTEGRATION_SECRET_FILE=",
+            "LARK_OAUTH_PUBLIC_ENABLED=",
+            "LARK_APP_ID=",
+            "LARK_TENANT_KEY=",
+            "LARK_ACTIVE_POLICY_VERSION=",
+            "NEW_API_BRIDGE_CLIENT_ID=",
+            "LARK_RECONCILIATION_HEALTH_OPEN_ID=",
         ]:
             self.assertIn(variable, env_example)
 
@@ -52,6 +131,25 @@ class DeploymentTemplateTests(unittest.TestCase):
         self.assertNotIn("SUB2API_TEST_API_KEY=", env_example)
         self.assertNotIn("NEWAPI_", env_example)
         self.assertFalse((ROOT / "sub2api").exists())
+
+    def test_lark_controller_image_is_reproducible_and_does_not_copy_runtime_secrets(self):
+        dockerfile = (ROOT / "lark-controller" / "Dockerfile").read_text(encoding="utf-8")
+        dockerignore = (ROOT / "lark-controller" / ".dockerignore").read_text(encoding="utf-8")
+
+        self.assertIn("AS builder", dockerfile)
+        self.assertIn("go build", dockerfile)
+        self.assertIn("USER 10001:10001", dockerfile)
+        self.assertIn("/healthz", dockerfile)
+        controller_target = dockerfile.split("FROM runtime AS controller", 1)[1].split(
+            "FROM runtime AS correction", 1
+        )[0]
+        correction_target = dockerfile.split("FROM runtime AS correction", 1)[1]
+        self.assertIn("/out/lark-controller", controller_target)
+        self.assertNotIn("/out/lark-correction", controller_target)
+        self.assertIn("/out/lark-correction", correction_target)
+        self.assertNotIn("/out/lark-controller", correction_target)
+        self.assertIn("secrets", dockerignore)
+        self.assertIn("*.sqlite", dockerignore)
 
     def test_readme_documents_only_the_current_root_deployment(self):
         text = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -122,6 +220,12 @@ class DeploymentTemplateTests(unittest.TestCase):
             "/sub2api-postgres-data/",
             "/sub2api-redis-data/",
             "/letsencrypt/",
+            "/lark-runtime/secrets/*",
+            "!/lark-runtime/secrets/shared/.gitkeep",
+            "!/lark-runtime/secrets/controller/.gitkeep",
+            "!/lark-runtime/secrets/new-api/.gitkeep",
+            "/lark-runtime/ops/*",
+            "!/lark-runtime/ops/.gitkeep",
         ]:
             self.assertIn(path, text)
 

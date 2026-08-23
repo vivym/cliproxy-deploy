@@ -17,12 +17,14 @@ Users and SDKs
 Traefik :80/:443
       |
       +--> New API :3000 --> Sub2API :8080 --> model providers
+      +--> Lark events (optional profile) --> Lark Controller :8080
       |
 Operators only
       `--> Sub2API administrator UI :8080
 
 New API --> dedicated Postgres + Redis
 Sub2API  --> dedicated Postgres + Redis
+Lark Controller --> dedicated SQLite + authenticated New API :3001
 ```
 
 Sub2API has no public OpenAI-compatible API route. Configure New API channels
@@ -50,6 +52,8 @@ sub2api-data/
 sub2api-postgres-data/
 sub2api-redis-data/
 letsencrypt/
+lark-runtime/secrets/
+lark-runtime/ops/
 tmp/
 ```
 
@@ -76,9 +80,37 @@ docker compose config >/dev/null
 docker compose up -d
 ```
 
-Set every required secret in `.env`. Pin `SUB2API_IMAGE_TAG` and
-`NEW_API_IMAGE_TAG` to reviewed release tags or immutable digests in
-production.
+Set every required secret in `.env`. Set `NEW_API_IMAGE_REPOSITORY` to the
+published fork repository, and pin `SUB2API_IMAGE_TAG`, `NEW_API_IMAGE_TAG`,
+`LARK_CONTROLLER_IMAGE_TAG`, and `LARK_CORRECTION_IMAGE_TAG` to reviewed
+release tags or immutable digests in production.
+
+## Lark integration profile
+
+The `lark-quota-controller` service is behind the explicit `lark` Compose
+profile. A normal `docker compose up -d` does not start it. The New API
+integration listener is also disabled until
+`NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001` is set.
+
+Runtime credentials are files under consumer-specific
+`lark-runtime/secrets/{shared,controller,new-api}/` directories, never `.env`.
+The long-running New API and Controller do not mount the short-lived correction
+credential. The `lark-ops` profile supplies a separate correction image and a
+temporary internal New API endpoint with no edge network, Traefik labels, or
+host ports. `scripts/run-lark-correction.sh` owns a shared maintenance lock that
+blocks regular New API/Controller startup for the full temporary endpoint/CLI
+lifecycle. Follow the correction runbook; never start `lark-ops` services
+directly.
+Reviewed policy bundles live under `lark-runtime/policies/`. Webhook-only
+shadow mode keeps `LARK_OAUTH_PUBLIC_ENABLED=false`; setting it to `true` is a
+separate OAuth rollout action. When disabled, the Controller does not register
+the public authorize/callback handlers, so the exact Traefik paths return 404.
+
+This wiring is not yet a production authorization. Published fork/controller
+image digests, real policy and Lark configuration, cross-network probes, and
+the two-database quiesce backup/restore path remain launch gates. Follow
+[`docs/runbooks/lark-controller-compose-rollout.md`](docs/runbooks/lark-controller-compose-rollout.md)
+before using the profile.
 
 ## Public routes
 
@@ -103,6 +135,11 @@ Create a consistent backup outside the repository:
 ```bash
 BACKUP_DIR=/var/backups/new-api scripts/backup-deployment.sh
 ```
+
+Until the Lark quiesce barrier is implemented, backup and full restore fail
+closed when `.env` or the running New API enables the integration listener, or
+when the Controller SQLite volume exists even if its container is stopped or
+removed. They do not claim to capture or restore Controller SQLite.
 
 Restore every state domain from a backup produced by that command:
 
@@ -136,7 +173,9 @@ The current deployment owns these explicit identities:
 - Compose project: `new-api`
 - Edge network: `new-api-edge`
 - Data networks: `new-api-data`, `new-api-sub2api-data`
-- Named volumes: `new-api-postgres-data`, `new-api-redis-data`
+- Lark integration network: `new-api-lark-integration`
+- Named volumes: `new-api-postgres-data`, `new-api-redis-data`,
+  `new-api-lark-controller-data`
 
 Changing a project, network, or volume name creates a different Docker object.
 Do not migrate from an older `sub2api` project by moving directories or
@@ -159,9 +198,12 @@ for a verified backup and full restore into the new identities.
 
 ## Lark integration
 
-The planned Lark login, wallet grant, and managed subscription integration is
-specified in
+The Lark login, wallet grant, and managed subscription design and current local
+implementation status are specified in
 [`docs/architecture/lark-entitlement-integration.md`](docs/architecture/lark-entitlement-integration.md).
-The locally implemented, not-yet-deployed operator correction workflow is in
+The locally wired, not-yet-deployed operator correction workflow is in
 [`docs/runbooks/lark-entitlement-correction.md`](docs/runbooks/lark-entitlement-correction.md).
-Its controller and policy bundle will extend the single root Compose deployment.
+The Controller, policy bundle, secret boundaries, and `lark-ops` maintenance
+path are already part of the single root Compose deployment; immutable images,
+real tenant configuration, quiesce backup/restore, and production acceptance
+remain open gates.

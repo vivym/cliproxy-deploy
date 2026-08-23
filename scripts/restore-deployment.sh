@@ -40,6 +40,18 @@ if [[ ! -f "${deployment_dir}/docker-compose.yml" ]]; then
   exit 1
 fi
 
+if [[ -f "${deployment_dir}/.env" ]]; then
+  python3 "$dotenv_reader" --validate "${deployment_dir}/.env"
+  current_lark_listener="$(
+    python3 "$dotenv_reader" --allow-missing \
+      "${deployment_dir}/.env" NEW_API_INTEGRATION_LISTEN_ADDR
+  )"
+  if [[ -n "$current_lark_listener" ]]; then
+    echo "Lark quiesce restore barrier is not implemented; disable the integration before restore" >&2
+    exit 1
+  fi
+fi
+
 restore_tmp="$(mktemp -d)"
 backup_dir="${restore_tmp}/backup"
 runtime_dir="${restore_tmp}/runtime"
@@ -257,11 +269,8 @@ normalize_runtime_env() {
   mv "$normalized_env" "$env_file"
 }
 
-compose_with_env_file() {
-  local env_file="$1"
-  shift
+docker_cli() {
   local -a clean_env=(env -i "PATH=$PATH" "HOME=${HOME:-/nonexistent}")
-  local -a compose_command=(docker compose)
   local docker_variable
 
   for docker_variable in DOCKER_HOST DOCKER_CONTEXT DOCKER_CONFIG; do
@@ -269,12 +278,20 @@ compose_with_env_file() {
       clean_env+=("${docker_variable}=${!docker_variable}")
     fi
   done
+  "${clean_env[@]}" docker "$@"
+}
+
+compose_with_env_file() {
+  local env_file="$1"
+  shift
+  local -a compose_command=(compose)
+
   if [[ -n "$env_file" ]]; then
     compose_command+=(--env-file "$env_file")
   fi
   (
     cd "$deployment_dir"
-    "${clean_env[@]}" "${compose_command[@]}" "$@"
+    docker_cli "${compose_command[@]}" "$@"
   )
 }
 
@@ -282,7 +299,38 @@ runtime_env="${runtime_dir}/.env"
 python3 "$dotenv_reader" --validate "$runtime_env"
 normalize_runtime_env "$runtime_env"
 python3 "$dotenv_reader" --validate "$runtime_env"
+if [[ -n "$(optional_dotenv_value "$runtime_env" NEW_API_INTEGRATION_LISTEN_ADDR)" ]]; then
+  echo "Lark quiesce restore barrier is not implemented; the backup package enables an unsupported integration restore" >&2
+  exit 1
+fi
 compose_with_env_file "$runtime_env" config --quiet
+
+current_running_services="$(compose_with_env_file "" ps --services --filter status=running)"
+if printf '%s\n' "$current_running_services" | grep -qx lark-quota-controller; then
+  echo "Lark quiesce restore barrier is not implemented; refusing to restore across a running Controller" >&2
+  exit 1
+fi
+
+if printf '%s\n' "$current_running_services" | grep -qx new-api; then
+  effective_lark_listener="$(
+    # Expand inside the container, not on the host.
+    # shellcheck disable=SC2016
+    compose_with_env_file "" exec -T new-api sh -c \
+      'printf "%s" "${INTEGRATION_LISTEN_ADDR:-}"'
+  )"
+  if [[ -n "$effective_lark_listener" ]]; then
+    echo "Lark quiesce restore barrier is not implemented; refusing to restore with a running New API integration listener" >&2
+    exit 1
+  fi
+fi
+
+lark_controller_volumes="$(
+  docker_cli volume ls --quiet --filter name=new-api-lark-controller-data
+)"
+if printf '%s\n' "$lark_controller_volumes" | grep -qx new-api-lark-controller-data; then
+  echo "Lark quiesce restore barrier is not implemented; refusing to restore while Controller SQLite state exists" >&2
+  exit 1
+fi
 
 SUB2API_POSTGRES_USER="$(dotenv_value "$runtime_env" SUB2API_POSTGRES_USER)"
 SUB2API_POSTGRES_DB="$(dotenv_value "$runtime_env" SUB2API_POSTGRES_DB)"

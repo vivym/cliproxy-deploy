@@ -75,6 +75,9 @@ class BackupDeploymentTests(unittest.TestCase):
         self.assertIn("new-api-redis-data", text)
         self.assertIn("deployment-runtime.tgz", text)
         self.assertIn("SHA256SUMS", text)
+        self.assertIn("Lark quiesce backup barrier is not implemented", text)
+        self.assertIn("running New API integration listener", text)
+        self.assertIn("new-api-lark-controller-data", text)
         for service in ["traefik", "sub2api", "new-api"]:
             self.assertIn(f"stop_running_service {service}", text)
         self.assertLess(
@@ -105,6 +108,135 @@ class BackupDeploymentTests(unittest.TestCase):
         ]:
             self.assertNotIn(legacy_term, text)
 
+    def test_backup_rejects_enabled_lark_before_docker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            self.prepare_runtime(root)
+            with (root / ".env").open("a", encoding="utf-8") as env_file:
+                env_file.write("NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001\n")
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker_marker = root / "docker-called"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"#!/usr/bin/env bash\ntouch {docker_marker}\nexit 99\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Lark quiesce backup barrier is not implemented", result.stderr)
+            self.assertFalse(docker_marker.exists())
+
+    def test_backup_rejects_stale_env_when_running_new_api_listener_is_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            self.prepare_runtime(root)
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+if [[ "$*" == "compose ps --services --filter status=running" ]]; then
+  printf '%s\\n' new-api
+  exit 0
+fi
+if [[ "$*" == *"exec -T new-api sh -c"* ]]; then
+  printf '0.0.0.0:3001'
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("running New API integration listener", result.stderr)
+            self.assertNotIn("compose stop", calls_file.read_text(encoding="utf-8"))
+
+    def test_backup_rejects_stopped_controller_state_volume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            backup_script = self.write_script_copy(root)
+            self.prepare_runtime(root)
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+if [[ "$*" == "compose ps --services --filter status=running" ]]; then
+  exit 0
+fi
+if [[ "$*" == "volume ls --quiet --filter name=new-api-lark-controller-data" ]]; then
+  printf '%s\\n' new-api-lark-controller-data
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(backup_script)],
+                cwd=root,
+                env={
+                    "BACKUP_DIR": str(tmp_root / "backups"),
+                    "PATH": f"{bin_dir}:/usr/bin:/bin",
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Controller SQLite state exists", result.stderr)
+            self.assertNotIn("compose stop", calls_file.read_text(encoding="utf-8"))
+
     def test_backup_package_is_complete_and_write_services_are_quiesced(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = pathlib.Path(tmp)
@@ -126,6 +258,10 @@ printf '%s\\n' "$*" >> {calls_file}
 case "$*" in
   "compose ps --services --filter status=running")
     printf '%s\\n' traefik new-api sub2api sub2api-redis new-api-redis
+    ;;
+  "compose exec -T new-api sh -c "*)
+    ;;
+  "volume ls --quiet --filter name=new-api-lark-controller-data")
     ;;
   "compose stop "*|\
   "compose start "*)
@@ -223,6 +359,9 @@ case "$*" in
   "compose ps --services --filter status=running")
     printf '%s\\n' new-api sub2api
     ;;
+  "compose exec -T new-api sh -c "*|\
+  "volume ls --quiet --filter name=new-api-lark-controller-data")
+    ;;
   "compose stop "*|\
   "compose start "*)
     ;;
@@ -306,6 +445,12 @@ set -euo pipefail
 printf '%s\\n' "$*" >> {calls_file}
 if [[ "$*" == *" ps --services --filter status=running" ]]; then
   printf '%s\\n' traefik new-api sub2api redis newapi-redis
+  exit 0
+fi
+if [[ "$*" == *" exec -T new-api sh -c "* ]]; then
+  exit 0
+fi
+if [[ "$*" == "volume ls --quiet --filter name=new-api-lark-controller-data" ]]; then
   exit 0
 fi
 if [[ "$*" == *" stop "* || "$*" == *" start "* ]]; then

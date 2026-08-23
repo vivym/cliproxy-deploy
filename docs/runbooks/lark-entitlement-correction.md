@@ -3,8 +3,8 @@
 ## Scope and status
 
 This runbook covers one-shot operator correction of a durable Lark approval
-reversal. The code path is implemented and locally tested, but it is not wired
-into Docker Compose and has not been enabled or validated in production.
+reversal. The code path and `lark-ops` Compose profile are implemented and
+locally tested, but have not been enabled or validated in production.
 
 The workflow never edits the original grant. It creates a new
 `lark:correction:*` command in New API and then records an immutable resolution
@@ -20,18 +20,23 @@ New API registers the correction endpoints only when
 must be at least 32 printable ASCII bytes and must differ from both current and
 next `LARK_INTEGRATION_SECRET` values.
 
-Keep this credential out of the long-running Controller. Mount it only into the
-one-shot operator environment, remove that mount after the operation, and
-rotate or revoke it according to the change ticket. It is not a New API admin
+Keep this credential out of both long-running services. The base New API and
+Controller do not mount it. During an approved maintenance window, `lark-ops`
+mounts it only into a temporary New API correction endpoint and the one-shot
+CLI container. Remove both containers after the operation, then rotate or
+revoke the credential according to the change ticket. It is not a New API admin
 PAT and cannot call the ordinary grant, disable, or principal-list endpoints.
 
 ## Build
 
-From `lark-controller/`:
+Build the independent CLI target from the repository root:
 
 ```bash
-go build -o ./bin/lark-correction ./cmd/lark-correction
+docker compose --profile lark-ops build lark-correction
 ```
+
+The long-running Controller image contains only `lark-controller`; the
+`lark-correction` binary is in the separate `correction` Dockerfile target.
 
 Controller startup owns schema migration, including creation and legacy-receipt
 backfill of `approval_reversal_correction_intents`. Run the CLI only after the
@@ -42,19 +47,22 @@ The examples below assume:
 
 ```text
 Controller DB: /var/lib/lark-controller/controller.sqlite
-New API origin: http://new-api:3001
-Secret file: /run/secrets/lark_correction_secret
+New API origin: http://new-api-correction-endpoint:3001
+Secret file: /run/secrets/lark-controller/new-api/lark_correction_secret
 ```
 
 ## Find pending reversals
 
 This opens SQLite with `mode=ro` and `query_only`, runs no migration or
-processing-state recovery, and does not require the correction credential:
+processing-state recovery, and does not require the correction credential or a
+New API endpoint. The dedicated `lark-correction-readonly` service has no
+network, mounts no secret, and mounts Controller SQLite read-only. Stop the
+Controller writer first; the host runner rejects discovery while it is still
+running and refuses to create an empty state volume:
 
 ```bash
-./bin/lark-correction \
-  --list-pending \
-  --controller-db /var/lib/lark-controller/controller.sqlite
+docker compose --profile lark stop lark-quota-controller
+scripts/run-lark-correction.sh --list-pending
 ```
 
 The output includes the reversal event key, original external ID, original
@@ -66,6 +74,47 @@ remain in the SQLite audit ledger but are not presented as the current intent.
 Select exactly one item and record the operator decision in a change ticket. It
 deliberately omits the internal original-subject digest.
 
+## Open the maintenance boundary
+
+Obtain separate production authorization before running these commands. The
+temporary endpoint is deliberately not on `edge`, has no Traefik labels or host
+port, and is started only by the host-side runner. The runner rejects a running
+primary New API or Controller by Docker service state, independent of health
+status, then holds an atomic
+`lark-runtime/ops/maintenance.lock`; both regular services refuse startup while
+it exists, and both temporary services refuse startup without it. Stop both services first so two New API processes do not
+run background work against the same Postgres/Redis state and the CLI does not
+write Controller SQLite beside its worker:
+
+```bash
+umask 077
+correction_tmp="$(mktemp)"
+trap 'rm -f "$correction_tmp"' EXIT
+openssl rand -base64 48 | tr -d '\n' > "$correction_tmp"
+sudo install -o 10001 -g 10001 -m 0600 "$correction_tmp" \
+  lark-runtime/secrets/new-api/lark_correction_secret
+sudo scripts/verify-lark-secret-permissions.sh --include-correction
+docker compose --profile lark stop lark-quota-controller
+docker compose stop new-api
+```
+
+Do not start either write-capable `lark-ops` service directly. For each preview/apply,
+the runner verifies secrets, rejects any running primary, creates the lock,
+rechecks the primary state, starts and waits for the temporary endpoint, runs
+one CLI command, removes the named CLI and endpoint containers, confirms both
+are absent, and only then releases the lock. If cleanup cannot be confirmed, the runner returns
+failure and deliberately retains the lock; follow its recovery command only
+after removing both containers and confirming their ID queries are empty.
+Define this helper in the same authorized operator session. `sudo` is required
+because the verifier must read effective token values from `10001:10001/0600`
+files without printing them:
+
+```bash
+correction() {
+  sudo scripts/run-lark-correction.sh "$@"
+}
+```
+
 ## Wallet correction
 
 Choose the actual signed `wallet_delta`; do not automatically negate the
@@ -76,10 +125,7 @@ calculated from the original grant.
 Run without `--apply` first:
 
 ```bash
-./bin/lark-correction \
-  --controller-db /var/lib/lark-controller/controller.sqlite \
-  --new-api-base-url http://new-api:3001 \
-  --correction-secret-file /run/secrets/lark_correction_secret \
+correction \
   --reversal-event-key '<reversal-event-key>' \
   --original-external-id 'lark:wallet-topup:<original-instance>' \
   --external-id 'lark:correction:<change-ticket>:wallet' \
@@ -134,10 +180,7 @@ A subscription correction is an absolute target. It requires the current
 assignment version and never means "add another subscription":
 
 ```bash
-./bin/lark-correction \
-  --controller-db /var/lib/lark-controller/controller.sqlite \
-  --new-api-base-url http://new-api:3001 \
-  --correction-secret-file /run/secrets/lark_correction_secret \
+correction \
   --reversal-event-key '<reversal-event-key>' \
   --original-external-id 'lark:subscription-level:<original-instance>' \
   --external-id 'lark:correction:<change-ticket>:subscription' \
@@ -196,8 +239,22 @@ assignment state, or cache outbox events.
 
 ## Verify and close
 
-Run `--list-pending` again. The handled event must be absent; its inbox,
+Run `scripts/run-lark-correction.sh --list-pending` again. The handled event must be absent; its inbox,
 ordinary job, and any fenced grant job are `reversal_resolved`; and
 `lark_approval_reversal_pending{reason}` must decrease. Preserve the CLI
-receipt with the change ticket, then remove the one-shot secret mount and
-complete credential rotation or revocation.
+receipt with the change ticket. Then close the maintenance boundary in this
+order:
+
+```bash
+test ! -e lark-runtime/ops/maintenance.lock
+docker compose --profile lark-ops ps
+docker compose up -d new-api
+docker compose --profile lark up -d lark-quota-controller
+scripts/verify-deployment.sh
+```
+
+Confirm no `lark-ops` container or maintenance lock remains, then complete credential rotation or
+revocation and remove the short-lived host file according to the change ticket.
+If the remote commit outcome is uncertain, preserve the original command and
+attempt record and follow the exact-replay recovery rules before closing the
+ticket; never improvise a second correction.

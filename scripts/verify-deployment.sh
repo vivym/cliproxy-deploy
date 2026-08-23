@@ -25,6 +25,7 @@ dotenv_value() {
 
 SUB2API_ADMIN_HOST="$(dotenv_value SUB2API_ADMIN_HOST)"
 NEW_API_HOST="$(dotenv_value NEW_API_HOST)"
+LARK_OAUTH_PUBLIC_ENABLED="$(dotenv_value LARK_OAUTH_PUBLIC_ENABLED true)"
 env_new_api_test_key="$(dotenv_value NEW_API_TEST_API_KEY true)"
 NEW_API_TEST_API_KEY="${NEW_API_TEST_API_KEY:-$env_new_api_test_key}"
 
@@ -67,6 +68,62 @@ curl -fsS "${new_api_url}/api/status" >/dev/null
 echo "Checking New API to Sub2API internal reachability"
 compose exec -T new-api \
   wget -q -O /dev/null http://sub2api:8080/health
+
+if printf '%s\n' "$running_services" | grep -qx "lark-quota-controller"; then
+  echo "Checking Lark Controller readiness from New API"
+  compose exec -T new-api \
+    wget -q -O /dev/null http://lark-quota-controller:8080/readyz
+
+  echo "Checking the New API integration route is absent from the public listener"
+  public_integration_status="$(
+    curl -sS -o /dev/null -w '%{http_code}' \
+      "${new_api_url}/api/integrations/v1/principals"
+  )"
+  if [[ "$public_integration_status" != "404" ]]; then
+    echo "New API integration route must not be public; expected 404, got ${public_integration_status}" >&2
+    exit 1
+  fi
+
+  if [[ -z "$LARK_OAUTH_PUBLIC_ENABLED" || "$LARK_OAUTH_PUBLIC_ENABLED" == "false" ]]; then
+    echo "Checking Lark OAuth routes are disabled during webhook-only shadow"
+    oauth_status="$(
+      curl -sS -o /dev/null -w '%{http_code}' \
+        "${new_api_url}/integrations/lark/oauth/authorize"
+    )"
+    if [[ "$oauth_status" != "404" ]]; then
+      echo "Lark OAuth routes are disabled but publicly reachable; expected 404, got ${oauth_status}" >&2
+      exit 1
+    fi
+  else
+    if [[ "$LARK_OAUTH_PUBLIC_ENABLED" != "true" ]]; then
+      echo "LARK_OAUTH_PUBLIC_ENABLED must be true or false" >&2
+      exit 1
+    fi
+    echo "Checking Lark OAuth authorize route is active"
+    oauth_status="$(
+      curl -sS -o /dev/null -w '%{http_code}' \
+        "${new_api_url}/integrations/lark/oauth/authorize"
+    )"
+    if [[ "$oauth_status" != "400" ]]; then
+      echo "Lark OAuth authorize route must reject an empty request; expected 400, got ${oauth_status}" >&2
+      exit 1
+    fi
+  fi
+
+  echo "Checking the internal New API listener rejects missing credentials"
+  integration_headers="$(
+    compose exec -T new-api \
+      wget -S -O /dev/null -T 5 \
+      http://127.0.0.1:3001/api/integrations/v1/principals 2>&1 || true
+  )"
+  if ! printf '%s\n' "$integration_headers" | grep -Eq 'HTTP/[0-9.]+ 401([[:space:]]|$)'; then
+    echo "New API internal listener must reject missing credentials; expected 401" >&2
+    exit 1
+  fi
+  echo "Lark integration verification checks completed"
+else
+  echo "Skipping Lark integration checks; lark-quota-controller is not running"
+fi
 
 if [[ -n "${NEW_API_TEST_API_KEY:-}" ]]; then
   echo "Checking New API /v1/models with NEW_API_TEST_API_KEY"

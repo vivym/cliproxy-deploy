@@ -43,7 +43,7 @@ load_backup_credentials() {
   NEW_API_REDIS_PASSWORD="$(dotenv_value NEW_API_REDIS_PASSWORD)"
 }
 
-compose() {
+docker_cli() {
   local -a clean_env=(env -i "PATH=$PATH" "HOME=${HOME:-/nonexistent}")
   local docker_variable
 
@@ -52,7 +52,11 @@ compose() {
       clean_env+=("${docker_variable}=${!docker_variable}")
     fi
   done
-  "${clean_env[@]}" docker compose "$@"
+  "${clean_env[@]}" docker "$@"
+}
+
+compose() {
+  docker_cli compose "$@"
 }
 
 configure_layout() {
@@ -90,6 +94,11 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 python3 "$dotenv_reader" --validate .env
+
+if [[ -n "$(dotenv_value NEW_API_INTEGRATION_LISTEN_ADDR true)" ]]; then
+  echo "Lark quiesce backup barrier is not implemented; disable the integration before backup" >&2
+  exit 1
+fi
 
 env_backup_root="$(dotenv_value BACKUP_DIR true)"
 backup_root="${BACKUP_DIR:-${env_backup_root:-/var/backups/new-api}}"
@@ -177,6 +186,32 @@ service_is_running() {
   local service="$1"
   printf '%s\n' "$running_services" | grep -qx "$service"
 }
+
+if service_is_running lark-quota-controller; then
+  echo "Lark quiesce backup barrier is not implemented; refusing an incomplete Controller backup" >&2
+  exit 1
+fi
+
+if service_is_running new-api; then
+  effective_lark_listener="$(
+    # Expand inside the container, not on the host.
+    # shellcheck disable=SC2016
+    compose exec -T new-api sh -c \
+      'printf "%s" "${INTEGRATION_LISTEN_ADDR:-}"'
+  )"
+  if [[ -n "$effective_lark_listener" ]]; then
+    echo "Lark quiesce backup barrier is not implemented; refusing a backup with a running New API integration listener" >&2
+    exit 1
+  fi
+fi
+
+lark_controller_volumes="$(
+  docker_cli volume ls --quiet --filter name=new-api-lark-controller-data
+)"
+if printf '%s\n' "$lark_controller_volumes" | grep -qx new-api-lark-controller-data; then
+  echo "Lark quiesce backup barrier is not implemented; refusing a backup while Controller SQLite state exists" >&2
+  exit 1
+fi
 
 stop_running_service() {
   local service="$1"

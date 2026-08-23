@@ -133,8 +133,16 @@ func NewHandler(
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
+	h.RegisterPublic(mux)
+	h.RegisterInternal(mux)
+}
+
+func (h *Handler) RegisterPublic(mux *http.ServeMux) {
 	mux.HandleFunc("GET /integrations/lark/oauth/authorize", h.authorize)
 	mux.HandleFunc("GET /integrations/lark/oauth/callback", h.callback)
+}
+
+func (h *Handler) RegisterInternal(mux *http.ServeMux) {
 	mux.HandleFunc("/internal/oauth/token", h.token)
 	mux.HandleFunc("/internal/oauth/userinfo", h.userInfo)
 }

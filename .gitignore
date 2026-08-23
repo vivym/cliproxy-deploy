@@ -12,6 +12,18 @@
 /sub2api-postgres-data/
 /sub2api-redis-data/
 /letsencrypt/
+/lark-runtime/secrets/*
+!/lark-runtime/secrets/shared/
+!/lark-runtime/secrets/controller/
+!/lark-runtime/secrets/new-api/
+/lark-runtime/secrets/shared/*
+/lark-runtime/secrets/controller/*
+/lark-runtime/secrets/new-api/*
+!/lark-runtime/secrets/shared/.gitkeep
+!/lark-runtime/secrets/controller/.gitkeep
+!/lark-runtime/secrets/new-api/.gitkeep
+/lark-runtime/ops/*
+!/lark-runtime/ops/.gitkeep
 
 # Local editor and OS files
 .DS_Store

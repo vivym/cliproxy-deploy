@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -57,6 +58,7 @@ type Config struct {
 	BridgeClientID               string
 	BridgeClientSecretFile       string
 	NewAPIOAuthCallbackAllowlist []string
+	OAuthPublicEnabled           bool
 	OAuthRateLimitPerMinute      int
 	OAuthTrustedProxyCIDRs       []netip.Prefix
 	WorkerPoll                   time.Duration
@@ -69,14 +71,34 @@ func Load(getenv func(string) string) (Config, error) {
 	if getenv == nil {
 		return Config{}, errors.New("environment lookup is required")
 	}
+	appSecret, err := loadSecret(getenv, "LARK_APP_SECRET", "LARK_APP_SECRET_FILE")
+	if err != nil {
+		return Config{}, err
+	}
+	verificationToken, err := loadSecret(
+		getenv,
+		"LARK_VERIFICATION_TOKEN",
+		"LARK_VERIFICATION_TOKEN_FILE",
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	eventEncryptKey, err := loadSecret(
+		getenv,
+		"LARK_EVENT_ENCRYPT_KEY",
+		"LARK_ENCRYPT_KEY_FILE",
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	loaded := Config{
 		Mode:                       Mode(getenv("LARK_CONTROLLER_MODE")),
 		ListenAddress:              getenv("LARK_CONTROLLER_LISTEN_ADDR"),
 		DatabasePath:               getenv("LARK_CONTROLLER_DB_PATH"),
 		AppID:                      getenv("LARK_APP_ID"),
-		AppSecret:                  getenv("LARK_APP_SECRET"),
-		VerificationToken:          getenv("LARK_VERIFICATION_TOKEN"),
-		EventEncryptKey:            getenv("LARK_EVENT_ENCRYPT_KEY"),
+		AppSecret:                  appSecret,
+		VerificationToken:          verificationToken,
+		EventEncryptKey:            eventEncryptKey,
 		TenantKey:                  getenv("LARK_TENANT_KEY"),
 		Locale:                     getenv("LARK_APPROVAL_LOCALE"),
 		ActivePolicyVersion:        getenv("LARK_ACTIVE_POLICY_VERSION"),
@@ -99,6 +121,14 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	loaded.NewAPIOAuthCallbackAllowlist = callbackAllowlist
+	switch getenv("LARK_OAUTH_PUBLIC_ENABLED") {
+	case "", "false":
+		loaded.OAuthPublicEnabled = false
+	case "true":
+		loaded.OAuthPublicEnabled = true
+	default:
+		return Config{}, errors.New("LARK_OAUTH_PUBLIC_ENABLED must be true or false")
+	}
 	if raw := getenv("LARK_OAUTH_RATE_LIMIT_PER_MINUTE"); raw != "" {
 		limit, parseErr := strconv.Atoi(raw)
 		if parseErr != nil || limit < 1 || limit > maxOAuthRateLimitPerMinute {
@@ -216,6 +246,31 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	return loaded, nil
+}
+
+func loadSecret(getenv func(string) string, valueName, fileName string) (string, error) {
+	value := getenv(valueName)
+	path := getenv(fileName)
+	if value != "" && path != "" {
+		return "", fmt.Errorf("%s and %s cannot both be set", valueName, fileName)
+	}
+	if path == "" {
+		return value, nil
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", fileName, err)
+	}
+	secret := string(contents)
+	if strings.HasSuffix(secret, "\r\n") {
+		secret = strings.TrimSuffix(secret, "\r\n")
+	} else {
+		secret = strings.TrimSuffix(secret, "\n")
+	}
+	if strings.ContainsAny(secret, "\r\n") {
+		return "", fmt.Errorf("%s must contain exactly one line", fileName)
+	}
+	return secret, nil
 }
 
 func validOpenID(value string) bool {

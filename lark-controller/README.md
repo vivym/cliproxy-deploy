@@ -135,9 +135,9 @@ Required environment variables:
 LARK_CONTROLLER_MODE=shadow
 LARK_CONTROLLER_DB_PATH=/data/controller.sqlite
 LARK_APP_ID=...
-LARK_APP_SECRET=...
-LARK_VERIFICATION_TOKEN=...
-LARK_EVENT_ENCRYPT_KEY=...
+LARK_APP_SECRET_FILE=/run/secrets/lark_app_secret
+LARK_VERIFICATION_TOKEN_FILE=/run/secrets/lark_verification_token
+LARK_ENCRYPT_KEY_FILE=/run/secrets/lark_encrypt_key
 LARK_TENANT_KEY=...
 LARK_ACTIVE_POLICY_VERSION=...
 LARK_POLICY_BUNDLE_DIR=/policies
@@ -147,6 +147,11 @@ NEW_API_BRIDGE_CLIENT_ID=...
 NEW_API_BRIDGE_CLIENT_SECRET_FILE=/run/secrets/new_api_bridge_client_secret
 NEW_API_OAUTH_CALLBACK_ALLOWLIST=https://ai.x2r.store/oauth/lark
 ```
+
+The three common Lark credentials support inline `LARK_APP_SECRET`,
+`LARK_VERIFICATION_TOKEN`, and `LARK_EVENT_ENCRYPT_KEY` values for local test
+fixtures. Production must use the corresponding file variables above. Setting
+an inline value and its file variable together is rejected.
 
 Active mode additionally requires:
 
@@ -194,6 +199,7 @@ LARK_APPROVAL_LOCALE=zh-CN
 LARK_READINESS_MAX_QUEUE_AGE=15m
 LARK_PROCESSING_LEASE_TIMEOUT=5m
 LARK_PROCESSING_RECOVERY_INTERVAL=1m
+LARK_OAUTH_PUBLIC_ENABLED=false
 LARK_OAUTH_RATE_LIMIT_PER_MINUTE=30
 LARK_OAUTH_TRUSTED_PROXY_CIDRS=172.31.20.0/24
 LARK_RECONCILIATION_INTERVAL=24h
@@ -431,13 +437,16 @@ go vet ./...
 go build ./cmd/lark-controller
 ```
 
-This slice does not add the service to Docker Compose and must not be deployed.
-Active grant and real-time principal-disable execution, the durable opaque
+The root deployment now has locally verified `lark` and `lark-ops` Compose
+profiles, separate Controller/correction image targets, and least-privilege
+secret mounts. This is not production authorization: immutable published image
+digests, real tenant configuration, cross-network probes, and the two-database
+quiesce backup/restore barrier remain open gates. Active grant and real-time principal-disable execution, the durable opaque
 OAuth credential store, the outbound Lark token/userinfo adapter, and the
 public OAuth authorize/callback handlers, internal token/userinfo handlers,
 and idempotent base-subscription dispatch are implemented locally. Employment
 reconciliation, runtime stale-claim recovery, and event-driven approval
 reversal fencing are also implemented locally. Periodic approval reconciliation
-and the operator correction workflow are now implemented locally; Compose wiring
-and production validation remain follow-up work. Do not
+and the operator correction workflow are implemented locally. Production
+validation remains follow-up work. Do not
 enable active mode in production before those gates are complete.

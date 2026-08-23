@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏、周期性 approval reconciliation 和管理员一次性纠正流程；WP4/WP5 未实施，尚未接入 Compose、部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏、周期性 approval reconciliation 和管理员一次性纠正流程；WP4 已完成本地 Compose/profile/network/volume/least-privilege secret/verify 基础接入，并用独立 `lark-ops` target 隔离 correction credential，但镜像 digest、quiesce backup/restore、全相邻网络探测和生产配置仍未完成；WP5 未实施，未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1361,9 +1361,9 @@ Lark 的审批订阅接口目前要求 `approval:approval` 或 `approval:definit
 
 应用可用范围只开放给允许使用 AI Gateway 的员工或组织单元。Controller 仍以 `tenant_key` allowlist 做第二层校验。
 
-## 目标部署拓扑（尚未落入当前 `docker-compose.yml`）
+## 当前本地部署拓扑（尚未生产验收）
 
-当前根 Compose 仍只运行 upstream New API、Sub2API 及其数据服务，没有 Controller、`:3001` integration listener、`lark-integration` network、policy volume 或 integration secret。目标是在根目录唯一的 `docker-compose.yml` 中增加 `lark-quota-controller`，并把自定义 New API fork 镜像固定到不可变 tag 或 digest。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
+当前根 Compose 已在 `lark` profile 中本地接入 `lark-quota-controller`、`:3001` integration listener、`lark-integration` network、policy mount、Controller volume 和按 consumer 隔离的 file-backed secrets，并提供 current/next integration credential window。基础 New API 与常驻 Controller 均不挂 correction credential；`lark-ops` profile 使用独立 correction image target 和临时、无 edge/Traefik/host-port 的 New API endpoint。`--list-pending` 走无网络、无 secret、Controller SQLite 只读挂载的独立 service，不启动 New API endpoint。write-path host runner 用 Docker service state（不依赖健康探针）排除正在运行的常驻服务，在整个临时 endpoint/CLI 生命周期持有共享 maintenance lock，并在加锁后重新检查；只有确认命名 one-shot CLI 与 endpoint container 均已删除才释放 lock，无法确认时保留 lock 并失败。基础 New API/Controller 与临时写服务因此互斥。该接入只完成本地渲染、镜像构建和测试，尚未发布不可变 image digest、配置真实 tenant 或完成生产网络/backup barrier 验收。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
 
 网络：
 
@@ -1432,6 +1432,7 @@ LARK_APPROVAL_RECONCILIATION_LOOKBACK
 NEW_API_BRIDGE_CLIENT_ID
 NEW_API_BRIDGE_CLIENT_SECRET_FILE
 NEW_API_OAUTH_CALLBACK_ALLOWLIST
+LARK_OAUTH_PUBLIC_ENABLED
 LARK_OAUTH_RATE_LIMIT_PER_MINUTE
 LARK_OAUTH_TRUSTED_PROXY_CIDRS
 LARK_PROCESSING_LEASE_TIMEOUT
@@ -1439,7 +1440,7 @@ LARK_PROCESSING_RECOVERY_INTERVAL
 CONTROLLER_DATABASE_PATH
 ```
 
-`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`LARK_INTEGRATION_SECRET_FILE` 保存一个不少于 32 字节的 printable、无空白 ASCII bearer token，可带一个 LF 或 CRLF 结尾；仅 active mode 读取。`LARK_RECONCILIATION_HEALTH_OPEN_ID` 同样仅 active mode 必需，必须是当前 tenant 和应用可用范围内稳定且已知 active 的 open_id；扫描前后任一探针不为 present 时，本次扫描只记失败，不提交证据。`LARK_RECONCILIATION_INTERVAL` 仅 active mode 生效，默认 `24h`，只允许 `24h..168h`；失败后至少间隔 15 分钟重试，若 Lark 给出更长 `Retry-After` 则遵守该值，但不超过正常 reconciliation interval。`LARK_PROCESSING_LEASE_TIMEOUT` 和 `LARK_PROCESSING_RECOVERY_INTERVAL` 在 shadow/active 均生效，默认分别为 `5m` 和 `1m`；lease 只允许 `1m..1h`，扫描周期至少 `10s` 且不能超过 lease，两者之和必须小于 readiness queue age。`NEW_API_BRIDGE_CLIENT_SECRET_FILE` 保存一个 32 至 4096 字节的 printable、无空白 ASCII client secret，可带一个 LF 或 CRLF 结尾；shadow/active 均在 startup gate 读取，明文不能放入环境变量、日志或 SQLite。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。OAuth authorize、callback、token 和 userinfo 使用四个独立的 per-client 一分钟固定窗口，`LARK_OAUTH_RATE_LIMIT_PER_MINUTE` 默认 30；authorize 另有每个 resolved client 每 5 分钟最多签发 20 个 state、全局每分钟最多签发 500 个 state 的固定硬限制。IPv4 client key 使用单个地址，IPv6 client key 统一按 masked `/64` 归组。被后续门禁拒绝或 state 持久化失败时必须回滚已预留的签发计数和空 map entry；`429 Retry-After` 必须反映实际拒绝请求的一分钟或五分钟窗口。只有直接对端位于显式 `LARK_OAUTH_TRUSTED_PROXY_CIDRS` 时才解析 `X-Forwarded-For`，该配置必须只包含实际 Controller 前置代理网段。
+`LARK_POLICY_BUNDLE_DIR` 和 `LARK_APPROVAL_BINDINGS_FILE` 必须能同时保留 active、draining 和 replay 所需的历史版本，不能只配置两个“当前 approval code”。`LARK_GRANT_PAYLOAD_KEYRING_FILE` 每行保存一个 64 字符小写 hex key，整个文件统一使用 LF 或 CRLF，拒绝混合换行和裸 CR；第一行是新 job 的 primary key，后续行只用于解密轮换前的非终态 job。轮换必须先以“新 key + 全部旧 key”原子替换文件，重启 Controller 并通过 startup gate 后才恢复服务；只有旧 key 不再关联任何非终态 job 后，才能原子安装删去该 key 的文件并再次重启通过同一门禁。`LARK_INTEGRATION_SECRET_FILE` 保存一个不少于 32 字节的 printable、无空白 ASCII bearer token，可带一个 LF 或 CRLF 结尾；仅 active mode 读取。`LARK_RECONCILIATION_HEALTH_OPEN_ID` 同样仅 active mode 必需，必须是当前 tenant 和应用可用范围内稳定且已知 active 的 open_id；扫描前后任一探针不为 present 时，本次扫描只记失败，不提交证据。`LARK_RECONCILIATION_INTERVAL` 仅 active mode 生效，默认 `24h`，只允许 `24h..168h`；失败后至少间隔 15 分钟重试，若 Lark 给出更长 `Retry-After` 则遵守该值，但不超过正常 reconciliation interval。`LARK_PROCESSING_LEASE_TIMEOUT` 和 `LARK_PROCESSING_RECOVERY_INTERVAL` 在 shadow/active 均生效，默认分别为 `5m` 和 `1m`；lease 只允许 `1m..1h`，扫描周期至少 `10s` 且不能超过 lease，两者之和必须小于 readiness queue age。`NEW_API_BRIDGE_CLIENT_SECRET_FILE` 保存一个 32 至 4096 字节的 printable、无空白 ASCII client secret，可带一个 LF 或 CRLF 结尾；shadow/active 均在 startup gate 读取，明文不能放入环境变量、日志或 SQLite。`NEW_API_INTERNAL_BASE_URL` 初始值为 `http://new-api:3001`，`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 初始只允许 `https://ai.x2r.store/oauth/lark`。`LARK_OAUTH_PUBLIC_ENABLED` 只接受 `true/false`，默认 `false`；关闭时 Controller 不注册公开 authorize/callback handler，Traefik exact path 稳定返回 `404`，内部 token/userinfo handler 不受影响。OAuth authorize、callback、token 和 userinfo 使用四个独立的 per-client 一分钟固定窗口，`LARK_OAUTH_RATE_LIMIT_PER_MINUTE` 默认 30；authorize 另有每个 resolved client 每 5 分钟最多签发 20 个 state、全局每分钟最多签发 500 个 state 的固定硬限制。IPv4 client key 使用单个地址，IPv6 client key 统一按 masked `/64` 归组。被后续门禁拒绝或 state 持久化失败时必须回滚已预留的签发计数和空 map entry；`429 Retry-After` 必须反映实际拒绝请求的一分钟或五分钟窗口。只有直接对端位于显式 `LARK_OAUTH_TRUSTED_PROXY_CIDRS` 时才解析 `X-Forwarded-For`，该配置必须只包含实际 Controller 前置代理网段。
 
 approval reconciliation 在 shadow/active 都运行。`LARK_APPROVAL_RECONCILIATION_INTERVAL` 默认 `15m`、只允许 `1m..24h`；`LARK_APPROVAL_RECONCILIATION_LOOKBACK` 默认 `72h`、只允许 `1h..720h`。失败后至少等待 5 分钟，较长的 `Retry-After` 最多遵守 24 小时。它与 active-only employment reconciliation 共用 100ms process-wide Lark request pacer。
 
@@ -1855,7 +1856,7 @@ employment reconciliation 共用 100ms process-wide pacer，避免两类定时�
 operator/reason/change ticket、response status、sanitized result 和 resolved timestamp，并把 inbox、
 同 original 的全部 pending reversal、普通 job 与 fenced grant job 原子推进到 `reversal_resolved` 并核验预期行数。晚到 reversal 复用并 attach 同一 receipt；同 resolution 可重放，任何 payload
 漂移冲突；CLI 和 Store 均要求 correction type 与 original grant type 一致，并把输入 subject 的 SHA-256 与原 command shadow 绑定；New API 在原 grant ledger 存在时再次验证主体和类型。New API response loss
-使用相同 external ID/payload 重放；New API 的 original-grant unique fence 阻止并发不同 correction 二次生效。Controller 已保存 resolution 时 CLI 直接返回或 attach 本地收据，不再次调用 New API。实现和运行说明见 `docs/runbooks/lark-entitlement-correction.md`。Compose 接入和生产验证仍未实现。
+使用相同 external ID/payload 重放；New API 的 original-grant unique fence 阻止并发不同 correction 二次生效。Controller 已保存 resolution 时 CLI 直接返回或 attach 本地收据，不再次调用 New API。实现和运行说明见 `docs/runbooks/lark-entitlement-correction.md`。根 Compose 的 `lark-ops` profile 将 correction CLI 与短期 credential 隔离到独立 image target；常驻 New API/Controller 不持有该 credential。生产验证仍未实现。
 
 当前 Approval fetch 对 HTTP `408/429/5xx`、Lark business code `99991400`、timeout
 和 transport failure 使用 `5s, 15s, 1m, 5m, 15m, 1h` 加 deterministic jitter 的
@@ -1866,13 +1867,14 @@ job 年龄，未来的 `retry_wait` 不会被误判为卡死。
 
 ### WP4：部署和运维
 
-- 修改根目录唯一的 `docker-compose.yml`，不引入 overlay 或第二套部署入口。
-- 增加显式命名为 `new-api-lark-integration` 的 `lark-integration` network、Traefik path router 和 Controller volume。
-- 固定 New API fork 和 Controller image digest。
-- 扩展 `.env.example`，但不提交任何 secret。
-- 扩展带 quiesce barrier、receipt 和同包校验的 backup、restore 和 verify 脚本。
-- 验证 `:3001` 从公网不可路由、从所有相邻容器无凭证均为 `401`。
-- 编写 Lark 后台配置、policy/approval 版本发布、密钥轮换、dead-letter、退款和 reversal runbook。
+- [x] 修改根目录唯一的 `docker-compose.yml`，不引入 overlay 或第二套部署入口。
+- [x] 增加显式命名为 `new-api-lark-integration` 的 `lark-integration` network、分离的 events/OAuth Traefik exact-path router 和 Controller volume。
+- [ ] 发布并固定 New API fork 和 Controller image digest；当前模板只提供 repository/tag 输入和本地 Controller build。
+- [x] 扩展 `.env.example` 和按 `shared/controller/new-api` consumer 隔离的 file-backed secret mount，但不提交任何 secret；Controller/correction image target 已分离，integration current/next rotation window 与 correction 三方独立性检查已接入。
+- [ ] 扩展带 quiesce barrier、receipt 和同包校验的 backup、restore 脚本；当前脚本同时检查 `.env`、运行容器 effective listener 和残留 Controller volume，明确拒绝生成或恢复不含 Controller SQLite 的伪完整包。
+- [x] 本地 verify 已检查公网 integration path 为 `404`、New API 容器内无凭证访问 `:3001` 为 `401`、Controller `readyz` 和 OAuth 灰度门禁。
+- [ ] 在获准的生产维护窗口从 `edge`、`new-api-data` 和 `lark-integration` 各自独立 probe，完成公网与所有相邻网络验收。
+- [x] 增加 Compose 灰度、secret/policy/rotation 配置、host-side correction maintenance lock 和回滚 runbook；Lark 后台实租户配置、dead-letter 和 reversal 演练仍待执行。
 
 ### WP5：灰度上线
 

@@ -71,7 +71,8 @@ class NewApiRestoreTests(unittest.TestCase):
         text = ENV_EXAMPLE.read_text(encoding="utf-8")
         for line in [
             "NEW_API_HOST=ai.example.com",
-            "NEW_API_IMAGE_TAG=v0.13.2",
+            "NEW_API_IMAGE_REPOSITORY=",
+            "NEW_API_IMAGE_TAG=",
             "NEW_API_POSTGRES_USER=new_api",
             "NEW_API_POSTGRES_DB=new_api",
             "NEW_API_POSTGRES_PASSWORD=",
@@ -80,6 +81,7 @@ class NewApiRestoreTests(unittest.TestCase):
             "NEW_API_CRYPTO_SECRET=",
         ]:
             self.assertIn(line, text)
+        self.assertNotIn("calciumion/new-api", text)
 
     def test_restore_new_api_only_script_scope(self):
         self.assertTrue(RESTORE_SCRIPT.exists())

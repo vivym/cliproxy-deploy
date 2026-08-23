@@ -128,6 +128,17 @@ func TestBrowserCanCompleteLarkAuthorizationAndReceiveOpaqueLoginCode(t *testing
 	if err != nil {
 		t.Fatalf("new OAuth bridge handler: %v", err)
 	}
+	internalOnlyMux := http.NewServeMux()
+	handler.RegisterInternal(internalOnlyMux)
+	disabledAuthorize := httptest.NewRecorder()
+	internalOnlyMux.ServeHTTP(disabledAuthorize, httptest.NewRequest(
+		http.MethodGet,
+		"/integrations/lark/oauth/authorize",
+		nil,
+	))
+	if disabledAuthorize.Code != http.StatusNotFound {
+		t.Fatalf("internal-only public authorize status = %d, want 404", disabledAuthorize.Code)
+	}
 	mux := http.NewServeMux()
 	handler.Register(mux)
 

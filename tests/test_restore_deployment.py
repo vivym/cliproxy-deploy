@@ -104,7 +104,148 @@ class RestoreDeploymentTests(unittest.TestCase):
         self.assertNotIn("docker-compose.newapi.yml", text)
         self.assertIn("pg_restore", text)
         self.assertIn("Restore completed", text)
+        self.assertIn("Lark quiesce restore barrier is not implemented", text)
+        self.assertIn("running New API integration listener", text)
+        self.assertIn("new-api-lark-controller-data", text)
         self.assertNotIn("cliproxy", text.lower())
+
+    def test_restore_rejects_lark_enabled_backup_before_docker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            (root / ".env").write_text("CURRENT_ENV=true\n", encoding="utf-8")
+            package = self.create_backup_package(
+                tmp_root,
+                runtime_env_lines=[
+                    "NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001",
+                ],
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker_marker = root / "docker-called"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"#!/usr/bin/env bash\ntouch {docker_marker}\nexit 99\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Lark quiesce restore barrier is not implemented", result.stderr)
+            self.assertFalse(docker_marker.exists())
+
+    def test_restore_rejects_stale_env_when_running_new_api_listener_is_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            (root / ".env").write_text(
+                "NEW_API_INTEGRATION_LISTEN_ADDR=\n", encoding="utf-8"
+            )
+            package = self.create_backup_package(tmp_root)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+if [[ "$*" == *" config --quiet" ]]; then
+  exit 0
+fi
+if [[ "$*" == "compose ps --services --filter status=running" ]]; then
+  printf '%s\\n' new-api
+  exit 0
+fi
+if [[ "$*" == *"exec -T new-api sh -c"* ]]; then
+  printf '0.0.0.0:3001'
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("running New API integration listener", result.stderr)
+            self.assertNotIn(" down", calls_file.read_text(encoding="utf-8"))
+
+    def test_restore_rejects_stopped_controller_state_volume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text(
+                "services: {}\n", encoding="utf-8"
+            )
+            (root / ".env").write_text(
+                "NEW_API_INTEGRATION_LISTEN_ADDR=\n", encoding="utf-8"
+            )
+            package = self.create_backup_package(tmp_root)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            calls_file = root / "docker-calls"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> {calls_file}
+if [[ "$*" == *" config --quiet" ]]; then
+  exit 0
+fi
+if [[ "$*" == "compose ps --services --filter status=running" ]]; then
+  exit 0
+fi
+if [[ "$*" == "volume ls --quiet --filter name=new-api-lark-controller-data" ]]; then
+  printf '%s\\n' new-api-lark-controller-data
+  exit 0
+fi
+echo "unexpected docker call: $*" >&2
+exit 99
+""",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Controller SQLite state exists", result.stderr)
+            self.assertNotIn(" down", calls_file.read_text(encoding="utf-8"))
 
     def test_restore_replaces_runtime_and_both_database_domains(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,6 +282,9 @@ if [[ "$1" == "inspect" ]]; then
     new-api-postgres-container) echo "new-api-postgres-data-volume" ;;
     new-api-redis-container) echo "new-api-redis-data-volume" ;;
   esac
+  exit 0
+fi
+if [[ "$*" == "volume ls --quiet --filter name=new-api-lark-controller-data" ]]; then
   exit 0
 fi
 if [[ "$1" == "run" ]]; then
