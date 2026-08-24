@@ -282,6 +282,12 @@ if [[ -z "$configured_lark_listener" && "$lark_controller_volume_exists" == true
   exit 1
 fi
 if [[ -n "$configured_lark_listener" ]]; then
+  for config_source in policy.json production.binding.json lark-console-attestation.json; do
+    if [[ ! -f "lark-runtime/config/${config_source}" ]]; then
+      echo "Missing required backup source: lark-runtime/config/${config_source}" >&2
+      exit 1
+    fi
+  done
   if [[ ! -f lark-runtime/policies/approval-bindings.json ]]; then
     echo "Missing required backup source: lark-runtime/policies/approval-bindings.json" >&2
     exit 1
@@ -290,7 +296,45 @@ if [[ -n "$configured_lark_listener" ]]; then
     echo "Missing required backup source: lark-runtime/policies/*.policy.json" >&2
     exit 1
   fi
+  if [[ ! -f lark-runtime/runtime/controller.env ]]; then
+    echo "Missing required backup source: lark-runtime/runtime/controller.env" >&2
+    exit 1
+  fi
+  if [[ ! -f lark-runtime/receipts/compile.json ]]; then
+    echo "Missing required backup source: lark-runtime/receipts/compile.json" >&2
+    exit 1
+  fi
 fi
+
+runtime_paths=(.env "$sub2api_app_data_dir" letsencrypt)
+if [[ "$lark_controller_volume_exists" == true ]]; then
+  runtime_paths+=(lark-runtime/config lark-runtime/policies lark-runtime/runtime lark-runtime/receipts lark-runtime/ops)
+fi
+
+validate_runtime_path() {
+  local path="$1"
+  local unsafe_path
+
+  if [[ ! -e "$path" || -L "$path" ]]; then
+    echo "Backup runtime path must be an existing non-symlink path: $path" >&2
+    exit 1
+  fi
+  unsafe_path="$(find "$path" -type l -print -quit)"
+  if [[ -n "$unsafe_path" ]]; then
+    echo "Backup runtime tree contains a symlink: $unsafe_path" >&2
+    exit 1
+  fi
+  unsafe_path="$(find "$path" -type f -links +1 -print -quit)"
+  if [[ -n "$unsafe_path" ]]; then
+    echo "Backup runtime tree contains a hard-linked file: $unsafe_path" >&2
+    exit 1
+  fi
+}
+
+for runtime_path in "${runtime_paths[@]}"; do
+  validate_runtime_path "$runtime_path"
+done
+
 for service in new-api-correction-endpoint lark-correction; do
   if service_is_running "$service"; then
     echo "Refusing backup while Lark correction service is running: $service" >&2
@@ -358,6 +402,7 @@ chmod 700 "$partial_dest"
 
 stop_running_service traefik
 stop_running_service lark-quota-controller
+stop_running_service new-api-config-endpoint
 stop_running_service new-api
 stop_running_service sub2api
 
@@ -397,11 +442,11 @@ compose exec -T "$new_api_redis_service" redis-cli \
 stop_running_service "$new_api_redis_service"
 compose cp "${new_api_redis_service}:/data" "${partial_dest}/new-api-redis-data"
 
-runtime_paths=(.env "$sub2api_app_data_dir" letsencrypt)
-if [[ "$lark_controller_volume_exists" == true ]]; then
-  runtime_paths+=(lark-runtime/policies)
-fi
-tar -czf "${partial_dest}/deployment-runtime.tgz" "${runtime_paths[@]}"
+tar \
+  --exclude='lark-runtime/ops/maintenance.lock' \
+  --exclude='lark-runtime/ops/maintenance.session' \
+  -czf "${partial_dest}/deployment-runtime.tgz" \
+  "${runtime_paths[@]}"
 
 manifest_args=(
   create

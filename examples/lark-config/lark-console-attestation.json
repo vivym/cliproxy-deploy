@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "app_id": "cli_REPLACE_WITH_LARK_APP_ID",
+  "tenant_key": "REPLACE_WITH_TENANT_KEY",
+  "redirect_urls": [
+    "https://ai.example.com/integrations/lark/oauth/callback"
+  ],
+  "console_events": [
+    "approval.instance.status_changed_v4",
+    "contact.user.deleted_v3"
+  ],
+  "approval_subscriptions": [],
+  "reviewed_by": "REPLACE_WITH_REVIEWER",
+  "reviewed_at": "2026-01-01T00:00:00Z",
+  "evidence": "REPLACE_WITH_CHANGE_RECORD_OR_EVIDENCE_URL"
+}

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: scripts/verify-lark-secret-permissions.sh [--include-next] [--include-correction] [SECRETS_DIR] [OWNER_UID:OWNER_GID]" >&2
+  echo "Usage: scripts/verify-lark-secret-permissions.sh [--include-next] [--include-correction] [--include-config] [SECRETS_DIR] [OWNER_UID:OWNER_GID]" >&2
 }
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -10,6 +10,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 include_correction=false
+include_config=false
 include_next=false
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
@@ -18,6 +19,9 @@ while [[ "${1:-}" == --* ]]; do
       ;;
     --include-next)
       include_next=true
+      ;;
+    --include-config)
+      include_config=true
       ;;
     *)
       usage
@@ -90,16 +94,18 @@ verify_path() {
 verify_secret_format() {
   local path="$1"
   local label="$2"
+  local maximum="${3:-0}"
 
   if [[ ! -r "$path" ]]; then
     echo "$label is not readable by the verifier; run as $expected_owner or root" >&2
     exit 1
   fi
-  if ! python3 - "$path" <<'PY'
+  if ! python3 - "$path" "$maximum" <<'PY'
 import pathlib
 import sys
 
 contents = pathlib.Path(sys.argv[1]).read_bytes()
+maximum = int(sys.argv[2])
 if contents.endswith(b"\r\n"):
     token = contents[:-2]
 elif contents.endswith(b"\n"):
@@ -107,11 +113,19 @@ elif contents.endswith(b"\n"):
 else:
     token = contents
 
-if len(token) < 32 or any(byte < 0x21 or byte > 0x7E for byte in token):
+if (
+    len(token) < 32
+    or maximum > 0 and len(token) > maximum
+    or any(byte < 0x21 or byte > 0x7E for byte in token)
+):
     raise SystemExit(1)
 PY
   then
-    echo "$label must be one printable ASCII token of at least 32 bytes with at most one LF/CRLF terminator" >&2
+    if [[ "$maximum" -gt 0 ]]; then
+      echo "$label must be one printable ASCII token between 32 and $maximum bytes with at most one LF/CRLF terminator" >&2
+    else
+      echo "$label must be one printable ASCII token of at least 32 bytes with at most one LF/CRLF terminator" >&2
+    fi
     exit 1
   fi
 }
@@ -157,7 +171,12 @@ done
 
 current_secret="${secrets_dir}/shared/lark_integration_secret"
 next_secret="${secrets_dir}/shared/lark_integration_secret_next"
+app_secret="${secrets_dir}/controller/lark_app_secret"
+bridge_secret="${secrets_dir}/controller/new_api_bridge_client_secret"
 verify_secret_format "$current_secret" "Current integration secret"
+verify_secret_format "$bridge_secret" "New API bridge client secret" 4096
+verify_distinct_secret "$app_secret" "$bridge_secret" \
+  "Lark app and New API bridge"
 if [[ "$include_next" == "true" || -e "$next_secret" ]]; then
   verify_path "$next_secret" 600
   verify_secret_format "$next_secret" "Next integration secret"
@@ -174,6 +193,27 @@ if [[ "$include_correction" == "true" ]]; then
   if [[ -e "$next_secret" ]]; then
     verify_distinct_secret "$next_secret" "$correction_secret" \
       "Correction and next integration"
+  fi
+fi
+
+if [[ "$include_config" == "true" ]]; then
+  config_secret="${secrets_dir}/config/lark_config_secret"
+  verify_path "${secrets_dir}/config" 700
+  verify_path "$config_secret" 600
+  verify_secret_format "$config_secret" "Configuration secret" 4096
+  verify_distinct_secret "$current_secret" "$config_secret" \
+    "Configuration and current integration"
+  verify_distinct_secret "$app_secret" "$config_secret" \
+    "Configuration and Lark app"
+  verify_distinct_secret "$bridge_secret" "$config_secret" \
+    "Configuration and New API bridge"
+  if [[ -e "$next_secret" ]]; then
+    verify_distinct_secret "$next_secret" "$config_secret" \
+      "Configuration and next integration"
+  fi
+  if [[ -e "${secrets_dir}/new-api/lark_correction_secret" ]]; then
+    verify_distinct_secret "${secrets_dir}/new-api/lark_correction_secret" "$config_secret" \
+      "Configuration and correction"
   fi
 fi
 

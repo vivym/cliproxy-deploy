@@ -328,12 +328,31 @@ case "$package_lark_state" in
       echo "Lark enabled backup is missing its integration listener configuration" >&2
       exit 1
     fi
+    for config_source in policy.json production.binding.json lark-console-attestation.json; do
+      if [[ ! -f "${runtime_dir}/lark-runtime/config/${config_source}" ]]; then
+        echo "Lark enabled backup is missing configuration source ${config_source}" >&2
+        exit 1
+      fi
+    done
     if [[ ! -f "${runtime_dir}/lark-runtime/policies/approval-bindings.json" ]]; then
       echo "Lark enabled backup is missing approval-bindings.json" >&2
       exit 1
     fi
     if ! compgen -G "${runtime_dir}/lark-runtime/policies/*.policy.json" >/dev/null; then
       echo "Lark enabled backup is missing versioned policy state" >&2
+      exit 1
+    fi
+    if [[ ! -f "${runtime_dir}/lark-runtime/runtime/controller.env" ]]; then
+      echo "Lark enabled backup is missing compiled Controller runtime configuration" >&2
+      exit 1
+    fi
+    if [[ ! -f "${runtime_dir}/lark-runtime/receipts/compile.json" ]]; then
+      echo "Lark enabled backup is missing its compile receipt" >&2
+      exit 1
+    fi
+    if [[ -e "${runtime_dir}/lark-runtime/ops/maintenance.lock" ||
+      -e "${runtime_dir}/lark-runtime/ops/maintenance.session" ]]; then
+      echo "Lark enabled backup contains a stale maintenance owner" >&2
       exit 1
     fi
     ;;
@@ -590,12 +609,32 @@ rm -rf \
 cp -a "${runtime_dir}/.env" "${deployment_dir}/.env"
 cp -a "$runtime_sub2api_data" "${deployment_dir}/sub2api-data"
 cp -a "${runtime_dir}/letsencrypt" "${deployment_dir}/letsencrypt"
-rm -rf "${deployment_dir}/lark-runtime/policies"
+rm -rf \
+  "${deployment_dir}/lark-runtime/config" \
+  "${deployment_dir}/lark-runtime/policies" \
+  "${deployment_dir}/lark-runtime/runtime" \
+  "${deployment_dir}/lark-runtime/receipts"
 if [[ "$package_lark_state" == enabled ]]; then
   mkdir -p "${deployment_dir}/lark-runtime"
   cp -a \
+    "${runtime_dir}/lark-runtime/config" \
+    "${deployment_dir}/lark-runtime/config"
+  cp -a \
     "${runtime_dir}/lark-runtime/policies" \
     "${deployment_dir}/lark-runtime/policies"
+  cp -a \
+    "${runtime_dir}/lark-runtime/runtime" \
+    "${deployment_dir}/lark-runtime/runtime"
+  cp -a \
+    "${runtime_dir}/lark-runtime/receipts" \
+    "${deployment_dir}/lark-runtime/receipts"
+  find "${deployment_dir}/lark-runtime/ops" \
+    -mindepth 1 -maxdepth 1 \
+    ! -name maintenance.lock ! -name maintenance.session \
+    -exec rm -rf -- {} +
+  cp -a \
+    "${runtime_dir}/lark-runtime/ops/." \
+    "${deployment_dir}/lark-runtime/ops/"
 fi
 chmod 600 "${deployment_dir}/.env"
 chmod 600 "${deployment_dir}/letsencrypt/acme.json" 2>/dev/null || true

@@ -1,0 +1,139 @@
+{
+  "format_version": 1,
+  "policy": {
+    "policy_version": "employee-entitlements-2026-09-v1",
+    "state": "active",
+    "levels": [
+      {
+        "level_code": "basic",
+        "rank": 10,
+        "monthly_quota": 5000000
+      },
+      {
+        "level_code": "plus",
+        "rank": 20,
+        "monthly_quota": 12500000
+      },
+      {
+        "level_code": "pro",
+        "rank": 30,
+        "monthly_quota": 25000000
+      },
+      {
+        "level_code": "power",
+        "rank": 40,
+        "monthly_quota": 50000000
+      }
+    ],
+    "wallet_packages": [
+      {
+        "package_code": "topup_5",
+        "quota_delta": 2500000
+      },
+      {
+        "package_code": "topup_10",
+        "quota_delta": 5000000
+      },
+      {
+        "package_code": "topup_25",
+        "quota_delta": 12500000
+      },
+      {
+        "package_code": "topup_50",
+        "quota_delta": 25000000
+      }
+    ]
+  },
+  "approvals": [
+    {
+      "approval_kind": "wallet_topup",
+      "locale": "zh-CN",
+      "fields": [
+        {
+          "custom_id": "cost_center",
+          "type": "textarea",
+          "required": true,
+          "options": []
+        },
+        {
+          "custom_id": "estimated_usage",
+          "type": "textarea",
+          "required": false,
+          "options": []
+        },
+        {
+          "custom_id": "request_reason",
+          "type": "textarea",
+          "required": true,
+          "options": []
+        },
+        {
+          "custom_id": "wallet_package",
+          "type": "radioV2",
+          "required": true,
+          "options": [
+            {
+              "display_text": "$5",
+              "code": "topup_5"
+            },
+            {
+              "display_text": "$10",
+              "code": "topup_10"
+            },
+            {
+              "display_text": "$25",
+              "code": "topup_25"
+            },
+            {
+              "display_text": "$50",
+              "code": "topup_50"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "approval_kind": "subscription_level",
+      "locale": "zh-CN",
+      "fields": [
+        {
+          "custom_id": "cost_center",
+          "type": "textarea",
+          "required": true,
+          "options": []
+        },
+        {
+          "custom_id": "estimated_usage",
+          "type": "textarea",
+          "required": true,
+          "options": []
+        },
+        {
+          "custom_id": "request_reason",
+          "type": "textarea",
+          "required": true,
+          "options": []
+        },
+        {
+          "custom_id": "target_level",
+          "type": "radioV2",
+          "required": true,
+          "options": [
+            {
+              "display_text": "Plus",
+              "code": "plus"
+            },
+            {
+              "display_text": "Pro",
+              "code": "pro"
+            },
+            {
+              "display_text": "Power",
+              "code": "power"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

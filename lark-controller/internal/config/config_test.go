@@ -33,7 +33,7 @@ func TestLoadReadsCommonSecretsFromFiles(t *testing.T) {
 		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   "/run/secrets/lark_grant_payload_keyring",
 		"NEW_API_BRIDGE_CLIENT_ID":          "bridge-client-id",
 		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "/run/secrets/new_api_bridge_client_secret",
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.example.com/oauth/lark",
 	}
 
 	loaded, err := config.Load(func(key string) string { return values[key] })
@@ -67,7 +67,7 @@ func TestLoadRequiresCommonSecretsAndDefaultsToShadowMode(t *testing.T) {
 		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   "/run/secrets/lark_grant_payload_keyring",
 		"NEW_API_BRIDGE_CLIENT_ID":          "bridge-client-id",
 		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "/run/secrets/new_api_bridge_client_secret",
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.example.com/oauth/lark",
 	}
 	loaded, err := config.Load(func(key string) string { return values[key] })
 	if err != nil {
@@ -92,7 +92,8 @@ func TestLoadRequiresCommonSecretsAndDefaultsToShadowMode(t *testing.T) {
 		loaded.BridgeClientID != "bridge-client-id" ||
 		loaded.BridgeClientSecretFile != "/run/secrets/new_api_bridge_client_secret" ||
 		len(loaded.NewAPIOAuthCallbackAllowlist) != 1 ||
-		loaded.NewAPIOAuthCallbackAllowlist[0] != "https://ai.x2r.store/oauth/lark" {
+		loaded.NewAPIOAuthCallbackAllowlist[0] != "https://ai.example.com/oauth/lark" ||
+		loaded.ControllerCallbackURI != "https://ai.example.com/integrations/lark/oauth/callback" {
 		t.Fatalf("unexpected OAuth config defaults: %+v", loaded)
 	}
 	values["LARK_OAUTH_PUBLIC_ENABLED"] = "true"
@@ -357,7 +358,7 @@ func TestLoadValidatesOAuthBridgeConfiguration(t *testing.T) {
 		"LARK_GRANT_PAYLOAD_KEYRING_FILE":   "/run/secrets/lark_grant_payload_keyring",
 		"NEW_API_BRIDGE_CLIENT_ID":          "bridge-client-id",
 		"NEW_API_BRIDGE_CLIENT_SECRET_FILE": "/run/secrets/new_api_bridge_client_secret",
-		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.x2r.store/oauth/lark",
+		"NEW_API_OAUTH_CALLBACK_ALLOWLIST":  "https://ai.example.com/oauth/lark",
 		"LARK_OAUTH_RATE_LIMIT_PER_MINUTE":  "45",
 		"LARK_OAUTH_TRUSTED_PROXY_CIDRS":    "172.31.20.0/24,10.0.0.0/8",
 	}
@@ -392,9 +393,17 @@ func TestLoadValidatesOAuthBridgeConfiguration(t *testing.T) {
 	}
 
 	values["NEW_API_OAUTH_CALLBACK_ALLOWLIST"] =
-		"https://ai.x2r.store/oauth/lark,https://attacker.example/callback"
+		"https://ai.example.com/oauth/lark,https://attacker.example/callback"
 	if _, err := config.Load(func(key string) string { return values[key] }); err == nil ||
 		!strings.Contains(err.Error(), "NEW_API_OAUTH_CALLBACK_ALLOWLIST") {
 		t.Fatalf("multiple callback allowlist error=%v", err)
+	}
+
+	values["NEW_API_OAUTH_CALLBACK_ALLOWLIST"] = "https://ai.example.com/oauth/lark"
+	values["LARK_CONTROLLER_CALLBACK_URI"] = "https://other.example.com/integrations/lark/oauth/callback"
+	if _, err := config.Load(func(key string) string { return values[key] }); err == nil ||
+		!strings.Contains(err.Error(), "LARK_CONTROLLER_CALLBACK_URI") ||
+		strings.Contains(err.Error(), "other.example.com") {
+		t.Fatalf("mismatched controller callback error=%v", err)
 	}
 }

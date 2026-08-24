@@ -22,7 +22,6 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/inbox"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthbridge"
-	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthcontract"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/worker"
@@ -335,6 +334,8 @@ func TestWebhookAcknowledgementBudgetIncludesHeaderReadAndInboxContention(t *tes
 }
 
 func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
+	const controllerCallback = "https://ai.example.com/integrations/lark/oauth/callback"
+	const newAPICallback = "https://ai.example.com/oauth/lark"
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -353,7 +354,8 @@ func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
 		AppID: "cli_test", AppSecret: "app-secret", TenantKey: "tenant-test",
 		BridgeClientID:               "bridge-client-id",
 		BridgeClientSecretFile:       bridgeSecretPath,
-		NewAPIOAuthCallbackAllowlist: []string{oauthcontract.NewAPICallbackURI},
+		ControllerCallbackURI:        controllerCallback,
+		NewAPIOAuthCallbackAllowlist: []string{newAPICallback},
 		OAuthRateLimitPerMinute:      30,
 	}, store, policy.BaseSubscriptionResolution{
 		PolicyVersion: "employee-v1", LevelCode: "basic", LevelRank: 10,
@@ -366,7 +368,7 @@ func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
 	handler.Register(mux)
 	query := url.Values{
 		"response_type": {"code"}, "client_id": {"bridge-client-id"},
-		"redirect_uri": {oauthcontract.NewAPICallbackURI}, "state": {"new-api-state"},
+		"redirect_uri": {newAPICallback}, "state": {"new-api-state"},
 	}
 	response := httptest.NewRecorder()
 	mux.ServeHTTP(response, httptest.NewRequest(
@@ -379,7 +381,7 @@ func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
 		location.Scheme+"://"+location.Host != "https://accounts.feishu.cn" ||
 		location.Path != "/open-apis/authen/v1/authorize" ||
 		location.Query().Get("app_id") != "cli_test" ||
-		location.Query().Get("redirect_uri") != oauthcontract.ControllerCallbackURI {
+		location.Query().Get("redirect_uri") != controllerCallback {
 		t.Fatalf("authorize status=%d location=%q error=%v, want fixed Lark entry point",
 			response.Code, response.Header().Get("Location"), err)
 	}
@@ -393,7 +395,7 @@ func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
 	}
 	form := url.Values{
 		"grant_type": {"authorization_code"}, "code": {loginCode},
-		"redirect_uri": {oauthcontract.NewAPICallbackURI}, "client_id": {"bridge-client-id"},
+		"redirect_uri": {newAPICallback}, "client_id": {"bridge-client-id"},
 		"client_secret": {bridgeSecret},
 	}
 	tokenResponse := httptest.NewRecorder()
@@ -417,7 +419,7 @@ func TestOAuthCallbackCanCompleteBeyondWebhookWriteTimeout(t *testing.T) {
 	}
 	handler, err := oauthbridge.NewHandler(oauthbridge.Config{
 		BridgeClientID: "bridge-client-id", BridgeClientSecret: strings.Repeat("b", 32),
-		NewAPIRedirectURI: oauthcontract.NewAPICallbackURI,
+		NewAPIRedirectURI: "https://ai.example.com/oauth/lark",
 		BaseSubscription: oauthbridge.BaseSubscriptionConfig{
 			PolicyVersion: "employee-v1", LevelCode: "basic", MonthlyQuota: 5_000_000,
 			CatalogSHA256: strings.Repeat("a", 64),
@@ -484,7 +486,7 @@ func (mainOAuthStore) ConsumeOAuthAuthorizationState(
 	string,
 ) (inbox.OAuthAuthorizationState, error) {
 	return inbox.OAuthAuthorizationState{
-		NewAPIState: "new-api-state", RedirectURI: oauthcontract.NewAPICallbackURI,
+		NewAPIState: "new-api-state", RedirectURI: "https://ai.example.com/oauth/lark",
 	}, nil
 }
 

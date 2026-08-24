@@ -1,0 +1,29 @@
+{
+  "format_version": 1,
+  "environment": "production",
+  "public_origin": "https://ai.example.com",
+  "lark": {
+    "app_id": "cli_REPLACE_WITH_LARK_APP_ID",
+    "tenant_key": "REPLACE_WITH_TENANT_KEY",
+    "approval_codes": {
+      "subscription_level": "REPLACE_WITH_LEVEL_APPROVAL_CODE",
+      "wallet_topup": "REPLACE_WITH_WALLET_APPROVAL_CODE"
+    }
+  },
+  "new_api": {
+    "bridge_client_id": "lark-controller",
+    "managed_plan_ids": {
+      "basic": 101,
+      "plus": 102,
+      "power": 104,
+      "pro": 103
+    },
+    "plan_reset_contract_hash": "1010f47a0838545b5aaa9a3d8e9ab455d37cd06053307d9794d13b24de5f8238"
+  },
+  "secret_refs": {
+    "lark_app_secret": "lark_app_secret",
+    "bridge_client_secret": "new_api_bridge_client_secret",
+    "integration_secret": "lark_integration_secret",
+    "grant_payload_keyring": "lark_grant_payload_keyring"
+  }
+}

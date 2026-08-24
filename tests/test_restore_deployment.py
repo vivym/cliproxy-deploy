@@ -34,6 +34,7 @@ class RestoreDeploymentTests(unittest.TestCase):
         runtime_env_lines=None,
         lark_state="absent",
         controller_has_main=True,
+        include_stale_maintenance_owner=False,
     ):
         backup_src = tmp_root / "backup-src"
         backup_src.mkdir()
@@ -81,6 +82,17 @@ class RestoreDeploymentTests(unittest.TestCase):
         (runtime_src / "letsencrypt").mkdir()
         (runtime_src / "letsencrypt" / "acme.json").write_text("{}\n", encoding="utf-8")
         if lark_state == "enabled":
+            config = runtime_src / "lark-runtime" / "config"
+            config.mkdir(parents=True)
+            (config / "policy.json").write_text(
+                '{"policy_version":"2026-08"}\n', encoding="utf-8"
+            )
+            (config / "production.binding.json").write_text(
+                '{"environment":"production"}\n', encoding="utf-8"
+            )
+            (config / "lark-console-attestation.json").write_text(
+                '{"format_version":1}\n', encoding="utf-8"
+            )
             policies = runtime_src / "lark-runtime" / "policies"
             policies.mkdir(parents=True)
             (policies / "approval-bindings.json").write_text(
@@ -89,6 +101,21 @@ class RestoreDeploymentTests(unittest.TestCase):
             (policies / "2026-08.policy.json").write_text(
                 '{"policy_version":"2026-08"}\n', encoding="utf-8"
             )
+            runtime = runtime_src / "lark-runtime" / "runtime"
+            runtime.mkdir()
+            (runtime / "controller.env").write_text(
+                "LARK_ACTIVE_POLICY_VERSION='2026-08'\n", encoding="utf-8"
+            )
+            receipts = runtime_src / "lark-runtime" / "receipts"
+            receipts.mkdir()
+            (receipts / "compile.json").write_text("{}\n", encoding="utf-8")
+            ops = runtime_src / "lark-runtime" / "ops"
+            ops.mkdir()
+            (ops / "reviewed-plan.receipt.json").write_text("{}\n", encoding="utf-8")
+            if include_stale_maintenance_owner:
+                stale_lock = ops / "maintenance.lock"
+                stale_lock.mkdir()
+                (stale_lock / "mode").write_text("backup\n", encoding="utf-8")
         subprocess.run(
             ["tar", "-czf", str(backup_src / "deployment-runtime.tgz"), "."],
             cwd=runtime_src,
@@ -212,6 +239,42 @@ class RestoreDeploymentTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Lark absent backup cannot enable", result.stderr)
+            self.assertFalse(docker_marker.exists())
+
+    def test_restore_rejects_enabled_backup_with_stale_maintenance_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = pathlib.Path(tmp)
+            root = tmp_root / "repo"
+            root.mkdir()
+            restore_script = self.write_script_copy(root)
+            (root / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+            (root / ".env").write_text("CURRENT_ENV=true\n", encoding="utf-8")
+            package = self.create_backup_package(
+                tmp_root,
+                lark_state="enabled",
+                include_stale_maintenance_owner=True,
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            docker_marker = root / "docker-called"
+            docker = bin_dir / "docker"
+            docker.write_text(
+                f"#!/usr/bin/env bash\ntouch {docker_marker}\nexit 99\n",
+                encoding="utf-8",
+            )
+            docker.chmod(0o755)
+
+            result = subprocess.run(
+                [str(restore_script), str(package), str(root)],
+                cwd=root,
+                env={"PATH": f"{bin_dir}:/usr/bin:/bin"},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("contains a stale maintenance owner", result.stderr)
             self.assertFalse(docker_marker.exists())
 
     def test_restore_refuses_an_existing_deployment_maintenance_owner(self):
@@ -427,7 +490,7 @@ exit 99
             ]:
                 (root / directory).mkdir()
                 (root / directory / "stale").write_text("stale\n", encoding="utf-8")
-            for directory in ["policies", "secrets", "ops"]:
+            for directory in ["config", "policies", "runtime", "secrets", "ops"]:
                 path = root / "lark-runtime" / directory
                 path.mkdir(parents=True)
                 (path / "keep").write_text("keep\n", encoding="utf-8")
@@ -541,7 +604,9 @@ exit 99
             self.assertIn("new-api-redis-data-volume:/target", calls)
             self.assertIn("volume rm -f new-api-lark-controller-data", calls)
             self.assertNotIn("volume create new-api-lark-controller-data", calls)
+            self.assertFalse((root / "lark-runtime/config").exists())
             self.assertFalse((root / "lark-runtime/policies").exists())
+            self.assertFalse((root / "lark-runtime/runtime").exists())
             self.assertTrue((root / "lark-runtime/secrets/keep").is_file())
             self.assertTrue((root / "lark-runtime/ops/keep").is_file())
 
@@ -629,6 +694,7 @@ case "$*" in
   "compose exec -T sub2api-postgres pg_restore "*|\
   "compose exec -T new-api-postgres pg_restore "*)
     test "$(cat {root / 'lark-runtime/ops/maintenance.lock/mode'})" = restore
+    test -d {root / 'lark-runtime/ops/maintenance.session'}
     cat >/dev/null
     ;;
   *)
@@ -664,6 +730,26 @@ esac
             self.assertIn("LARK_OAUTH_PUBLIC_ENABLED=false", restored_env)
             self.assertTrue(
                 (root / "lark-runtime/policies/approval-bindings.json").is_file()
+            )
+            self.assertEqual(
+                (root / "lark-runtime/config/policy.json").read_text(encoding="utf-8"),
+                '{"policy_version":"2026-08"}\n',
+            )
+            self.assertTrue(
+                (root / "lark-runtime/config/production.binding.json").is_file()
+            )
+            self.assertTrue(
+                (root / "lark-runtime/config/lark-console-attestation.json").is_file()
+            )
+            self.assertEqual(
+                (root / "lark-runtime/runtime/controller.env").read_text(
+                    encoding="utf-8"
+                ),
+                "LARK_ACTIVE_POLICY_VERSION='2026-08'\n",
+            )
+            self.assertTrue((root / "lark-runtime/receipts/compile.json").is_file())
+            self.assertTrue(
+                (root / "lark-runtime/ops/reviewed-plan.receipt.json").is_file()
             )
             self.assertFalse((root / "lark-runtime/ops/maintenance.lock").exists())
             self.assertFalse(

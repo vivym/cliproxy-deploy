@@ -435,14 +435,14 @@ func TestOAuthExchangerRejectsIdentityThatCannotBeStored(t *testing.T) {
 	assertOAuthExchangeFailure(t, err, larkapi.OAuthInvalidResponse)
 }
 
-func TestOAuthExchangerRequiresRegisteredControllerCallback(t *testing.T) {
+func TestOAuthExchangerRequiresExactControllerCallbackPath(t *testing.T) {
 	_, err := larkapi.NewOAuthExchanger(larkapi.OAuthConfig{
 		AppID: "cli_test", AppSecret: "app-secret",
-		RedirectURI: "https://attacker.example/integrations/lark/oauth/callback",
+		RedirectURI: "https://ai.example.com/integrations/lark/oauth/callback/attacker",
 		TenantKey:   "tenant-test",
 	})
 	if err == nil || err.Error() != "Lark OAuth redirect URI must match the registered controller callback" {
-		t.Fatalf("constructor error = %v, want fixed callback rejection", err)
+		t.Fatalf("constructor error = %v, want exact callback-path rejection", err)
 	}
 }
 

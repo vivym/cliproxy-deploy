@@ -95,7 +95,7 @@ func NewHandler(
 		!digest.IsCanonicalSHA256(config.BaseSubscription.CatalogSHA256) {
 		return nil, errors.New("active basic subscription policy is required")
 	}
-	if config.NewAPIRedirectURI != oauthcontract.NewAPICallbackURI {
+	if oauthcontract.ValidateNewAPICallbackURI(config.NewAPIRedirectURI) != nil {
 		return nil, errors.New("New API redirect URI must match the registered callback")
 	}
 	if store == nil || provider == nil || grantSealer == nil {

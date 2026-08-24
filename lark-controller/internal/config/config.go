@@ -57,6 +57,7 @@ type Config struct {
 	ApprovalReconcileLookback    time.Duration
 	BridgeClientID               string
 	BridgeClientSecretFile       string
+	ControllerCallbackURI        string
 	NewAPIOAuthCallbackAllowlist []string
 	OAuthPublicEnabled           bool
 	OAuthRateLimitPerMinute      int
@@ -121,6 +122,14 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	loaded.NewAPIOAuthCallbackAllowlist = callbackAllowlist
+	controllerCallback, err := oauthcontract.DeriveControllerCallbackURI(callbackAllowlist[0])
+	if err != nil {
+		return Config{}, errors.New("NEW_API_OAUTH_CALLBACK_ALLOWLIST must contain one exact HTTPS callback")
+	}
+	if configured := getenv("LARK_CONTROLLER_CALLBACK_URI"); configured != "" && configured != controllerCallback {
+		return Config{}, errors.New("LARK_CONTROLLER_CALLBACK_URI must match the callback derived from NEW_API_OAUTH_CALLBACK_ALLOWLIST")
+	}
+	loaded.ControllerCallbackURI = controllerCallback
 	switch getenv("LARK_OAUTH_PUBLIC_ENABLED") {
 	case "", "false":
 		loaded.OAuthPublicEnabled = false
@@ -288,8 +297,11 @@ func validOpenID(value string) bool {
 
 func parseOAuthCallbackAllowlist(raw string) ([]string, error) {
 	callbacks := strings.Split(raw, ",")
-	if len(callbacks) != 1 || callbacks[0] != oauthcontract.NewAPICallbackURI {
+	if len(callbacks) != 1 {
 		return nil, errors.New("NEW_API_OAUTH_CALLBACK_ALLOWLIST must contain only the registered New API callback")
+	}
+	if _, err := oauthcontract.DeriveControllerCallbackURI(callbacks[0]); err != nil {
+		return nil, errors.New("NEW_API_OAUTH_CALLBACK_ALLOWLIST must contain one exact HTTPS /oauth/lark callback")
 	}
 	return callbacks, nil
 }

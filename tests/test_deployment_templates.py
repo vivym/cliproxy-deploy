@@ -19,6 +19,8 @@ class DeploymentTemplateTests(unittest.TestCase):
             "new-api-redis:",
             "new-api:",
             "lark-quota-controller:",
+            "new-api-config-endpoint:",
+            "lark-config:",
             "new-api-correction-endpoint:",
             "lark-correction-readonly:",
             "lark-correction:",
@@ -30,6 +32,8 @@ class DeploymentTemplateTests(unittest.TestCase):
         self.assertIn("name: new-api-postgres-data", text)
         self.assertIn("name: new-api-redis-data", text)
         self.assertIn("name: new-api-lark-integration", text)
+        self.assertIn("name: new-api-lark-config", text)
+        self.assertIn("name: new-api-lark-config-egress", text)
         self.assertIn("name: new-api-lark-controller-data", text)
         self.assertIn("traefik.http.routers.new-api.rule", text)
         self.assertIn("traefik.http.routers.sub2api-admin.rule", text)
@@ -54,6 +58,12 @@ class DeploymentTemplateTests(unittest.TestCase):
             "\n  lark-quota-controller:", 1
         )[0]
         controller_block = text.split("  lark-quota-controller:", 1)[1].split(
+            "\n  new-api-config-endpoint:", 1
+        )[0]
+        config_endpoint_block = text.split("  new-api-config-endpoint:", 1)[1].split(
+            "\n  lark-config:", 1
+        )[0]
+        config_cli_block = text.split("  lark-config:", 1)[1].split(
             "\n  new-api-correction-endpoint:", 1
         )[0]
         endpoint_block = text.split("  new-api-correction-endpoint:", 1)[1].split(
@@ -75,6 +85,22 @@ class DeploymentTemplateTests(unittest.TestCase):
         self.assertNotIn("lark-runtime/secrets/new-api", controller_block)
         self.assertNotIn("LARK_CORRECTION_SECRET_FILE", controller_block)
         self.assertIn("maintenance.lock", controller_block)
+        self.assertIn('profiles: ["lark-config"]', config_endpoint_block)
+        self.assertIn("LARK_CONFIG_SECRET_FILE", config_endpoint_block)
+        self.assertIn("LARK_CONFIG_BRIDGE_CLIENT_SECRET_FILE", config_endpoint_block)
+        self.assertNotIn("LARK_INTEGRATION_SECRET_FILE", config_endpoint_block)
+        self.assertNotIn("traefik", config_endpoint_block)
+        self.assertNotIn("ports:", config_endpoint_block)
+        self.assertIn('profiles: ["lark-config"]', config_cli_block)
+        self.assertIn("target: config", config_cli_block)
+        self.assertIn("HOME: /var/lib/lark-controller", config_cli_block)
+        self.assertIn("lark-config-cli-data:/var/lib/lark-controller", config_cli_block)
+        self.assertIn("create_host_path: false", config_cli_block)
+        self.assertIn("lark-config-egress", config_cli_block)
+        self.assertNotIn("lark-runtime/secrets/controller", config_cli_block)
+        self.assertNotIn("lark-runtime/secrets/shared", config_cli_block)
+        self.assertNotIn("traefik", config_cli_block)
+        self.assertNotIn("ports:", config_cli_block)
         self.assertIn("lark-runtime/secrets/shared", endpoint_block)
         self.assertIn("lark-runtime/secrets/new-api", endpoint_block)
         self.assertNotIn("lark-runtime/secrets/controller", endpoint_block)
@@ -118,18 +144,28 @@ class DeploymentTemplateTests(unittest.TestCase):
             "LARK_CONTROLLER_IMAGE_TAG=",
             "LARK_CORRECTION_IMAGE_REPOSITORY=",
             "LARK_CORRECTION_IMAGE_TAG=",
+            "LARK_CONFIG_IMAGE_REPOSITORY=",
+            "LARK_CONFIG_IMAGE_TAG=",
             "NEW_API_INTEGRATION_LISTEN_ADDR=",
             "NEW_API_LARK_INTEGRATION_SECRET_NEXT_FILE=",
             "LARK_CONTROLLER_MODE=",
-            "LARK_CONTROLLER_INTEGRATION_SECRET_FILE=",
             "LARK_OAUTH_PUBLIC_ENABLED=",
-            "LARK_APP_ID=",
-            "LARK_TENANT_KEY=",
-            "LARK_ACTIVE_POLICY_VERSION=",
-            "NEW_API_BRIDGE_CLIENT_ID=",
             "LARK_RECONCILIATION_HEALTH_OPEN_ID=",
+            "LARK_CONFIG_EGRESS_SUBNET=",
         ]:
             self.assertIn(variable, env_example)
+
+        for compiled_variable in [
+            "LARK_APP_ID=",
+            "LARK_APP_SECRET_FILE=",
+            "LARK_TENANT_KEY=",
+            "LARK_ACTIVE_POLICY_VERSION=",
+            "LARK_GRANT_PAYLOAD_KEYRING_FILE=",
+            "LARK_INTEGRATION_SECRET_FILE=",
+            "NEW_API_BRIDGE_CLIENT_ID=",
+            "NEW_API_BRIDGE_CLIENT_SECRET_FILE=",
+        ]:
+            self.assertNotIn(compiled_variable, env_example)
 
         self.assertNotIn("SUB2API_HOST=", env_example)
         self.assertNotIn("SUB2API_TEST_API_KEY=", env_example)
@@ -142,6 +178,8 @@ class DeploymentTemplateTests(unittest.TestCase):
 
         self.assertIn("AS builder", dockerfile)
         self.assertIn("go build", dockerfile)
+        self.assertIn("./cmd/lark-config", dockerfile)
+        self.assertIn("@larksuite/cli@${LARK_CLI_VERSION}", dockerfile)
         self.assertIn("USER 10001:10001", dockerfile)
         self.assertIn("/healthz", dockerfile)
         controller_target = dockerfile.split("FROM runtime AS controller", 1)[1].split(
@@ -216,6 +254,19 @@ class DeploymentTemplateTests(unittest.TestCase):
         self.assertIn("project and named-volume identities change", text)
         self.assertNotIn("docker-compose.newapi.yml", text)
 
+    def test_lark_configuration_runbook_restarts_controller_around_apply(self):
+        runbook = ROOT / "docs" / "runbooks" / "lark-tenant-configuration.md"
+        text = runbook.read_text(encoding="utf-8")
+
+        stop = "docker compose --profile lark stop lark-quota-controller"
+        apply = "docker compose --profile lark-config run --rm lark-config apply"
+        start = "docker compose --profile lark up -d lark-quota-controller"
+        self.assertLess(text.index(stop), text.index(apply))
+        self.assertLess(text.index(apply), text.index(start))
+        self.assertIn("does not hot-reload", text)
+        self.assertIn("new_api_bridge_client_secret", text)
+        self.assertIn("secret_refs.bridge_client_secret", text)
+
     def test_gitignore_protects_current_runtime(self):
         text = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
@@ -228,8 +279,13 @@ class DeploymentTemplateTests(unittest.TestCase):
             "!/lark-runtime/secrets/shared/.gitkeep",
             "!/lark-runtime/secrets/controller/.gitkeep",
             "!/lark-runtime/secrets/new-api/.gitkeep",
+            "!/lark-runtime/secrets/config/.gitkeep",
             "/lark-runtime/ops/*",
             "!/lark-runtime/ops/.gitkeep",
+            "/lark-runtime/config/*",
+            "!/lark-runtime/config/.gitkeep",
+            "/lark-runtime/runtime/*",
+            "!/lark-runtime/runtime/.gitkeep",
         ]:
             self.assertIn(path, text)
 

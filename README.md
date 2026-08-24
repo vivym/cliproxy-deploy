@@ -80,10 +80,15 @@ docker compose config >/dev/null
 docker compose up -d
 ```
 
-Set every required secret in `.env`. Set `NEW_API_IMAGE_REPOSITORY` to the
-published fork repository, and pin `SUB2API_IMAGE_TAG`, `NEW_API_IMAGE_TAG`,
-`LARK_CONTROLLER_IMAGE_TAG`, and `LARK_CORRECTION_IMAGE_TAG` to reviewed
-release tags or immutable digests in production.
+Set every required base-stack secret in `.env`. In production, replace
+`NEW_API_IMAGE_REPOSITORY`, `LARK_CONTROLLER_IMAGE_REPOSITORY`,
+`LARK_CORRECTION_IMAGE_REPOSITORY`, and `LARK_CONFIG_IMAGE_REPOSITORY` with the
+four repositories published from the same reviewed release. Pin
+`SUB2API_IMAGE_TAG`, `NEW_API_IMAGE_TAG`, `LARK_CONTROLLER_IMAGE_TAG`,
+`LARK_CORRECTION_IMAGE_TAG`, and `LARK_CONFIG_IMAGE_TAG` to reviewed immutable
+`tag@sha256:digest` references. The config image is a separate release artifact;
+a local repository or tag is suitable only for local validation, never for a
+tenant configuration window.
 
 ## Lark integration profile
 
@@ -93,7 +98,9 @@ integration listener is also disabled until
 `NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001` is set.
 
 Runtime credentials are files under consumer-specific
-`lark-runtime/secrets/{shared,controller,new-api}/` directories, never `.env`.
+`lark-runtime/secrets/{shared,controller,new-api,config}/` directories, never
+`.env`. The short-lived `config` consumer has its own New API configuration
+credential; its Lark CLI profile is isolated in a dedicated volume.
 The long-running New API and Controller do not mount the short-lived correction
 credential. The `lark-ops` profile supplies a separate correction image and a
 temporary internal New API endpoint with no edge network, Traefik labels, or
@@ -108,6 +115,8 @@ Reviewed policy bundles live under `lark-runtime/policies/`. Webhook-only
 shadow mode keeps `LARK_OAUTH_PUBLIC_ENABLED=false`; setting it to `true` is a
 separate OAuth rollout action. When disabled, the Controller does not register
 the public authorize/callback handlers, so the exact Traefik paths return 404.
+Compile, plan, and apply tenant configuration only through the guarded procedure
+in [`docs/runbooks/lark-tenant-configuration.md`](docs/runbooks/lark-tenant-configuration.md).
 
 This wiring is not yet a production authorization. Published fork/controller
 image digests, real policy and Lark configuration, cross-network probes, and
@@ -143,7 +152,9 @@ BACKUP_DIR=/var/backups/new-api scripts/backup-deployment.sh
 This is an offline quiesce backup: it atomically owns the host maintenance
 session and `lark-runtime/ops/maintenance.lock`, stops ingress and every running writer,
 captures the complete Controller volume before both Postgres dumps and Redis
-copies, then restarts only the services that were running. A v2 JSON manifest
+copies, then restarts only the services that were running. The same package includes
+the reviewed configuration sources, compiled policy/runtime artifacts, compile and
+operation receipts, but excludes the live maintenance owner. A v2 JSON manifest
 binds all payload hashes, a barrier ID, policy state, and either the Controller
 archive or an explicit Lark-absent marker. Lark configuration and Controller
 volume presence must agree. Long-lived Lark secrets are deliberately excluded.
@@ -156,7 +167,8 @@ scripts/restore-deployment.sh /path/to/backup-package.tgz
 
 Full restore is destructive. It replaces Sub2API runtime state, both Postgres
 databases, both Redis data domains, and either restores the same-package
-Controller volume and policy bundle or removes stale Controller state and policy
+Controller volume, configuration sources, compiled policy/runtime, and receipts or
+removes stale Controller state and those Lark artifacts
 for an absent package while preserving host secrets and ops state. Validation
 completes before the restore lock and destructive steps. The host session stays
 owned through Compose readiness. A failure after `compose down` re-establishes

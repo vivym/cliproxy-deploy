@@ -16,14 +16,29 @@
 !/lark-runtime/secrets/shared/
 !/lark-runtime/secrets/controller/
 !/lark-runtime/secrets/new-api/
+!/lark-runtime/secrets/config/
 /lark-runtime/secrets/shared/*
 /lark-runtime/secrets/controller/*
 /lark-runtime/secrets/new-api/*
+/lark-runtime/secrets/config/*
 !/lark-runtime/secrets/shared/.gitkeep
 !/lark-runtime/secrets/controller/.gitkeep
 !/lark-runtime/secrets/new-api/.gitkeep
+!/lark-runtime/secrets/config/.gitkeep
 /lark-runtime/ops/*
 !/lark-runtime/ops/.gitkeep
+/lark-runtime/config/*
+!/lark-runtime/config/.gitkeep
+/lark-runtime/new-api/*
+!/lark-runtime/new-api/.gitkeep
+/lark-runtime/lark/*
+!/lark-runtime/lark/.gitkeep
+/lark-runtime/runtime/*
+!/lark-runtime/runtime/.gitkeep
+/lark-runtime/receipts/*
+!/lark-runtime/receipts/.gitkeep
+/lark-runtime/policies/*
+!/lark-runtime/policies/README.md
 
 # Local editor and OS files
 .DS_Store

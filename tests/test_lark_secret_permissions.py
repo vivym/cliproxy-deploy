@@ -18,10 +18,11 @@ class LarkSecretPermissionTests(unittest.TestCase):
         "controller/lark_grant_payload_keyring",
         "controller/new_api_bridge_client_secret",
         "new-api/lark_correction_secret",
+        "config/lark_config_secret",
     ]
 
     def prepare_secrets(self, root):
-        for directory in ["shared", "controller", "new-api"]:
+        for directory in ["shared", "controller", "new-api", "config"]:
             path = root / directory
             path.mkdir()
             path.chmod(0o700)
@@ -32,7 +33,12 @@ class LarkSecretPermissionTests(unittest.TestCase):
             path.chmod(0o600)
 
     def run_check(
-        self, root, owner=None, include_correction=False, include_next=False
+        self,
+        root,
+        owner=None,
+        include_correction=False,
+        include_next=False,
+        include_config=False,
     ):
         expected_owner = owner or f"{os.getuid()}:{os.getgid()}"
         command = [str(SCRIPT)]
@@ -40,6 +46,8 @@ class LarkSecretPermissionTests(unittest.TestCase):
             command.append("--include-correction")
         if include_next:
             command.append("--include-next")
+        if include_config:
+            command.append("--include-config")
         command.extend([str(root), expected_owner])
         return subprocess.run(
             command,
@@ -159,6 +167,37 @@ class LarkSecretPermissionTests(unittest.TestCase):
             self.assertIn("Correction secret must be", result.stderr)
             self.assertNotIn("too-short", result.stderr)
 
+    def test_rejects_oversized_bridge_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "secrets"
+            root.mkdir()
+            self.prepare_secrets(root)
+            bridge = root / "controller" / "new_api_bridge_client_secret"
+            bridge.write_bytes(b"b" * 4097)
+            bridge.chmod(0o600)
+
+            result = self.run_check(root)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("between 32 and 4096 bytes", result.stderr)
+            self.assertNotIn("b" * 64, result.stderr)
+
+    def test_bridge_secret_must_differ_from_lark_app_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "secrets"
+            root.mkdir()
+            self.prepare_secrets(root)
+            app_secret = root / "controller" / "lark_app_secret"
+            bridge_secret = root / "controller" / "new_api_bridge_client_secret"
+            bridge_secret.write_bytes(app_secret.read_bytes())
+            bridge_secret.chmod(0o600)
+
+            result = self.run_check(root)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Lark app and New API bridge", result.stderr)
+            self.assertIn("must be independent", result.stderr)
+
     def test_next_secret_is_optional_but_required_during_rotation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp) / "secrets"
@@ -186,6 +225,72 @@ class LarkSecretPermissionTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Correction and next integration", result.stderr)
+
+    def test_config_secret_is_optional_but_verified_for_configuration_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "secrets"
+            root.mkdir()
+            self.prepare_secrets(root)
+            (root / "config" / "lark_config_secret").unlink()
+
+            base_result = self.run_check(root)
+            config_result = self.run_check(root, include_config=True)
+
+            self.assertEqual(base_result.returncode, 0, base_result.stderr)
+            self.assertNotEqual(config_result.returncode, 0)
+            self.assertIn("lark_config_secret", config_result.stderr)
+
+    def test_config_secret_must_be_independent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "secrets"
+            root.mkdir()
+            self.prepare_secrets(root)
+            integration = root / "shared" / "lark_integration_secret"
+            config = root / "config" / "lark_config_secret"
+            config.write_bytes(integration.read_bytes())
+            config.chmod(0o600)
+
+            result = self.run_check(root, include_config=True)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Configuration and current integration", result.stderr)
+
+    def test_config_secret_must_differ_from_app_and_bridge_credentials(self):
+        for relative_path, label in [
+            ("controller/lark_app_secret", "Configuration and Lark app"),
+            (
+                "controller/new_api_bridge_client_secret",
+                "Configuration and New API bridge",
+            ),
+        ]:
+            with self.subTest(relative_path=relative_path), tempfile.TemporaryDirectory() as tmp:
+                root = pathlib.Path(tmp) / "secrets"
+                root.mkdir()
+                self.prepare_secrets(root)
+                source = root / relative_path
+                config = root / "config" / "lark_config_secret"
+                config.write_bytes(source.read_bytes())
+                config.chmod(0o600)
+
+                result = self.run_check(root, include_config=True)
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(label, result.stderr)
+
+    def test_rejects_oversized_config_secret(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "secrets"
+            root.mkdir()
+            self.prepare_secrets(root)
+            config = root / "config" / "lark_config_secret"
+            config.write_bytes(b"c" * 4097)
+            config.chmod(0o600)
+
+            result = self.run_check(root, include_config=True)
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("between 32 and 4096 bytes", result.stderr)
+            self.assertNotIn("c" * 64, result.stderr)
 
 
 if __name__ == "__main__":

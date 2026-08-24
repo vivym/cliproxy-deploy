@@ -273,6 +273,13 @@ services:
           echo "refusing to start Lark Controller while deployment maintenance is active" >&2
           exit 1
         fi
+        if [ ! -f /etc/lark-controller/runtime/controller.env ]; then
+          echo "refusing to start Lark Controller without compiled runtime configuration" >&2
+          exit 1
+        fi
+        set -a
+        . /etc/lark-controller/runtime/controller.env
+        set +a
         exec /usr/local/bin/lark-controller
     read_only: true
     tmpfs:
@@ -285,25 +292,16 @@ services:
       LARK_CONTROLLER_MODE: ${LARK_CONTROLLER_MODE:-shadow}
       LARK_CONTROLLER_LISTEN_ADDR: 0.0.0.0:8080
       LARK_CONTROLLER_DB_PATH: /var/lib/lark-controller/controller.sqlite
-      LARK_APP_ID: ${LARK_APP_ID:-}
-      LARK_APP_SECRET_FILE: /run/secrets/lark-controller/controller/lark_app_secret
       LARK_VERIFICATION_TOKEN_FILE: /run/secrets/lark-controller/controller/lark_verification_token
       LARK_ENCRYPT_KEY_FILE: /run/secrets/lark-controller/controller/lark_encrypt_key
-      LARK_TENANT_KEY: ${LARK_TENANT_KEY:-}
       LARK_APPROVAL_LOCALE: zh-CN
-      LARK_ACTIVE_POLICY_VERSION: ${LARK_ACTIVE_POLICY_VERSION:-}
       LARK_POLICY_BUNDLE_DIR: /etc/lark-controller/policies
       LARK_APPROVAL_BINDINGS_FILE: /etc/lark-controller/policies/approval-bindings.json
-      LARK_GRANT_PAYLOAD_KEYRING_FILE: /run/secrets/lark-controller/controller/lark_grant_payload_keyring
-      LARK_INTEGRATION_SECRET_FILE: ${LARK_CONTROLLER_INTEGRATION_SECRET_FILE:-/run/secrets/lark-controller/shared/lark_integration_secret}
       NEW_API_INTERNAL_BASE_URL: http://new-api:3001
       LARK_RECONCILIATION_HEALTH_OPEN_ID: ${LARK_RECONCILIATION_HEALTH_OPEN_ID:-}
       LARK_RECONCILIATION_INTERVAL: ${LARK_RECONCILIATION_INTERVAL:-24h}
       LARK_APPROVAL_RECONCILIATION_INTERVAL: ${LARK_APPROVAL_RECONCILIATION_INTERVAL:-15m}
       LARK_APPROVAL_RECONCILIATION_LOOKBACK: ${LARK_APPROVAL_RECONCILIATION_LOOKBACK:-72h}
-      NEW_API_BRIDGE_CLIENT_ID: ${NEW_API_BRIDGE_CLIENT_ID:-}
-      NEW_API_BRIDGE_CLIENT_SECRET_FILE: /run/secrets/lark-controller/controller/new_api_bridge_client_secret
-      NEW_API_OAUTH_CALLBACK_ALLOWLIST: https://ai.x2r.store/oauth/lark
       LARK_OAUTH_PUBLIC_ENABLED: ${LARK_OAUTH_PUBLIC_ENABLED:-false}
       LARK_OAUTH_RATE_LIMIT_PER_MINUTE: ${LARK_OAUTH_RATE_LIMIT_PER_MINUTE:-30}
       LARK_OAUTH_TRUSTED_PROXY_CIDRS: ${LARK_OAUTH_TRUSTED_PROXY_CIDRS:-172.31.20.0/24}
@@ -312,6 +310,7 @@ services:
     volumes:
       - "lark-controller-data:/var/lib/lark-controller"
       - "./lark-runtime/policies:/etc/lark-controller/policies:ro"
+      - "./lark-runtime/runtime:/etc/lark-controller/runtime:ro"
       - "./lark-runtime/secrets/shared:/run/secrets/lark-controller/shared:ro"
       - "./lark-runtime/secrets/controller:/run/secrets/lark-controller/controller:ro"
       - "./lark-runtime/ops:/run/lark-ops:ro"
@@ -342,6 +341,136 @@ services:
       - "traefik.http.routers.lark-oauth.tls=true"
       - "traefik.http.routers.lark-oauth.tls.certresolver=le"
       - "traefik.http.routers.lark-oauth.service=lark-controller"
+
+  new-api-config-endpoint:
+    profiles: ["lark-config"]
+    image: ${NEW_API_IMAGE_REPOSITORY:?set NEW_API_IMAGE_REPOSITORY}:${NEW_API_IMAGE_TAG:?set NEW_API_IMAGE_TAG}
+    restart: "no"
+    depends_on:
+      new-api-postgres:
+        condition: service_healthy
+      new-api-redis:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        if [ -e /run/lark-ops/maintenance.lock ]; then
+          echo "refusing to start New API configuration endpoint while deployment maintenance is active" >&2
+          exit 1
+        fi
+        exec /new-api
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      SQL_DSN: postgresql://${NEW_API_POSTGRES_USER:?set NEW_API_POSTGRES_USER}:${NEW_API_POSTGRES_PASSWORD:?set NEW_API_POSTGRES_PASSWORD}@new-api-postgres:5432/${NEW_API_POSTGRES_DB:?set NEW_API_POSTGRES_DB}
+      REDIS_CONN_STRING: redis://default:${NEW_API_REDIS_PASSWORD:?set NEW_API_REDIS_PASSWORD}@new-api-redis:6379
+      SESSION_SECRET: ${NEW_API_SESSION_SECRET:?set NEW_API_SESSION_SECRET}
+      CRYPTO_SECRET: ${NEW_API_CRYPTO_SECRET:?set NEW_API_CRYPTO_SECRET}
+      MEMORY_CACHE_ENABLED: "true"
+      STREAMING_TIMEOUT: "300"
+      CHANNEL_UPDATE_FREQUENCY: "1440"
+      INTEGRATION_LISTEN_ADDR: 0.0.0.0:3001
+      LARK_CONFIG_SECRET_FILE: /run/secrets/lark-config/lark_config_secret
+      LARK_CONFIG_BRIDGE_CLIENT_SECRET_FILE: /run/secrets/lark-config/new_api_bridge_client_secret
+      LARK_CONFIG_BRIDGE_CLIENT_SECRET_REF: new_api_bridge_client_secret
+      LARK_CONFIG_MAINTENANCE_MODE_FILE: /run/lark-ops/maintenance.lock/mode
+    volumes:
+      - type: bind
+        source: ./lark-runtime/secrets/config/lark_config_secret
+        target: /run/secrets/lark-config/lark_config_secret
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./lark-runtime/secrets/controller/new_api_bridge_client_secret
+        target: /run/secrets/lark-config/new_api_bridge_client_secret
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./lark-runtime/ops
+        target: /run/lark-ops
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O /dev/null http://127.0.0.1:3000/api/status && wget -S -O /dev/null -T 3 http://127.0.0.1:3001/api/integrations/v1/config/state 2>&1 | grep -q ' 401 '"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    expose:
+      - "3001"
+    networks:
+      - new-api-data
+      - lark-config
+
+  lark-config:
+    profiles: ["lark-config"]
+    image: ${LARK_CONFIG_IMAGE_REPOSITORY:-new-api-lark-config}:${LARK_CONFIG_IMAGE_TAG:-local}
+    build:
+      context: ./lark-controller
+      dockerfile: Dockerfile
+      target: config
+    restart: "no"
+    depends_on:
+      new-api-config-endpoint:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    working_dir: /workspace
+    environment:
+      HOME: /var/lib/lark-controller
+    volumes:
+      - "lark-config-cli-data:/var/lib/lark-controller"
+      - type: bind
+        source: ./lark-runtime/config
+        target: /workspace/lark-runtime/config
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./lark-runtime/policies
+        target: /workspace/lark-runtime/policies
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./lark-runtime/new-api
+        target: /workspace/lark-runtime/new-api
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./lark-runtime/lark
+        target: /workspace/lark-runtime/lark
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./lark-runtime/runtime
+        target: /workspace/lark-runtime/runtime
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./lark-runtime/receipts
+        target: /workspace/lark-runtime/receipts
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./lark-runtime/ops
+        target: /workspace/lark-runtime/ops
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./lark-runtime/secrets/config/lark_config_secret
+        target: /run/secrets/lark-config/lark_config_secret
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - lark-config
+      - lark-config-egress
 
   new-api-correction-endpoint:
     profiles: ["lark-ops"]
@@ -471,6 +600,19 @@ networks:
     ipam:
       config:
         - subnet: ${LARK_INTEGRATION_SUBNET:-172.31.23.0/24}
+  lark-config:
+    name: new-api-lark-config
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: ${LARK_CONFIG_SUBNET:-172.31.24.0/24}
+  lark-config-egress:
+    name: new-api-lark-config-egress
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${LARK_CONFIG_EGRESS_SUBNET:-172.31.25.0/24}
 
 volumes:
   new-api-postgres-data:
@@ -479,3 +621,5 @@ volumes:
     name: new-api-redis-data
   lark-controller-data:
     name: new-api-lark-controller-data
+  lark-config-cli-data:
+    name: new-api-lark-config-cli-data

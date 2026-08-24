@@ -90,7 +90,7 @@ func NewOAuthExchanger(config OAuthConfig) (*OAuthExchanger, error) {
 	if config.AppID == "" || config.AppSecret == "" || config.RedirectURI == "" || config.TenantKey == "" {
 		return nil, errors.New("Lark app id, app secret, OAuth redirect URI, and tenant key are required")
 	}
-	if config.RedirectURI != oauthcontract.ControllerCallbackURI {
+	if oauthcontract.ValidateControllerCallbackURI(config.RedirectURI) != nil {
 		return nil, errors.New("Lark OAuth redirect URI must match the registered controller callback")
 	}
 	if config.OAuthBaseURL == "" {

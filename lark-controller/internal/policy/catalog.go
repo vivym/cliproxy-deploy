@@ -1,19 +1,19 @@
 package policy
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/strictjson"
 )
 
 const (
@@ -49,7 +49,7 @@ type WalletPackage struct {
 	QuotaDelta  int64  `json:"quota_delta"`
 }
 
-type policyBundle struct {
+type PolicyBundle struct {
 	FormatVersion  int             `json:"format_version"`
 	PolicyVersion  string          `json:"policy_version"`
 	State          PolicyState     `json:"state"`
@@ -57,6 +57,8 @@ type policyBundle struct {
 	Levels         []Level         `json:"levels"`
 	WalletPackages []WalletPackage `json:"wallet_packages"`
 }
+
+type policyBundle = PolicyBundle
 
 type ManifestOption struct {
 	DisplayText string `json:"display_text"`
@@ -76,7 +78,7 @@ type DefinitionManifest struct {
 	Fields       []ManifestField `json:"fields"`
 }
 
-type approvalBinding struct {
+type ApprovalBinding struct {
 	ApprovalCode                string             `json:"approval_code"`
 	Locale                      string             `json:"locale"`
 	PolicyVersion               string             `json:"policy_version"`
@@ -88,10 +90,14 @@ type approvalBinding struct {
 	manifestJSON                string
 }
 
-type bindingsFile struct {
+type approvalBinding = ApprovalBinding
+
+type BindingsFile struct {
 	FormatVersion int               `json:"format_version"`
 	Bindings      []approvalBinding `json:"bindings"`
 }
+
+type bindingsFile = BindingsFile
 
 type loadedPolicy struct {
 	bundle        policyBundle
@@ -189,7 +195,7 @@ func LoadDirectory(policyDirectory, bindingsPath string) (*Catalog, error) {
 			return nil, fmt.Errorf("read policy bundle %q: %w", entry.Name(), err)
 		}
 		var bundle policyBundle
-		if err := decodeStrict(contents, &bundle); err != nil {
+		if err := strictjson.Decode(contents, &bundle); err != nil {
 			return nil, fmt.Errorf("decode policy bundle %q: %w", entry.Name(), err)
 		}
 		loaded, err := validatePolicyBundle(bundle)
@@ -223,7 +229,7 @@ func LoadDirectory(policyDirectory, bindingsPath string) (*Catalog, error) {
 		return nil, fmt.Errorf("read approval bindings: %w", err)
 	}
 	var definitions bindingsFile
-	if err := decodeStrict(contents, &definitions); err != nil {
+	if err := strictjson.Decode(contents, &definitions); err != nil {
 		return nil, fmt.Errorf("decode approval bindings: %w", err)
 	}
 	if definitions.FormatVersion != supportedFormatVersion || len(definitions.Bindings) == 0 {
@@ -238,6 +244,47 @@ func LoadDirectory(policyDirectory, bindingsPath string) (*Catalog, error) {
 		return nil, err
 	}
 	return catalog, nil
+}
+
+func ValidateCatalog(bundles []PolicyBundle, definitions BindingsFile) error {
+	if len(bundles) == 0 {
+		return errors.New("policy catalog requires at least one policy bundle")
+	}
+	catalog := &Catalog{
+		policies: make(map[string]loadedPolicy, len(bundles)),
+		bindings: make(map[string]approvalBinding, len(definitions.Bindings)),
+	}
+	for _, bundle := range bundles {
+		loaded, err := validatePolicyBundle(bundle)
+		if err != nil {
+			return fmt.Errorf("validate policy bundle %q: %w", bundle.PolicyVersion, err)
+		}
+		if _, exists := catalog.policies[bundle.PolicyVersion]; exists {
+			return fmt.Errorf("duplicate policy version %q", bundle.PolicyVersion)
+		}
+		catalog.policies[bundle.PolicyVersion] = loaded
+	}
+	activePolicies := 0
+	for _, loaded := range catalog.policies {
+		if loaded.bundle.State == PolicyStateActive {
+			activePolicies++
+		}
+	}
+	if activePolicies != 1 {
+		return fmt.Errorf("policy catalog must contain exactly one active version, got %d", activePolicies)
+	}
+	if err := catalog.validateCrossVersionRanks(); err != nil {
+		return err
+	}
+	if definitions.FormatVersion != supportedFormatVersion || len(definitions.Bindings) == 0 {
+		return errors.New("approval bindings require format_version 1 and at least one binding")
+	}
+	for _, binding := range definitions.Bindings {
+		if err := catalog.addBinding(binding); err != nil {
+			return err
+		}
+	}
+	return catalog.validateApprovalDefinitions()
 }
 
 func (c *Catalog) validateCrossVersionRanks() error {
@@ -514,6 +561,14 @@ func canonicalManifest(manifest DefinitionManifest) ([]byte, error) {
 	return json.Marshal(manifest)
 }
 
+func CompileManifest(manifest DefinitionManifest) ([]byte, string, error) {
+	canonical, err := canonicalManifest(manifest)
+	if err != nil {
+		return nil, "", err
+	}
+	return canonical, "sha256:" + sha256Hex(canonical), nil
+}
+
 func validateManifestCatalog(binding approvalBinding, policy loadedPolicy) error {
 	entitlementCustomID := entitlementFieldCustomID(binding.ApprovalKind)
 	entitlementFields := 0
@@ -590,7 +645,7 @@ func (c *Catalog) ResolveApproval(request ApprovalRequest) (ApprovalResolution, 
 		return ApprovalResolution{}, errors.New("approval instance started outside the binding acceptance window")
 	}
 	var controls []formControl
-	if err := decodeStrict([]byte(request.FormJSON), &controls); err != nil {
+	if err := strictjson.Decode([]byte(request.FormJSON), &controls); err != nil {
 		return ApprovalResolution{}, fmt.Errorf("decode approval form: %w", err)
 	}
 	if len(controls) == 0 {
@@ -654,90 +709,6 @@ func (c *Catalog) ResolveApproval(request ApprovalRequest) (ApprovalResolution, 
 		resolution.LevelRank = level.Rank
 	}
 	return resolution, nil
-}
-
-func decodeStrict(contents []byte, target any) error {
-	if err := rejectDuplicateJSONKeys(contents); err != nil {
-		return err
-	}
-	decoder := json.NewDecoder(bytes.NewReader(contents))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(target); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("unexpected data after JSON document")
-	}
-	return nil
-}
-
-func rejectDuplicateJSONKeys(contents []byte) error {
-	decoder := json.NewDecoder(bytes.NewReader(contents))
-	if err := scanJSONValue(decoder); err != nil {
-		return err
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		if err != nil {
-			return err
-		}
-		return errors.New("unexpected data after JSON document")
-	}
-	return nil
-}
-
-func scanJSONValue(decoder *json.Decoder) error {
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, compound := token.(json.Delim)
-	if !compound {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		keys := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return errors.New("JSON object key is not a string")
-			}
-			if _, duplicate := keys[key]; duplicate {
-				return fmt.Errorf("duplicate JSON object key %q", key)
-			}
-			keys[key] = struct{}{}
-			if err := scanJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim('}') {
-			return errors.New("JSON object has an invalid closing delimiter")
-		}
-	case '[':
-		for decoder.More() {
-			if err := scanJSONValue(decoder); err != nil {
-				return err
-			}
-		}
-		closing, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if closing != json.Delim(']') {
-			return errors.New("JSON array has an invalid closing delimiter")
-		}
-	default:
-		return errors.New("JSON value starts with an invalid closing delimiter")
-	}
-	return nil
 }
 
 func entitlementFieldCustomID(kind ApprovalKind) string {

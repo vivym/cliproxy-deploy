@@ -17,7 +17,6 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/larkapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/newapi"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthbridge"
-	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/oauthcontract"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/observability"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/webhook"
@@ -267,7 +266,7 @@ func prepareOAuthBridge(
 	}
 	exchanger, err := larkapi.NewOAuthExchanger(larkapi.OAuthConfig{
 		AppID: loaded.AppID, AppSecret: loaded.AppSecret,
-		RedirectURI: oauthcontract.ControllerCallbackURI,
+		RedirectURI: loaded.ControllerCallbackURI,
 		TenantKey:   loaded.TenantKey,
 	})
 	if err != nil {

@@ -1,3 +1,4 @@
+import os
 import pathlib
 import subprocess
 import tarfile
@@ -65,6 +66,16 @@ class BackupDeploymentTests(unittest.TestCase):
             "runtime: true\n", encoding="utf-8"
         )
 
+    def prepare_lark_configuration_sources(self, root):
+        config = root / "lark-runtime" / "config"
+        config.mkdir(parents=True)
+        for name in [
+            "policy.json",
+            "production.binding.json",
+            "lark-console-attestation.json",
+        ]:
+            (config / name).write_text("{}\n", encoding="utf-8")
+
     def test_backup_covers_both_application_state_domains(self):
         text = SCRIPT.read_text(encoding="utf-8")
 
@@ -84,7 +95,7 @@ class BackupDeploymentTests(unittest.TestCase):
         self.assertIn("maintenance_lock", text)
         self.assertIn("Running New API integration listener", text)
         self.assertIn("new-api-lark-controller-data", text)
-        for service in ["traefik", "sub2api", "new-api"]:
+        for service in ["traefik", "sub2api", "new-api", "new-api-config-endpoint"]:
             self.assertIn(f"stop_running_service {service}", text)
         self.assertLess(
             text.index('compose exec -T "$sub2api_redis_service" redis-cli SAVE'),
@@ -333,6 +344,71 @@ exit 99
             self.assertIn("Controller SQLite state exists", result.stderr)
             self.assertNotIn("compose stop", calls_file.read_text(encoding="utf-8"))
 
+    def test_backup_rejects_lark_runtime_links_before_stopping_services(self):
+        for link_kind in ["symlink", "hardlink"]:
+            with self.subTest(link_kind=link_kind), tempfile.TemporaryDirectory() as tmp:
+                tmp_root = pathlib.Path(tmp)
+                root = tmp_root / "repo"
+                root.mkdir()
+                backup_script = self.write_script_copy(root)
+                self.prepare_runtime(root)
+                with (root / ".env").open("a", encoding="utf-8") as env_file:
+                    env_file.write("NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001\n")
+                self.prepare_lark_configuration_sources(root)
+                policies = root / "lark-runtime/policies"
+                policies.mkdir()
+                (policies / "approval-bindings.json").write_text("{}\n", encoding="utf-8")
+                (policies / "employee.policy.json").write_text("{}\n", encoding="utf-8")
+                runtime = root / "lark-runtime/runtime"
+                runtime.mkdir()
+                (runtime / "controller.env").write_text("CONFIG=1\n", encoding="utf-8")
+                receipts = root / "lark-runtime/receipts"
+                receipts.mkdir()
+                (receipts / "compile.json").write_text("{}\n", encoding="utf-8")
+                (root / "lark-runtime/ops").mkdir()
+                policy_path = root / "lark-runtime/config/policy.json"
+                original = tmp_root / "policy-source.json"
+                original.write_text("{}\n", encoding="utf-8")
+                policy_path.unlink()
+                if link_kind == "symlink":
+                    policy_path.symlink_to(original)
+                else:
+                    os.link(original, policy_path)
+
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                calls_file = root / "docker-calls"
+                docker = bin_dir / "docker"
+                docker.write_text(
+                    f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> {calls_file}
+case "$*" in
+  "compose ps --services --filter status=running") exit 0 ;;
+  "volume inspect new-api-lark-controller-data") exit 0 ;;
+esac
+exit 99
+""",
+                    encoding="utf-8",
+                )
+                docker.chmod(0o755)
+
+                result = subprocess.run(
+                    [str(backup_script)],
+                    cwd=root,
+                    env={
+                        "BACKUP_DIR": str(tmp_root / "backups"),
+                        "PATH": f"{bin_dir}:/usr/bin:/bin",
+                    },
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertNotEqual(result.returncode, 0)
+                expected_error = "symlink" if link_kind == "symlink" else "hard-linked"
+                self.assertIn(expected_error, result.stderr.lower())
+                self.assertNotIn("compose stop", calls_file.read_text(encoding="utf-8"))
+
     def test_lark_enabled_backup_pairs_controller_state_with_quiesced_databases(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_root = pathlib.Path(tmp)
@@ -342,6 +418,7 @@ exit 99
             self.prepare_runtime(root)
             with (root / ".env").open("a", encoding="utf-8") as env_file:
                 env_file.write("NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001\n")
+            self.prepare_lark_configuration_sources(root)
             policies = root / "lark-runtime" / "policies"
             policies.mkdir(parents=True)
             (policies / "approval-bindings.json").write_text(
@@ -350,6 +427,17 @@ exit 99
             (policies / "2026-08.policy.json").write_text(
                 '{"policy_version":"2026-08"}\n', encoding="utf-8"
             )
+            runtime = root / "lark-runtime" / "runtime"
+            runtime.mkdir()
+            (runtime / "controller.env").write_text(
+                "LARK_ACTIVE_POLICY_VERSION='2026-08'\n", encoding="utf-8"
+            )
+            receipts = root / "lark-runtime" / "receipts"
+            receipts.mkdir()
+            (receipts / "compile.json").write_text("{}\n", encoding="utf-8")
+            ops = root / "lark-runtime" / "ops"
+            ops.mkdir()
+            (ops / "reviewed-plan.receipt.json").write_text("{}\n", encoding="utf-8")
 
             bin_dir = root / "bin"
             bin_dir.mkdir()
@@ -446,6 +534,20 @@ esac
             self.assertTrue((extract_dir / "backup-manifest.json").is_file())
             self.assertTrue((extract_dir / "lark-controller-data.tgz").is_file())
             self.assertFalse((extract_dir / "lark-controller-data.absent").exists())
+            with tarfile.open(extract_dir / "deployment-runtime.tgz", "r:gz") as archive:
+                runtime_members = {
+                    member.name.removeprefix("./") for member in archive.getmembers()
+                }
+            self.assertIn("lark-runtime/runtime/controller.env", runtime_members)
+            self.assertIn("lark-runtime/config/policy.json", runtime_members)
+            self.assertIn("lark-runtime/config/production.binding.json", runtime_members)
+            self.assertIn(
+                "lark-runtime/config/lark-console-attestation.json", runtime_members
+            )
+            self.assertIn("lark-runtime/receipts/compile.json", runtime_members)
+            self.assertIn("lark-runtime/ops/reviewed-plan.receipt.json", runtime_members)
+            self.assertNotIn("lark-runtime/ops/maintenance.lock", runtime_members)
+            self.assertNotIn("lark-runtime/ops/maintenance.session", runtime_members)
             with tarfile.open(extract_dir / "lark-controller-data.tgz", "r:gz") as archive:
                 members = {member.name.removeprefix("./") for member in archive.getmembers()}
             self.assertTrue(
@@ -636,10 +738,19 @@ esac
             self.prepare_runtime(root)
             with (root / ".env").open("a", encoding="utf-8") as env_file:
                 env_file.write("NEW_API_INTEGRATION_LISTEN_ADDR=0.0.0.0:3001\n")
+            self.prepare_lark_configuration_sources(root)
             policies = root / "lark-runtime" / "policies"
             policies.mkdir(parents=True)
             (policies / "approval-bindings.json").write_text("{}\n", encoding="utf-8")
             (policies / "test.policy.json").write_text("{}\n", encoding="utf-8")
+            runtime = root / "lark-runtime" / "runtime"
+            runtime.mkdir()
+            (runtime / "controller.env").write_text(
+                "LARK_ACTIVE_POLICY_VERSION='test'\n", encoding="utf-8"
+            )
+            receipts = root / "lark-runtime" / "receipts"
+            receipts.mkdir()
+            (receipts / "compile.json").write_text("{}\n", encoding="utf-8")
 
             bin_dir = root / "bin"
             bin_dir.mkdir()
