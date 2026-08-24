@@ -15,6 +15,27 @@
 每个 registry index 均包含 `linux/amd64`、`linux/arm64` 以及每个平台对应的 provenance/SBOM
 attestation。本次切换为 `public` 后，已在无凭证环境重新验证这三个 immutable reference 的匿名拉取。
 
+### 本地部署候选收据
+
+2026-08-24 的本地部署候选固定为上表三个 immutable reference。不要把 tag 单独写入
+生产 `.env`；repository 与 `tag@sha256:digest` 必须成对使用。
+
+本地候选验证结果：
+
+- 在 arm64 Docker host 上强制 `--platform linux/amd64` 拉取并运行三个 image。New API 和
+  correction CLI 的 `--help` 均返回 `0`；Controller amd64 binary 成功执行，并按预期因缺少
+  真实 callback 配置 fail closed。三个路径均未出现 `exec format error`。
+- `feature/lark-controller-shadow` 的 `db63869` 通过 `go test ./...`、
+  `go test -race ./...` 和 `go vet ./...`。Controller runtime image 仍固定为未受本次
+  correction-only 修改影响的 `f55103e` digest。
+- 使用三个 immutable reference 同时渲染 `lark` 和 `lark-ops` profile，
+  `docker compose config --quiet` 通过。JSON 结构化检查确认 New API、临时 correction
+  endpoint、Controller、correction 和 readonly service 均使用预期 digest；Controller 保持
+  `shadow`、OAuth 保持关闭，相关服务没有 host port，Controller 不加入 `new-api-data`，
+  readonly service 保持 `network_mode: none`。
+- 本次验证没有生成 `.env`、没有写入真实 secret 或 policy、没有启动项目 Compose 服务、
+  没有访问服务器。真实 Lark tenant、恢复演练和生产网络探测仍是独立门禁。
+
 基础 New API 迁移和 Lark rollout 是两个独立变更。先按 `migrate-to-new-api-deploy.md` 完成并验收基础迁移；不要在同一个维护窗口首次启用 Lark profile。
 
 未经服务器操作授权，不得在远端执行本手册命令。
