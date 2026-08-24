@@ -23,6 +23,18 @@ type fakeResolutionStore struct {
 	resolved        *inbox.ApprovalReversalResolution
 }
 
+func TestRunHelpReturnsSuccess(t *testing.T) {
+	var output bytes.Buffer
+	var errorOutput bytes.Buffer
+
+	if err := Run(context.Background(), []string{"--help"}, &output, &errorOutput, nil); err != nil {
+		t.Fatalf("help returned an error: %v", err)
+	}
+	if !strings.Contains(errorOutput.String(), "Usage of lark-correction:") {
+		t.Fatalf("help output = %q", errorOutput.String())
+	}
+}
+
 func (store *fakeResolutionStore) ListPendingApprovalReversals(
 	context.Context,
 	int,
