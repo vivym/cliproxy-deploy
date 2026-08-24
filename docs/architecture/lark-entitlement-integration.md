@@ -1909,12 +1909,12 @@ local OCI index digest 不是 registry digest；启用 attestations、改变 exp
 | --- | --- | --- | --- |
 | New API fork | `ghcr.io/vivym/new-api-lark-fork:dbfcf0c7@sha256:47c8bce2491f10d27f8f1a75b68aecffa3e543ff4f3af47f94850d59a1f1edf4` | `sha256:47c8bce2491f10d27f8f1a75b68aecffa3e543ff4f3af47f94850d59a1f1edf4` | `public` |
 | Controller | `ghcr.io/vivym/lark-quota-controller:f55103e@sha256:fd111b27e4f4668c76f6006360c246b073dbc71a62e72f9209f6e5b95d62c225` | `sha256:fd111b27e4f4668c76f6006360c246b073dbc71a62e72f9209f6e5b95d62c225` | `public` |
-| correction CLI | `ghcr.io/vivym/lark-correction:f55103e@sha256:43bc7bb62d8d422e02642144a6fc0828b418250d16c355de9fd2069be0273ff5` | `sha256:43bc7bb62d8d422e02642144a6fc0828b418250d16c355de9fd2069be0273ff5` | `public` |
+| correction CLI | `ghcr.io/vivym/lark-correction:db63869@sha256:f463c8c715ea0f355df8a192540330569bcd05e16ff0c24a1bbfadd72c80d7c1` | `sha256:f463c8c715ea0f355df8a192540330569bcd05e16ff0c24a1bbfadd72c80d7c1` | `public` |
 
 Registry inspection confirmed two platform manifests (`linux/amd64`, `linux/arm64`) and two
 attestation manifests per image. An anonymous Bearer-token pull returned HTTP `200` and the
 same `Docker-Content-Digest` for all three tags. The source branches are `feature/lark-wp2-bigint-quota`
-(`dbfcf0c7`) and `feature/lark-controller-shadow` (`f55103e`); neither remote `main` was
+(`dbfcf0c7`) and `feature/lark-controller-shadow` (`db63869`); neither remote `main` was
 changed. The images were published, but not deployed or server-tested.
 
 ### WP5：灰度上线

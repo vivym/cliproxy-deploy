@@ -10,7 +10,7 @@
 | --- | --- | --- |
 | New API fork | `ghcr.io/vivym/new-api-lark-fork:dbfcf0c7@sha256:47c8bce2491f10d27f8f1a75b68aecffa3e543ff4f3af47f94850d59a1f1edf4` | `public` |
 | Controller | `ghcr.io/vivym/lark-quota-controller:f55103e@sha256:fd111b27e4f4668c76f6006360c246b073dbc71a62e72f9209f6e5b95d62c225` | `public` |
-| correction CLI | `ghcr.io/vivym/lark-correction:f55103e@sha256:43bc7bb62d8d422e02642144a6fc0828b418250d16c355de9fd2069be0273ff5` | `public` |
+| correction CLI | `ghcr.io/vivym/lark-correction:db63869@sha256:f463c8c715ea0f355df8a192540330569bcd05e16ff0c24a1bbfadd72c80d7c1` | `public` |
 
 每个 registry index 均包含 `linux/amd64`、`linux/arm64` 以及每个平台对应的 provenance/SBOM
 attestation。本次切换为 `public` 后，已在无凭证环境重新验证这三个 immutable reference 的匿名拉取。
