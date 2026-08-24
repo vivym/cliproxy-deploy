@@ -454,6 +454,9 @@ func runWithDependencies(
 ) error {
 	parsed, err := parseOptions(arguments, errorOutput)
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if parsed.listPending {
