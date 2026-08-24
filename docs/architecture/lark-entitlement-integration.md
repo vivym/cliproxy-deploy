@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏、周期性 approval reconciliation 和管理员一次性纠正流程；WP4 已完成本地 Compose/profile/network/volume/least-privilege secret/verify 基础接入、correction credential 隔离和 offline quiesce backup/restore 同包合同，但镜像 digest、全相邻网络探测、真实租户配置和生产恢复演练仍未完成；WP5 未实施，未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏、周期性 approval reconciliation 和管理员一次性纠正流程；WP4 已完成本地 Compose/profile/network/volume/least-privilege secret/verify 基础接入、correction credential 隔离、offline quiesce backup/restore 同包合同和 GHCR multi-arch 发布收据，但三个个人 GHCR package 当前仍为 `private`，匿名拉取、全相邻网络探测、真实租户配置和生产恢复演练仍未完成；WP5 未实施，未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1363,7 +1363,7 @@ Lark 的审批订阅接口目前要求 `approval:approval` 或 `approval:definit
 
 ## 当前本地部署拓扑（尚未生产验收）
 
-当前根 Compose 已在 `lark` profile 中本地接入 `lark-quota-controller`、`:3001` integration listener、`lark-integration` network、policy mount、Controller volume 和按 consumer 隔离的 file-backed secrets，并提供 current/next integration credential window。基础 New API 与常驻 Controller 均不挂 correction credential；`lark-ops` profile 使用独立 correction image target 和临时、无 edge/Traefik/host-port 的 New API endpoint。`--list-pending` 走无网络、无 secret、Controller SQLite 只读挂载的独立 service，不启动 New API endpoint。backup、restore 和 correction runner 共用 host-only `maintenance.session` mutex 与带 `backup/restore/correction/readonly` mode 的容器启动 lock；任意 lock mode 都阻止常驻 New API/Controller 启动，临时写服务只接受 `correction`。readonly runner 使用固定名 one-off container，强删并精确验空后才释放边界。restore 在受控启动前释放容器 lock，但直到 readiness 结束始终持有 session，因而其他 host runner 不能抢占；handoff 内任何非零退出都会重建 restore lock 并停掉部分启动的 writer。无法确认临时 snapshot/restore/correction container 已清理时同时保留 session/lock 并失败。该接入只完成本地渲染、镜像构建和测试，尚未发布不可变 image digest、配置真实 tenant 或完成生产网络和恢复演练。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
+当前根 Compose 已在 `lark` profile 中本地接入 `lark-quota-controller`、`:3001` integration listener、`lark-integration` network、policy mount、Controller volume 和按 consumer 隔离的 file-backed secrets，并提供 current/next integration credential window。基础 New API 与常驻 Controller 均不挂 correction credential；`lark-ops` profile 使用独立 correction image target 和临时、无 edge/Traefik/host-port 的 New API endpoint。`--list-pending` 走无网络、无 secret、Controller SQLite 只读挂载的独立 service，不启动 New API endpoint。backup、restore 和 correction runner 共用 host-only `maintenance.session` mutex 与带 `backup/restore/correction/readonly` mode 的容器启动 lock；任意 lock mode 都阻止常驻 New API/Controller 启动，临时写服务只接受 `correction`。readonly runner 使用固定名 one-off container，强删并精确验空后才释放边界。restore 在受控启动前释放容器 lock，但直到 readiness 结束始终持有 session，因而其他 host runner 不能抢占；handoff 内任何非零退出都会重建 restore lock 并停掉部分启动的 writer。无法确认临时 snapshot/restore/correction container 已清理时同时保留 session/lock 并失败。该接入已完成本地渲染、镜像构建、GHCR 发布收据和测试；三个个人 package 当前仍为 private，尚未完成匿名拉取、真实 tenant 配置、生产网络和恢复演练。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
 
 网络：
 
@@ -1877,14 +1877,15 @@ job 年龄，未来的 `retry_wait` 不会被误判为卡死。
 
 - [x] 修改根目录唯一的 `docker-compose.yml`，不引入 overlay 或第二套部署入口。
 - [x] 增加显式命名为 `new-api-lark-integration` 的 `lark-integration` network、分离的 events/OAuth Traefik exact-path router 和 Controller volume。
-- [ ] 发布并固定 New API fork、Controller 和 correction CLI image digest；当前模板只提供 repository/tag 输入，三个 image 已完成本地双架构 OCI build 验证但尚未发布。
+- [x] 发布并固定 New API fork、Controller 和 correction CLI image digest；三个 image 已推送 GHCR，registry index 含 `linux/amd64`、`linux/arm64` 和对应 provenance/SBOM attestation。
+- [ ] 将三个个人 GHCR package 从 `private` 切换为 `public`，并从无凭证环境完成匿名拉取验证。GitHub 当前没有个人 package visibility 的 REST/GraphQL 接口，只能在每个 package 的 `Package settings → Change visibility → Public` 中操作；公开后不可逆。
 - [x] 扩展 `.env.example` 和按 `shared/controller/new-api` consumer 隔离的 file-backed secret mount，但不提交任何 secret；Controller/correction image target 已分离，integration current/next rotation window 与 correction 三方独立性检查已接入。
 - [x] 扩展带 offline quiesce barrier、v2 manifest/receipt、精确 checksum coverage 和 Lark enabled/absent 同包校验的 backup/restore 脚本；restore 强制 shadow/OAuth-off，New API-only restore 拒绝拆分 enabled 包。生产恢复与 reconciliation 演练仍待执行。
 - [x] 本地 verify 已检查公网 integration path 为 `404`、New API 容器内无凭证访问 `:3001` 为 `401`、Controller `readyz` 和 OAuth 灰度门禁。
 - [ ] 在获准的生产维护窗口从 `edge`、`new-api-data` 和 `lark-integration` 各自独立 probe，完成公网与所有相邻网络验收。
 - [x] 增加 Compose 灰度、secret/policy/rotation 配置、host-side correction maintenance lock 和回滚 runbook；Lark 后台实租户配置、dead-letter 和 reversal 演练仍待执行。
 
-当前本地 `linux/arm64` 构建收据如下；它们都是 local image ID，不是可发布的 registry
+当前本地 `linux/arm64` 构建收据如下；它们都是 local image ID，不能替代 registry
 manifest digest：
 
 - New API fork `dbfcf0c7`：`sha256:68f25465624a0e736a2bfacf58adad608b0e2777f4f89be0272a174bf952e973`
@@ -1901,10 +1902,19 @@ manifest digest：
 
 两架构 config 还分别验证了 New API entrypoint、Controller/correction entrypoint、Controller
 healthcheck 和 runtime UID/GID `10001:10001`。验证后的临时 OCI archive 已删除。这三个
-local OCI index digest 不是已发布的 registry digest；未来启用 attestations、改变 exporter
-或由 registry 转换 media type 都可能产生不同 digest，发布后必须重新记录 registry receipt。
+local OCI index digest 不是 registry digest；启用 attestations、改变 exporter 或由 registry
+转换 media type 都可能产生不同 digest。2026-08-24 的 GHCR registry receipt 如下：
 
-本次验证未 push 或发布任何镜像，未部署，也未访问服务器。
+| Image | Immutable reference | Registry OCI index digest | Visibility |
+| --- | --- | --- | --- |
+| New API fork | `ghcr.io/vivym/new-api-lark-fork:dbfcf0c7@sha256:47c8bce2491f10d27f8f1a75b68aecffa3e543ff4f3af47f94850d59a1f1edf4` | `sha256:47c8bce2491f10d27f8f1a75b68aecffa3e543ff4f3af47f94850d59a1f1edf4` | `private` |
+| Controller | `ghcr.io/vivym/lark-quota-controller:f55103e@sha256:fd111b27e4f4668c76f6006360c246b073dbc71a62e72f9209f6e5b95d62c225` | `sha256:fd111b27e4f4668c76f6006360c246b073dbc71a62e72f9209f6e5b95d62c225` | `private` |
+| correction CLI | `ghcr.io/vivym/lark-correction:f55103e@sha256:43bc7bb62d8d422e02642144a6fc0828b418250d16c355de9fd2069be0273ff5` | `sha256:43bc7bb62d8d422e02642144a6fc0828b418250d16c355de9fd2069be0273ff5` | `private` |
+
+Registry inspection confirmed two platform manifests (`linux/amd64`, `linux/arm64`) and two
+attestation manifests per image. The source branches are `feature/lark-wp2-bigint-quota`
+(`dbfcf0c7`) and `feature/lark-controller-shadow` (`f55103e`); neither remote `main` was
+changed. The images were published, but not deployed or server-tested.
 
 ### WP5：灰度上线
 

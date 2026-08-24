@@ -2,7 +2,18 @@
 
 ## 状态和边界
 
-本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。当前代码已完成本地 Compose 渲染、New API fork、Controller 与 correction CLI 的 `linux/amd64,linux/arm64` OCI 构建验证和 offline quiesce backup/restore 合同，但未发布这些镜像的 multi-arch registry digest，未配置真实 Lark tenant，也未做获准的生产恢复/reconciliation 演练。因此当前不能据此宣称生产可上线。
+本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。New API fork、Controller 与 correction CLI 已推送到 GHCR，并记录了带 provenance/SBOM 的 multi-arch registry index digest；三个个人包当前仍为 `private`，尚未完成匿名拉取验证。真实 Lark tenant、生产恢复/reconciliation 演练和服务器验收也尚未完成，因此当前不能据此宣称生产可上线。
+
+2026-08-24 registry receipt：
+
+| Image | Immutable reference | Visibility |
+| --- | --- | --- |
+| New API fork | `ghcr.io/vivym/new-api-lark-fork:dbfcf0c7@sha256:47c8bce2491f10d27f8f1a75b68aecffa3e543ff4f3af47f94850d59a1f1edf4` | `private` |
+| Controller | `ghcr.io/vivym/lark-quota-controller:f55103e@sha256:fd111b27e4f4668c76f6006360c246b073dbc71a62e72f9209f6e5b95d62c225` | `private` |
+| correction CLI | `ghcr.io/vivym/lark-correction:f55103e@sha256:43bc7bb62d8d422e02642144a6fc0828b418250d16c355de9fd2069be0273ff5` | `private` |
+
+每个 registry index 均包含 `linux/amd64`、`linux/arm64` 以及每个平台对应的 provenance/SBOM
+attestation。切换为 `public` 后，必须在无凭证环境重新验证这三个 immutable reference 的匿名拉取。
 
 基础 New API 迁移和 Lark rollout 是两个独立变更。先按 `migrate-to-new-api-deploy.md` 完成并验收基础迁移；不要在同一个维护窗口首次启用 Lark profile。
 
@@ -12,7 +23,7 @@
 
 启用前必须同时满足：
 
-1. New API fork、Controller 与 correction CLI 镜像已发布，并在 `.env` 中使用 reviewed `tag@sha256:digest`。
+1. New API fork、Controller 与 correction CLI 镜像已切换为公开 GHCR package，并已通过匿名拉取验证；`.env` 使用 reviewed `tag@sha256:digest`。当前三个 package 仍为 private，本项不通过。
 2. `EDGE_SUBNET`、`NEW_API_DATA_SUBNET`、`SUB2API_DATA_SUBNET` 和 `LARK_INTEGRATION_SUBNET` 与主机现有 Docker networks 不重叠。
 3. `lark-runtime/policies/` 包含完整历史 `*.policy.json` 和 `approval-bindings.json`，且 active version 与 `LARK_ACTIVE_POLICY_VERSION` 一致。
 4. `lark-runtime/secrets/{shared,controller,new-api}/` 三个 consumer 子目录及其中所有 secret 的 owner 固定为 Controller runtime UID/GID `10001:10001`，子目录为 `0700`、文件为 `0600`；`scripts/verify-lark-secret-permissions.sh` 已通过，且没有 secret 进入 `.env`、Git、镜像或日志。顶层 `secrets/` 只负责组织这些 bind source，不作为容器内权限边界。
