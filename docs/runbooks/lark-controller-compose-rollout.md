@@ -2,13 +2,44 @@
 
 ## 状态和边界
 
-本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。2026-08-25 的 GHCR
-收据对应 New API `4e451088` 和 deployment `54955ec`，早于周额度实现。当前周额度候选为
-New API `a624396db4ef01db607cd100c24ecc6f26e77430` 和 deployment
-`9a6d825db04ef28aa81bea14671c0ddb778eac39`；四个 image 已在本地完成双架构 OCI 和
-`linux/amd64` 入口验证，但尚未发布到 GHCR。因此旧 registry digest 不得用于当前周额度
-候选，镜像发布门禁已重新打开。真实 Lark tenant、生产恢复/reconciliation 演练和服务器
-验收也仍未完成，当前不能据此宣称生产可上线或修改生产 `.env`。
+本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。当前周额度候选为 New API
+`a624396db4ef01db607cd100c24ecc6f26e77430` 和 deployment
+`9a6d825db04ef28aa81bea14671c0ddb778eac39`；四个 multi-arch image 已发布到公开 GHCR，
+并取得 registry index、provenance/SBOM、匿名拉取和 `linux/amd64` 入口收据。镜像发布门禁
+已经闭环。真实 Lark tenant、生产恢复/reconciliation 演练和服务器验收仍未完成，因此当前
+不能据此宣称生产可上线或修改生产 `.env`。
+
+### 当前周额度候选的 registry 收据
+
+| Image | Immutable reference | Visibility / anonymous |
+| --- | --- | --- |
+| New API fork | `ghcr.io/vivym/new-api-lark-fork:a624396d@sha256:eba5cf13a4bbfe532cddec10c5203d11f2912a6b88e1e2a7affbeb5030cc7957` | `public`, `200`, digest matched |
+| Controller | `ghcr.io/vivym/lark-quota-controller:9a6d825@sha256:7349bbf43fafb324ce85bc55457fa9d570ec3ba09cddcd1bddc7c6dd16d6115e` | `public`, `200`, digest matched |
+| correction CLI | `ghcr.io/vivym/lark-correction:9a6d825@sha256:ec2bd49c40c4456501a10e72852ceb52d228b81e5b59538f79ddf10fad219de2` | `public`, `200`, digest matched |
+| config CLI | `ghcr.io/vivym/lark-config:9a6d825@sha256:e894620eedfbbdd9a8b076bdb2e6afb35b84885c433e7f570dbf5e89d01d86fa` | `public`, `200`, digest matched |
+
+Registry index descriptors：
+
+| Image | `linux/amd64` | `linux/arm64` | amd64 attestation | arm64 attestation |
+| --- | --- | --- | --- | --- |
+| New API fork | `sha256:2283daf219c8863a4eaff903f585a8908b98d2264e8e6500b2a5c40e76cf855d` | `sha256:6d29e22221928149a1c12a1fc784a2323a12edd3e423888385efcae5b0407fa8` | `sha256:0a0cee3c7c9f8bb7d5554b1d57c72dde1360125235687a4d09d995e4e8a2a089` | `sha256:927ae4c4bce3a624da01554a0818260fc4dc7da8bd56e01b85f92a2682b30eb9` |
+| Controller | `sha256:7fa7eae91f7f9d8835e9cbe6112dcb6ca3266d549b917dba90a0bb831e6bc838` | `sha256:f3168173448049296f0c342a648ac235c91771e1179990a06c1b9f9405a42ac4` | `sha256:17d4c837d11a8cdd0857fe6738c7ed760a86299b414b257d4714c07a0bb4d6ea` | `sha256:13445afe3f58c0fc3214675bd83c6f0b5aa5e613234455b97c0c93cd90e98ac4` |
+| correction CLI | `sha256:b57ffb598adcacaca423f777c1b506d3d78c878175b856bbbb1769b56fe03ea1` | `sha256:85629d8d818c066dda1f055e8a4e8340e109861f1079eb19f68b13206d112280` | `sha256:d47b0fab8a6772c5cd93d1ca01cdbacb2dcbe80a8744d6f18815883bb14c4968` | `sha256:4e698568370a86fb6572ce5e49c52fc020d4b3ce2294004a2c51b260bdd02987` |
+| config CLI | `sha256:91b6951a09d7b73d0b894a4fdc3ea0fca74ba3fae22bee02f1f83308141a6d35` | `sha256:12e400895687422188b08e3690d29bf09196ff6079fe67db75bb9c8a566565c2` | `sha256:23e9a5070b20317cc1795a9c9d5feac3239e2eac68b6b3e74150c36e906c9197` | `sha256:427290297c8b96757e06f485e1f0222a7fdf307a3f5fde9a0aab1f86b8e3e99d` |
+
+四个 index 都由 Buildx 以 `--platform linux/amd64,linux/arm64`、
+`--provenance=mode=max` 和 `--sbom=true` 发布。无 Docker/GitHub credential 的 Bearer-token
+请求均返回 `200`；响应 `Docker-Content-Digest`、index body、platform manifest、image config
+以及 attestation config/SPDX/SLSA blob 的 digest/size 均独立复算一致。两架构 config 的
+source/revision label、entrypoint、runtime user 和 Controller healthcheck 与源码合同一致。
+
+在 arm64 Docker host 上从上述 immutable reference 强制运行 `linux/amd64`：New API、
+correction 和 config 的 `--help` 返回 `0`，`lark-cli --version` 返回 `1.0.80`；Controller
+可执行，并因缺少 `NEW_API_OAUTH_CALLBACK_ALLOWLIST` 按预期 fail closed。所有路径均无
+`exec format error`。验证后的本地 registry tag 已精确删除，BuildKit cache 未清理。
+两个 `feature/lark-config-ops` 分支已 fast-forward，并分别包含 New API `a624396d` 与
+deployment image source `9a6d825`；两个远端 `main` 均未修改。本次没有访问服务器或真实
+Lark tenant。
 
 ### 2026-08-25 历史 registry 收据（周额度实现之前）
 
@@ -125,7 +156,7 @@ attestation 和 exporter 改变了 index，因此没有复用上述 local digest
 
 启用前必须同时满足：
 
-1. 从当前已提交 revisions 重新构建并发布 New API fork、Controller、correction CLI 和 `lark-config` 四个 multi-arch image；四个公开 GHCR package 均有新的 registry index/attestation 收据和匿名拉取验证，`.env` 使用 reviewed `tag@sha256:digest`。当前周额度 revisions 只有本地 OCI 收据，尚未发布，因此该镜像发布门禁未通过。
+1. 从当前已提交 revisions 重新构建并发布 New API fork、Controller、correction CLI 和 `lark-config` 四个 multi-arch image；四个公开 GHCR package 均有新的 registry index/attestation 收据和匿名拉取验证，`.env` 使用 reviewed `tag@sha256:digest`。当前周额度 revisions 已取得本节收据，因此该镜像发布门禁已通过；生产 `.env` 仍须等待本清单其他门禁全部通过。
 2. `EDGE_SUBNET`、`NEW_API_DATA_SUBNET`、`SUB2API_DATA_SUBNET` 和 `LARK_INTEGRATION_SUBNET` 与主机现有 Docker networks 不重叠。
 3. 已按 `lark-tenant-configuration.md` 生成并审查配置收据；`lark-runtime/policies/` 包含完整历史 `*.policy.json` 和 `approval-bindings.json`，`lark-runtime/runtime/controller.env` 中的 active version 与 catalog 一致。
 4. `lark-runtime/secrets/{shared,controller,new-api}/` 三个 consumer 子目录及其中所有 secret 的 owner 固定为 Controller runtime UID/GID `10001:10001`，子目录为 `0700`、文件为 `0600`；`scripts/verify-lark-secret-permissions.sh` 已通过，且没有 secret 进入 `.env`、Git、镜像或日志。顶层 `secrets/` 只负责组织这些 bind source，不作为容器内权限边界。
