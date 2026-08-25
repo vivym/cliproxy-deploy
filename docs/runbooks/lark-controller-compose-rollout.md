@@ -2,9 +2,48 @@
 
 ## 状态和边界
 
-本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。下表是上一轮 New API fork、Controller 与 correction CLI 的历史 GHCR 收据；它们不包含当前两个 `feature/lark-config-ops` worktree 的配置控制面改动，不能作为本次生产候选。当前 `lark-config` 只有本地 multi-arch OCI 收据，尚无 registry digest 或匿名拉取收据。真实 Lark tenant、生产恢复/reconciliation 演练和服务器验收也尚未完成，因此当前不能据此宣称生产可上线。
+本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。2026-08-25 已从两个
+`feature/lark-config-ops` 提交发布四个新的 GHCR multi-arch 候选；四个 package 均为
+`public`，无凭证 manifest 请求都返回 `200` 且 digest 匹配。镜像发布门禁已经闭环，
+但真实 Lark tenant、生产恢复/reconciliation 演练和服务器验收仍未完成，因此当前不能
+据此宣称生产可上线，也不能跳过本手册其余启动门禁直接修改生产 `.env`。
 
-2026-08-24 historical registry receipt：
+### 2026-08-25 当前 registry 候选收据
+
+| Image | Immutable reference | Visibility | Anonymous manifest |
+| --- | --- | --- | --- |
+| New API fork | `ghcr.io/vivym/new-api-lark-fork:4e451088@sha256:1adfe184f18357dd13a1872d6d2318ebc14c48b9d4968e42292ff3d080187f46` | `public` | `200`, digest matched |
+| Controller | `ghcr.io/vivym/lark-quota-controller:54955ec@sha256:4b7ddaac83f75b79b7e025a978bf143fab286cc2603cdc60f2a4315713ed7341` | `public` | `200`, digest matched |
+| correction CLI | `ghcr.io/vivym/lark-correction:54955ec@sha256:4cc3330ae17c1744ef47e1234fa21f9fe137cb1a0774dbf38c3d2f9ec76825bb` | `public` | `200`, digest matched |
+| config CLI | `ghcr.io/vivym/lark-config:54955ec@sha256:56f9857f775f282dcc1db0f4bb9396b13705f6e991b00d4d81de2169f463de52` | `public` | `200`, digest matched |
+
+Registry index descriptors：
+
+| Image | `linux/amd64` | `linux/arm64` | amd64 attestation | arm64 attestation |
+| --- | --- | --- | --- | --- |
+| New API fork | `sha256:53b0c9123387916a2c5e48ea250b7cc4d844eca29de09a33b0f56a6de040baa5` | `sha256:572fef92184d972c76e390053323aa15f556687e0d1ff18edcff329eb9c55e5a` | `sha256:58bab464ad98a33c9ef7f511a90bd9f60cd9e4e634dec9b02f9ccd015efdabd0` | `sha256:24b6967aec23590c446252976ffb1d78a774a2dbeda2003c323c9a3d2aeef41c` |
+| Controller | `sha256:71e1eafcca673acc221c60667c8d37b8a812e0f160782fd8eb48f52304b49702` | `sha256:09a1f4a5915d269a03a88f72181d6391a8693d26df89df0a2a46088c4a77a953` | `sha256:a0cb3013e8cb3bdaf4f1226c378a104ee7b7836d5dbde9fe50ca5fe919b30d8d` | `sha256:a75d1632f33b9a46b7c7c2a76ad13ec45c647d9b0d0b7a812256df33a41d192a` |
+| correction CLI | `sha256:c7ffcf7c46247f1679aef52d69a3933f281617962d3e023e8245d3b9132d0078` | `sha256:2c4a5f97908abf8dd9d95b2e070be2a40f1fbdb3bd9ec57618c2d68c532187f2` | `sha256:f7853aee176c473a914923b7d1c8df966ed4d4d1b0b1087ab1c1b5ba517cd791` | `sha256:1df2471d5074d20d1c2d0e9c569a43a2b2e7e082b6ceb06568475d43709035f6` |
+| config CLI | `sha256:359027622a88fb84d8b93e4804611f3b8311e1935662bab8b17760f3b6de516b` | `sha256:e4a8b1ce62bea6fbc28acdc866d98a7405e53080475c4f30fb68b5307fbb5f0d` | `sha256:f9b7ddb9dae74c0f22bbf6e0659f053cb378d8097d617f10636fd7618e1558c0` | `sha256:81f80a77ceb6f9124789e008052f952cfd03aa22f886fe8e4fc20184f6288c55` |
+
+四个 index 都由 Buildx 以 `--platform linux/amd64,linux/arm64`、
+`--provenance=mode=max` 和 `--sbom=true` 发布；逐平台查询均能读取 provenance 和 SBOM。
+两架构 config 都带精确 source/revision label。Controller、correction 和 config 的 runtime
+user 为 `10001:10001`，entrypoint 分别为 `/usr/local/bin/lark-controller`、
+`/usr/local/bin/lark-correction` 和 `/usr/local/bin/lark-config`；Controller image healthcheck
+也已从 Docker runtime config 复核。
+
+在 arm64 Docker host 上强制 `--platform linux/amd64` 运行上述 immutable reference：New API、
+correction 和 config 的 `--help` 均返回 `0`，`lark-cli --version` 返回 `1.0.80`；Controller
+成功执行并按预期因缺少 callback 配置 fail closed。所有路径均未出现 `exec format error`。
+这只验证镜像架构和入口，不替代真实 tenant、Compose 或服务器验收。
+
+`lark-config` 已在 GitHub `Package settings -> Change visibility -> Public` 完成不可逆
+切换；随后从无凭证环境取得 `200` 和相同 `Docker-Content-Digest`。GitHub 的个人 package
+REST/GraphQL API 没有 visibility mutation，因此本收据保留了切换后的独立匿名请求结果，
+没有把 authenticated registry inspect 误记为匿名验证。
+
+### 2026-08-24 historical registry receipt
 
 | Image | Immutable reference | Visibility |
 | --- | --- | --- |
@@ -36,7 +75,7 @@ attestation。本次切换为 `public` 后，已在无凭证环境重新验证�
 - 本次验证没有生成 `.env`、没有写入真实 secret 或 policy、没有启动项目 Compose 服务、
   没有访问服务器。真实 Lark tenant、恢复演练和生产网络探测仍是独立门禁。
 
-### 当前 `lark-config` 本地 multi-arch 收据
+### `lark-config` 发布前本地 multi-arch 收据
 
 2026-08-25 从当前候选源码以 `--platform linux/amd64,linux/arm64 --target config
 --provenance=false --sbom=false --output type=oci` 构建并独立解析 OCI。该收据只证明本地
@@ -50,9 +89,9 @@ build artifact，不是 registry 或匿名拉取收据：
 | Runtime contract | both platforms: `User=10001:10001`, `Entrypoint=/usr/local/bin/lark-config` |
 | amd64 execution | `lark-config --help` exit `0`; `lark-cli --version` = `1.0.80` |
 
-Index、platform manifest 和 image config blob 都按声明 digest 重新计算一致。发布前必须从
-已提交 revision 重建；registry digest 可能因 attestation/media type 不同而变化，不能复用上述
-local digest。
+Index、platform manifest 和 image config blob 都按声明 digest 重新计算一致。后续已从
+提交 `54955ec6dc585d89474591a0e7e03b2d51bbfb5f` 重建并取得本节前部的 registry digest；
+attestation 和 exporter 改变了 index，因此没有复用上述 local digest。
 
 基础 New API 迁移和 Lark rollout 是两个独立变更。先按 `migrate-to-new-api-deploy.md` 完成并验收基础迁移；不要在同一个维护窗口首次启用 Lark profile。
 
@@ -62,7 +101,7 @@ local digest。
 
 启用前必须同时满足：
 
-1. 从当前已提交 revisions 重新构建并发布 New API fork、Controller、correction CLI 和 `lark-config` 四个 multi-arch image；四个公开 GHCR package 均有新的 registry index/attestation 收据和匿名拉取验证，`.env` 使用 reviewed `tag@sha256:digest`。当前该门禁未通过。
+1. 从当前已提交 revisions 重新构建并发布 New API fork、Controller、correction CLI 和 `lark-config` 四个 multi-arch image；四个公开 GHCR package 均有新的 registry index/attestation 收据和匿名拉取验证，`.env` 使用 reviewed `tag@sha256:digest`。该镜像发布门禁已通过；生产 `.env` 仍需等待本清单其他门禁全部通过。
 2. `EDGE_SUBNET`、`NEW_API_DATA_SUBNET`、`SUB2API_DATA_SUBNET` 和 `LARK_INTEGRATION_SUBNET` 与主机现有 Docker networks 不重叠。
 3. 已按 `lark-tenant-configuration.md` 生成并审查配置收据；`lark-runtime/policies/` 包含完整历史 `*.policy.json` 和 `approval-bindings.json`，`lark-runtime/runtime/controller.env` 中的 active version 与 catalog 一致。
 4. `lark-runtime/secrets/{shared,controller,new-api}/` 三个 consumer 子目录及其中所有 secret 的 owner 固定为 Controller runtime UID/GID `10001:10001`，子目录为 `0700`、文件为 `0600`；`scripts/verify-lark-secret-permissions.sh` 已通过，且没有 secret 进入 `.env`、Git、镜像或日志。顶层 `secrets/` 只负责组织这些 bind source，不作为容器内权限边界。
