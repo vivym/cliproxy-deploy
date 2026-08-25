@@ -72,7 +72,7 @@ type ApprovalReversal struct {
 	OriginalGrantStatus   EntitlementGrantJobStatus
 	OriginalGrantType     string
 	OriginalQuotaDelta    int64
-	OriginalMonthlyQuota  int64
+	OriginalPeriodQuota   int64
 	OriginalPolicyVersion string
 	OriginalBusinessCode  string
 	Result                ApprovalReversalResult
@@ -213,7 +213,7 @@ LIMIT 2`,
 	}
 	reversal.OriginalExternalID = externalIDs[0]
 	if err := tx.QueryRowContext(ctx, `
-SELECT subject_sha256, grant_type, quota_delta, monthly_quota, policy_version, business_code
+SELECT subject_sha256, grant_type, quota_delta, period_quota, policy_version, business_code
 FROM entitlement_command_shadows
 WHERE external_id = ?
 ORDER BY created_at, event_key
@@ -221,7 +221,7 @@ LIMIT 1`, reversal.OriginalExternalID).Scan(
 		&reversal.OriginalSubjectSHA256,
 		&reversal.OriginalGrantType,
 		&reversal.OriginalQuotaDelta,
-		&reversal.OriginalMonthlyQuota,
+		&reversal.OriginalPeriodQuota,
 		&reversal.OriginalPolicyVersion,
 		&reversal.OriginalBusinessCode,
 	); err != nil {
@@ -363,7 +363,7 @@ INSERT INTO approval_reversals (
     event_key, approval_code, target_instance_code, authority_approval_code,
     authority_instance_code, authority_status, authority_reverted,
 	original_external_id, original_grant_status,
-    original_grant_type, original_quota_delta, original_monthly_quota,
+    original_grant_type, original_quota_delta, original_period_quota,
     original_policy_version, original_business_code, result, reason, created_at
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		reversal.EventKey,
@@ -377,7 +377,7 @@ INSERT INTO approval_reversals (
 		reversal.OriginalGrantStatus,
 		reversal.OriginalGrantType,
 		reversal.OriginalQuotaDelta,
-		reversal.OriginalMonthlyQuota,
+		reversal.OriginalPeriodQuota,
 		reversal.OriginalPolicyVersion,
 		reversal.OriginalBusinessCode,
 		reversal.Result,
@@ -408,7 +408,7 @@ func (s *Store) GetApprovalReversal(ctx context.Context, eventKey string) (Appro
 	           LIMIT 1
 	       ), ''),
 	       original_grant_status,
-       original_grant_type, original_quota_delta, original_monthly_quota,
+       original_grant_type, original_quota_delta, original_period_quota,
        original_policy_version, original_business_code, result, reason,
        resolution_external_id, resolution_request_sha256, resolution_operator,
        resolution_reason, resolution_change_ticket, resolution_response_status,
@@ -426,7 +426,7 @@ FROM approval_reversals WHERE event_key = ?`, eventKey).Scan(
 		&reversal.OriginalGrantStatus,
 		&reversal.OriginalGrantType,
 		&reversal.OriginalQuotaDelta,
-		&reversal.OriginalMonthlyQuota,
+		&reversal.OriginalPeriodQuota,
 		&reversal.OriginalPolicyVersion,
 		&reversal.OriginalBusinessCode,
 		&reversal.Result,
@@ -1100,7 +1100,7 @@ SELECT reversal.event_key, reversal.approval_code, reversal.target_instance_code
 	       ), ''),
 	       reversal.original_grant_status,
        reversal.original_grant_type, reversal.original_quota_delta,
-       reversal.original_monthly_quota, reversal.original_policy_version,
+       reversal.original_period_quota, reversal.original_policy_version,
        reversal.original_business_code, reversal.result, reversal.reason,
        reversal.created_at
 FROM approval_reversals reversal
@@ -1123,7 +1123,7 @@ LIMIT ?`, ProcessingStateReversalPending, limit)
 			&reversal.OriginalExternalID, &reversal.OriginalSubjectSHA256,
 			&reversal.OriginalGrantStatus,
 			&reversal.OriginalGrantType, &reversal.OriginalQuotaDelta,
-			&reversal.OriginalMonthlyQuota, &reversal.OriginalPolicyVersion,
+			&reversal.OriginalPeriodQuota, &reversal.OriginalPolicyVersion,
 			&reversal.OriginalBusinessCode, &reversal.Result, &reversal.Reason,
 			&createdAt,
 		); err != nil {

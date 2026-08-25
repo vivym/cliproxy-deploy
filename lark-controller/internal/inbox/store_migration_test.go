@@ -169,6 +169,105 @@ INSERT INTO lark_event_inbox (
 	}
 }
 
+func TestOpenBackfillsLegacyMonthlyEntitlementAuditColumns(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "controller.sqlite")
+	store, err := inbox.Open(databasePath)
+	if err != nil {
+		t.Fatalf("create current store: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close current store: %v", err)
+	}
+
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open store for legacy rewrite: %v", err)
+	}
+	_, err = database.Exec(`
+ALTER TABLE approval_instances RENAME COLUMN period_quota TO monthly_quota;
+ALTER TABLE approval_instances DROP COLUMN reset_period;
+ALTER TABLE approval_instances DROP COLUMN reset_timezone;
+ALTER TABLE entitlement_command_shadows RENAME COLUMN period_quota TO monthly_quota;
+ALTER TABLE entitlement_command_shadows DROP COLUMN reset_period;
+ALTER TABLE entitlement_command_shadows DROP COLUMN reset_timezone;
+ALTER TABLE base_subscription_grants RENAME COLUMN period_quota TO monthly_quota;
+ALTER TABLE base_subscription_grants DROP COLUMN reset_period;
+ALTER TABLE base_subscription_grants DROP COLUMN reset_timezone;
+ALTER TABLE approval_reversals RENAME COLUMN original_period_quota TO original_monthly_quota;
+INSERT INTO approval_instances (
+    event_key, approval_code, instance_code, event_status, authority_status,
+    outcome, monthly_quota, created_at
+) VALUES ('legacy-decision', 'approval-level', 'instance-level', 'APPROVED',
+          'APPROVED', 'shadow_authority_verified', 100, '2026-08-25T00:00:00Z');
+INSERT INTO entitlement_command_shadows (
+    event_key, external_id, request_sha256, subject_sha256, source,
+    policy_version, catalog_sha256, grant_type, business_code,
+    monthly_quota, outcome, created_at
+) VALUES ('legacy-shadow', 'legacy-external', 'request', 'subject', 'lark_approval',
+          'employee-v1', 'catalog', 'subscription_level', 'basic',
+          200, 'shadow_planned', '2026-08-25T00:00:00Z');
+INSERT INTO base_subscription_grants (
+    external_id, request_sha256, subject_sha256, policy_version,
+    catalog_sha256, level_code, monthly_quota, outcome, created_at
+) VALUES ('legacy-base', 'request', 'subject', 'employee-v1',
+          'catalog', 'basic', 300, 'shadow_planned', '2026-08-25T00:00:00Z');
+INSERT INTO approval_reversals (
+    event_key, approval_code, target_instance_code, original_monthly_quota,
+    result, reason, created_at
+) VALUES ('legacy-reversal', 'approval-level', 'instance-level', 400,
+          'original_missing', 'original_missing', '2026-08-25T00:00:00Z');`)
+	if err != nil {
+		_ = database.Close()
+		t.Fatalf("rewrite legacy entitlement columns: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close legacy store: %v", err)
+	}
+
+	store, err = inbox.Open(databasePath)
+	if err != nil {
+		t.Fatalf("migrate legacy entitlement columns: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close migrated store: %v", err)
+	}
+
+	database, err = sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	for _, check := range []struct {
+		table  string
+		column string
+		want   int64
+	}{
+		{table: "approval_instances", column: "period_quota", want: 100},
+		{table: "entitlement_command_shadows", column: "period_quota", want: 200},
+		{table: "base_subscription_grants", column: "period_quota", want: 300},
+		{table: "approval_reversals", column: "original_period_quota", want: 400},
+	} {
+		var got int64
+		if err := database.QueryRow("SELECT " + check.column + " FROM " + check.table + " LIMIT 1").Scan(&got); err != nil {
+			t.Fatalf("read migrated %s.%s: %v", check.table, check.column, err)
+		}
+		if got != check.want {
+			t.Fatalf("migrated %s.%s = %d, want %d", check.table, check.column, got, check.want)
+		}
+	}
+	for _, table := range []string{"approval_instances", "entitlement_command_shadows", "base_subscription_grants"} {
+		var period, timezone string
+		if err := database.QueryRow(
+			"SELECT reset_period, reset_timezone FROM "+table+" LIMIT 1",
+		).Scan(&period, &timezone); err != nil {
+			t.Fatalf("read migrated %s reset contract: %v", table, err)
+		}
+		if period != "monthly" || timezone != "Asia/Shanghai" {
+			t.Fatalf("migrated %s reset contract = %s/%s", table, period, timezone)
+		}
+	}
+}
+
 func legacyInboxPayloadHash(t *testing.T, event inbox.Event) string {
 	t.Helper()
 	legacyIdentity := struct {

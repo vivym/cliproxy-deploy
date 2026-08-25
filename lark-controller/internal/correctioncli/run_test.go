@@ -262,7 +262,7 @@ func TestRunRejectsCorrectionTypeDifferentFromOriginalGrant(t *testing.T) {
 	store := &fakeResolutionStore{reversal: inbox.ApprovalReversal{
 		EventKey: "lark:v2:reversal-event", OriginalExternalID: "lark:wallet-topup:instance-original",
 		OriginalSubjectSHA256: correctionSubjectSHA256("tenant-key:ou_1"),
-		OriginalGrantType:     "subscription_level", OriginalMonthlyQuota: 2_500_000,
+		OriginalGrantType:     "subscription_level", OriginalPeriodQuota: 2_500_000,
 	}}
 	client := &fakeCorrectionClient{}
 	err := runWithDependencies(

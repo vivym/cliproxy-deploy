@@ -359,7 +359,8 @@ func TestPrepareOAuthBridgeRegistersFixedNewAPIEntryPoint(t *testing.T) {
 		OAuthRateLimitPerMinute:      30,
 	}, store, policy.BaseSubscriptionResolution{
 		PolicyVersion: "employee-v1", LevelCode: "basic", LevelRank: 10,
-		MonthlyQuota: 5_000_000, CatalogSHA256: strings.Repeat("a", 64),
+		PeriodQuota: 5_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai",
+		CatalogSHA256: strings.Repeat("a", 64),
 	}, grantSealer)
 	if err != nil {
 		t.Fatalf("prepare OAuth bridge: %v", err)
@@ -421,7 +422,8 @@ func TestOAuthCallbackCanCompleteBeyondWebhookWriteTimeout(t *testing.T) {
 		BridgeClientID: "bridge-client-id", BridgeClientSecret: strings.Repeat("b", 32),
 		NewAPIRedirectURI: "https://ai.example.com/oauth/lark",
 		BaseSubscription: oauthbridge.BaseSubscriptionConfig{
-			PolicyVersion: "employee-v1", LevelCode: "basic", MonthlyQuota: 5_000_000,
+			PolicyVersion: "employee-v1", LevelCode: "basic", PeriodQuota: 5_000_000,
+			ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai",
 			CatalogSHA256: strings.Repeat("a", 64),
 		},
 		CallbackTimeout: 4 * time.Second, RateLimitPerMinute: 30,

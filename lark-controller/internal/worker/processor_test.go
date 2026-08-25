@@ -927,7 +927,7 @@ func TestShadowProcessorPersistsResolvedPolicyEvidence(t *testing.T) {
 	if command.ExternalID != "lark:wallet-topup:instance-policy" ||
 		command.Source != "lark_approval" || command.PolicyVersion != "employee-v1" ||
 		command.GrantType != "wallet_quota" || command.BusinessCode != "topup_5" ||
-		command.QuotaDelta != 2_500_000 || command.MonthlyQuota != 0 ||
+		command.QuotaDelta != 2_500_000 || command.PeriodQuota != 0 ||
 		command.SubjectSHA256 != "51b4284131693f52e5701a9aa003814e2290e41df7a1825b17c9f3a553434afa" ||
 		command.RequestSHA256 == "" || command.Outcome != "shadow_planned" {
 		t.Fatalf("unexpected entitlement command shadow: %+v", command)

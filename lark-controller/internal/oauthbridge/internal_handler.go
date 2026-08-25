@@ -114,7 +114,8 @@ func (h *Handler) planBaseSubscriptionGrant(
 	base := h.config.BaseSubscription
 	request, receipt, err := newapi.PlanBaseSubscriptionGrant(newapi.BaseSubscriptionGrantInput{
 		Subject: identity.Subject, PolicyVersion: base.PolicyVersion,
-		LevelCode: base.LevelCode, MonthlyQuota: base.MonthlyQuota,
+		LevelCode: base.LevelCode, PeriodQuota: base.PeriodQuota,
+		ResetPeriod: base.ResetPeriod, ResetTimezone: base.ResetTimezone,
 		CatalogSHA256: base.CatalogSHA256,
 	})
 	if err != nil {
@@ -128,7 +129,8 @@ func (h *Handler) planBaseSubscriptionGrant(
 		ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
 		SubjectSHA256: receipt.SubjectSHA256, PolicyVersion: receipt.PolicyVersion,
 		CatalogSHA256: receipt.CatalogSHA256, LevelCode: receipt.BusinessCode,
-		MonthlyQuota: receipt.MonthlyQuota,
+		PeriodQuota: receipt.PeriodQuota, ResetPeriod: receipt.ResetPeriod,
+		ResetTimezone: receipt.ResetTimezone,
 		GrantJob: inbox.EntitlementGrantJobDraft{
 			ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
 			SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,

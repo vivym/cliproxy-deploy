@@ -279,7 +279,9 @@ func prepareOAuthBridge(
 		BaseSubscription: oauthbridge.BaseSubscriptionConfig{
 			PolicyVersion: baseSubscription.PolicyVersion,
 			LevelCode:     baseSubscription.LevelCode,
-			MonthlyQuota:  baseSubscription.MonthlyQuota,
+			PeriodQuota:   baseSubscription.PeriodQuota,
+			ResetPeriod:   baseSubscription.ResetPeriod,
+			ResetTimezone: baseSubscription.ResetTimezone,
 			CatalogSHA256: baseSubscription.CatalogSHA256,
 		},
 		RateLimitPerMinute: loaded.OAuthRateLimitPerMinute,

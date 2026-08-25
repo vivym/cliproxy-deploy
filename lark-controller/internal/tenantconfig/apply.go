@@ -102,7 +102,7 @@ func Apply(
 
 func validateApplyRequest(plan ChangePlan, expectedDigest string, options ApplyOptions) error {
 	if plan.FormatVersion != supportedFormatVersion || plan.Digest == "" || plan.CompiledDigest == "" {
-		return errors.New("valid format_version 1 change plan is required")
+		return errors.New("valid format_version 2 change plan is required")
 	}
 	if expectedDigest == "" || expectedDigest != plan.Digest {
 		return errors.New("expected plan digest does not match the supplied plan")

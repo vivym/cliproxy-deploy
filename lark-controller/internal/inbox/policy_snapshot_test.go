@@ -312,7 +312,8 @@ func TestSyncPolicySnapshotRejectsRotationWithUnfinishedBaseGrant(t *testing.T) 
 		func(got inbox.OAuthIdentity) (inbox.BaseSubscriptionGrantDraft, error) {
 			request, receipt, err := newapi.PlanBaseSubscriptionGrant(newapi.BaseSubscriptionGrantInput{
 				Subject: got.Subject, PolicyVersion: "employee-v1", LevelCode: "basic",
-				MonthlyQuota: 5_000_000, CatalogSHA256: initial.Policies[0].CatalogSHA256,
+				PeriodQuota: 5_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai",
+				CatalogSHA256: initial.Policies[0].CatalogSHA256,
 			})
 			if err != nil {
 				return inbox.BaseSubscriptionGrantDraft{}, err
@@ -325,7 +326,8 @@ func TestSyncPolicySnapshotRejectsRotationWithUnfinishedBaseGrant(t *testing.T) 
 				ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
 				SubjectSHA256: receipt.SubjectSHA256, PolicyVersion: receipt.PolicyVersion,
 				CatalogSHA256: receipt.CatalogSHA256, LevelCode: receipt.BusinessCode,
-				MonthlyQuota: receipt.MonthlyQuota,
+				PeriodQuota: receipt.PeriodQuota, ResetPeriod: receipt.ResetPeriod,
+				ResetTimezone: receipt.ResetTimezone,
 				GrantJob: inbox.EntitlementGrantJobDraft{
 					ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
 					SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,

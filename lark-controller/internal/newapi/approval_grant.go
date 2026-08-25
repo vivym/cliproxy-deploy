@@ -18,7 +18,9 @@ type ApprovalGrantInput struct {
 	ApprovalKind          string
 	BusinessCode          string
 	QuotaDelta            int64
-	MonthlyQuota          int64
+	PeriodQuota           int64
+	ResetPeriod           string
+	ResetTimezone         string
 	ApprovalCode          string
 	InstanceCode          string
 	StartTimeMilliseconds string
@@ -31,7 +33,9 @@ type BaseSubscriptionGrantInput struct {
 	Subject       string
 	PolicyVersion string
 	LevelCode     string
-	MonthlyQuota  int64
+	PeriodQuota   int64
+	ResetPeriod   string
+	ResetTimezone string
 	CatalogSHA256 string
 }
 
@@ -44,7 +48,9 @@ type ShadowReceipt struct {
 	GrantType     string
 	BusinessCode  string
 	QuotaDelta    int64
-	MonthlyQuota  int64
+	PeriodQuota   int64
+	ResetPeriod   string
+	ResetTimezone string
 }
 
 func PlanBaseSubscriptionGrant(input BaseSubscriptionGrantInput) (
@@ -53,7 +59,8 @@ func PlanBaseSubscriptionGrant(input BaseSubscriptionGrantInput) (
 	error,
 ) {
 	if input.Subject == "" || input.PolicyVersion == "" || input.LevelCode != "basic" ||
-		input.MonthlyQuota <= 0 || !digest.IsCanonicalSHA256(input.CatalogSHA256) {
+		input.PeriodQuota <= 0 || input.ResetPeriod == "" || input.ResetTimezone == "" ||
+		!digest.IsCanonicalSHA256(input.CatalogSHA256) {
 		return EntitlementGrantRequest{}, ShadowReceipt{}, errors.New("invalid base subscription grant input")
 	}
 	request := EntitlementGrantRequest{
@@ -73,7 +80,8 @@ func PlanBaseSubscriptionGrant(input BaseSubscriptionGrantInput) (
 		ExternalID: request.ExternalID, RequestSHA256: requestSHA256,
 		SubjectSHA256: sha256Hex([]byte(input.Subject)), PolicyVersion: input.PolicyVersion,
 		CatalogSHA256: input.CatalogSHA256, GrantType: request.Grant.Type,
-		BusinessCode: input.LevelCode, MonthlyQuota: input.MonthlyQuota,
+		BusinessCode: input.LevelCode, PeriodQuota: input.PeriodQuota,
+		ResetPeriod: input.ResetPeriod, ResetTimezone: input.ResetTimezone,
 	}
 	return request, receipt, nil
 }
@@ -103,11 +111,12 @@ func PlanApprovalGrant(input ApprovalGrantInput) (EntitlementGrantRequest, Shado
 	receipt := ShadowReceipt{
 		PolicyVersion: input.PolicyVersion, CatalogSHA256: input.CatalogSHA256,
 		BusinessCode: input.BusinessCode, QuotaDelta: input.QuotaDelta,
-		MonthlyQuota: input.MonthlyQuota, SubjectSHA256: sha256Hex([]byte(subject)),
+		PeriodQuota: input.PeriodQuota, ResetPeriod: input.ResetPeriod,
+		ResetTimezone: input.ResetTimezone, SubjectSHA256: sha256Hex([]byte(subject)),
 	}
 	switch input.ApprovalKind {
 	case "wallet_topup":
-		if input.QuotaDelta <= 0 || input.MonthlyQuota != 0 {
+		if input.QuotaDelta <= 0 || input.PeriodQuota != 0 || input.ResetPeriod != "" || input.ResetTimezone != "" {
 			return EntitlementGrantRequest{}, ShadowReceipt{}, errors.New("invalid wallet approval grant input")
 		}
 		request.ExternalID = "lark:wallet-topup:" + input.InstanceCode
@@ -115,7 +124,7 @@ func PlanApprovalGrant(input ApprovalGrantInput) (EntitlementGrantRequest, Shado
 			Type: "wallet_quota", PackageCode: input.BusinessCode, QuotaDelta: input.QuotaDelta,
 		}
 	case "subscription_level":
-		if input.MonthlyQuota <= 0 || input.QuotaDelta != 0 {
+		if input.PeriodQuota <= 0 || input.QuotaDelta != 0 || input.ResetPeriod == "" || input.ResetTimezone == "" {
 			return EntitlementGrantRequest{}, ShadowReceipt{}, errors.New("invalid subscription approval grant input")
 		}
 		request.ExternalID = "lark:subscription-level:" + input.InstanceCode

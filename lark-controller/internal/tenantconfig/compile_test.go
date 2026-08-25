@@ -12,13 +12,13 @@ const walletManifestFingerprint = "sha256:05a573f10bcfffbc406a503394cccbc2a8f168
 
 func TestCompileProducesDeterministicControllerArtifactsAndRedactedReceipt(t *testing.T) {
 	source := tenantconfig.Source{
-		FormatVersion: 1,
+		FormatVersion: 2,
 		Policy: tenantconfig.PolicySource{
 			PolicyVersion: "employee-v1",
 			State:         policy.PolicyStateActive,
 			Levels: []policy.Level{
-				{LevelCode: "plus", Rank: 20, MonthlyQuota: 12_500_000},
-				{LevelCode: "basic", Rank: 10, MonthlyQuota: 5_000_000},
+				{LevelCode: "plus", Rank: 20, PeriodQuota: 1_000_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
+				{LevelCode: "basic", Rank: 10, PeriodQuota: 250_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
 			},
 			WalletPackages: []policy.WalletPackage{
 				{PackageCode: "topup_10", QuotaDelta: 5_000_000},
@@ -57,7 +57,7 @@ func TestCompileProducesDeterministicControllerArtifactsAndRedactedReceipt(t *te
 		}},
 	}
 	binding := tenantconfig.EnvironmentBinding{
-		FormatVersion: 1,
+		FormatVersion: 2,
 		Environment:   "production",
 		PublicOrigin:  "https://ai.example.com",
 		Lark: tenantconfig.LarkBinding{
@@ -88,19 +88,23 @@ func TestCompileProducesDeterministicControllerArtifactsAndRedactedReceipt(t *te
 
 	policyArtifact := requireArtifact(t, compiled, "policies/employee-v1.policy.json")
 	wantPolicy := "{\n" +
-		"  \"format_version\": 1,\n" +
+		"  \"format_version\": 2,\n" +
 		"  \"policy_version\": \"employee-v1\",\n" +
 		"  \"state\": \"active\",\n" +
 		"  \"levels\": [\n" +
 		"    {\n" +
 		"      \"level_code\": \"basic\",\n" +
 		"      \"rank\": 10,\n" +
-		"      \"monthly_quota\": 5000000\n" +
+		"      \"period_quota\": 250000000,\n" +
+		"      \"reset_period\": \"weekly\",\n" +
+		"      \"reset_timezone\": \"Asia/Shanghai\"\n" +
 		"    },\n" +
 		"    {\n" +
 		"      \"level_code\": \"plus\",\n" +
 		"      \"rank\": 20,\n" +
-		"      \"monthly_quota\": 12500000\n" +
+		"      \"period_quota\": 1000000000,\n" +
+		"      \"reset_period\": \"weekly\",\n" +
+		"      \"reset_timezone\": \"Asia/Shanghai\"\n" +
 		"    }\n" +
 		"  ],\n" +
 		"  \"wallet_packages\": [\n" +

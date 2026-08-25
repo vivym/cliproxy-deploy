@@ -33,7 +33,7 @@
 - 让 Lark 直接操作 New API 数据库。
 - 让 Traefik 承担 OAuth、审批或额度业务逻辑。
 - 用邮件地址作为员工的主身份。
-- 一次性额度按月自动恢复或到期清零。
+- 一次性额度按订阅周期自动恢复或到期清零。
 - 审批通过后自动降低订阅等级。
 - 员工重新入职后自动恢复旧账户和旧 API key。
 - 多 Controller 副本的主动主动部署。
@@ -53,13 +53,13 @@ wallet_after = wallet_before + approved_quota_delta
 
 - 只增加一次。
 - 不进入订阅额度。
-- 不随订阅月度重置而恢复。
+- 不随订阅每周重置而恢复。
 - 默认永久结转，直到被请求消耗。
 - 不改变员工当前订阅等级。
 
 如果未来需要“本月底失效的临时额度”，不能继续复用 wallet quota。New API 当前钱包模型不能可靠区分不同批次余额的来源和有效期，届时应增加独立的 expiring credit ledger。
 
-### 订阅等级是月度权益
+### 订阅等级是周权益
 
 员工的托管订阅等级为：
 
@@ -67,12 +67,12 @@ wallet_after = wallet_before + approved_quota_delta
 basic < plus < pro < power
 ```
 
-每个等级映射到一个由管理员维护、用户不可购买的 New API subscription plan。订阅额度每月重置。
+每个等级映射到一个由管理员维护、用户不可购买的 New API subscription plan。订阅额度每周一 `00:00 Asia/Shanghai` 重置。
 
 “永久提高订阅等级”表示：
 
 - 在员工仍然在职期间，目标等级持续有效。
-- 它不是在旧订阅上叠加另一份月额度。
+- 它不是在旧订阅上叠加另一份周额度。
 - 每个员工最多只有一份有效的 Lark 托管订阅。
 - 后续更高等级审批会替换当前等级。
 - 普通升级审批不能降级。
@@ -83,7 +83,7 @@ basic < plus < pro < power
 所有托管员工强制使用：
 
 ```text
-monthly subscription quota -> wallet quota
+current weekly subscription quota -> wallet quota
 ```
 
 对应 New API 配置为：
@@ -113,53 +113,61 @@ Controller 和审批表单只接受稳定的业务代码，不接受可编辑的
 
 ### 订阅等级目录
 
-以下数值是首版建议值，不是已批准的生产政策。上线前必须由业务负责人确认后写入版本化配置。
+以下数值是业务负责人确认的首版周额度政策。额度是员工单周消费上限，不会预留或预付等额成本；未使用的订阅额度不结转。一次性钱包余额独立记账，不随订阅周重置清零。
 
-| `level_code` | 建议月度价值 | 建议 monthly quota | 用途 | 可由普通升级审批达到 |
+| `level_code` | 每周美元上限 | `period_quota` | 用途 | 可由普通升级审批达到 |
 | --- | ---: | ---: | --- | --- |
-| `basic` | `$10` | `5,000,000` | 所有在职员工基础权益 | 自动分配 |
-| `plus` | `$25` | `12,500,000` | 经常使用 AI 的员工 | 是 |
-| `pro` | `$50` | `25,000,000` | 研发及高频使用者 | 是 |
-| `power` | `$100` | `50,000,000` | 经预算负责人批准的重度使用者 | 是，需额外审批人 |
+| `basic` | `$500` | `250,000,000` | 所有在职员工基础权益 | 自动分配 |
+| `plus` | `$2,000` | `1,000,000,000` | 经常使用 AI 的员工 | 是 |
+| `pro` | `$5,000` | `2,500,000,000` | 研发及高频使用者 | 是 |
+| `power` | `$20,000` | `10,000,000,000` | 经预算负责人批准的重度使用者 | 是，需额外审批人 |
 
 共享策略配置必须包含稳定代码、等级 rank 和 quota，但不能包含环境相关的 New API 数据库 ID：
 
 ```yaml
-policy_version: employee-entitlements-2026-09-v1
+policy_version: employee-entitlements-2026-09-v2
 levels:
   basic:
     rank: 10
-    monthly_quota: 5000000
+    period_quota: 250000000
+    reset_period: weekly
+    reset_timezone: Asia/Shanghai
   plus:
     rank: 20
-    monthly_quota: 12500000
+    period_quota: 1000000000
+    reset_period: weekly
+    reset_timezone: Asia/Shanghai
   pro:
     rank: 30
-    monthly_quota: 25000000
+    period_quota: 2500000000
+    reset_period: weekly
+    reset_timezone: Asia/Shanghai
   power:
     rank: 40
-    monthly_quota: 50000000
+    period_quota: 10000000000
+    reset_period: weekly
+    reset_timezone: Asia/Shanghai
 ```
 
 `policy_version + level_code -> plan_id` 的环境绑定只存在于 New API 的版本化 `managed_subscription_levels` 表中。Controller 和 Lark 都不知道 `plan_id`。
 
 ### 一次性钱包包目录
 
-以下也是首版建议值，需在上线前确认：
+以下是业务负责人确认的一次性钱包档位：
 
 | `package_code` | 建议显示值 | wallet quota delta | 建议审批链 |
 | --- | ---: | ---: | --- |
-| `topup_5` | `$5` | `2,500,000` | 直属主管 |
-| `topup_10` | `$10` | `5,000,000` | 直属主管 |
-| `topup_25` | `$25` | `12,500,000` | 直属主管 + 成本负责人 |
-| `topup_50` | `$50` | `25,000,000` | 直属主管 + 成本负责人 |
+| `topup_100` | `$100` | `50,000,000` | 直属主管 |
+| `topup_500` | `$500` | `250,000,000` | 直属主管 |
+| `topup_1000` | `$1,000` | `500,000,000` | 直属主管 + 成本负责人 |
+| `topup_10000` | `$10,000` | `5,000,000,000` | 直属主管 + 成本负责人 |
 
 金额换算只在配置发布时完成。运行时根据 `package_code` 查表，不能读取审批人填写的数字再乘 `quota_per_unit`。
 
 同一份版本化策略文件以 read-only 方式提供给 Controller 和 New API fork：
 
 - Controller 用它验证审批代码并生成权益命令。
-- New API 用它复核 `package_code/quota_delta` 和 `level_code/monthly_quota`，防止错误或被篡改的 Controller 请求绕过目录。
+- New API 用它复核 `package_code/quota_delta` 和 `level_code/period_quota/reset_period/reset_timezone`，防止错误或被篡改的 Controller 请求绕过目录。
 - 两端 payload 都携带 `policy_version`。New API 必须保留仍有 active assignment、在途审批或历史 grant replay 的只读历史版本；对首次出现且未注册的版本拒绝写入，不猜测兼容关系。
 
 ### 策略版本
@@ -167,7 +175,7 @@ levels:
 每次额度语义变化都发布一个不可变、单调演进的 `policy_version`，例如：
 
 ```text
-employee-entitlements-2026-09-v1
+employee-entitlements-2026-09-v2
 ```
 
 New API 维护一个显式 `active_policy_version`，但 active 只表示新登录和新审批默认使用的版本，不会改变历史 grant。基础订阅的幂等键包含版本：
@@ -180,7 +188,7 @@ lark:base:<tenant_key>:<open_id>:<policy_version>
 
 - 已发布的 package、level、quota、rank 和 plan binding 不可原地修改。
 - `level_code` 的业务含义和 rank 顺序跨版本稳定；若等级语义或顺序改变，必须使用新的 level code。跨版本乱序保护用 assignment 历史 binding 与目标 binding 的 rank 比较。
-- 修改目录数值不会自动补发历史钱包额度，也不会自动重算正在生效的月度订阅。
+- 修改目录数值不会自动补发历史钱包额度，也不会自动重算正在生效的当前周期订阅。
 - active assignment 保存其实际 `policy_version`；reconciliation 按 assignment 的版本校验投影，不能拿当前 active policy 强制迁移旧 assignment。
 - 每个审批定义版本通过 `approval_code + schema_fingerprint + locale` 绑定到唯一 `policy_version`。政策改变时创建新的审批定义和不可变 schema 绑定，旧定义保留到所有在途实例结束。
 - 同一 `external_id` 的 replay 先查询已存在的 grant 并比较历史 payload hash；只有首次应用时才校验该政策版本是否允许新写入。升级 active policy 后，旧 grant 的正确重放仍必须返回 `replayed`。
@@ -441,7 +449,7 @@ Controller 从唯一 active policy 解析 `basic`。userinfo 只有在同一个 
 {
   "external_id": "lark:base:<tenant_key>:<open_id>:<policy_version>",
   "source": "base_login",
-  "policy_version": "employee-entitlements-2026-09-v1",
+  "policy_version": "employee-entitlements-2026-09-v2",
   "identity": {
     "provider_slug": "lark",
     "subject": "<tenant_key>:<open_id>"
@@ -456,7 +464,7 @@ Controller 从唯一 active policy 解析 `basic`。userinfo 只有在同一个 
 
 这里不伪造 Lark webhook event。基础订阅使用独立的 `base_subscription_grants` 和 `base_subscription_audit`，因为它没有 webhook `event_key`；grant job 仍复用审批 job 的 release、claim、retry、dead-letter 和 executor runtime。shadow mode 保持 `held_shadow`，active runtime 在 New API 完成 OAuth principal 事务后释放并执行；若 job 先被执行，下面的 `principal_not_ready` 重试覆盖该并发窗口。
 
-同一员工在同一 policy version 重复登录时，只有 request hash、subject hash、policy version、catalog hash、level 和 monthly quota 全部一致才记为 `shadow_replayed`。重放保留首条 job 的 key ID、nonce 和 ciphertext，不重新密封替换。任何 planner、sealer、校验、metadata mismatch 或 SQLite 错误都会回滚 handle 消费，使 New API 能以同一 handle 重试；`subject_sha256` 必须等于实际 OAuth subject 的 SHA-256。
+同一员工在同一 policy version 重复登录时，只有 request hash、subject hash、policy version、catalog hash、level、period quota、reset period 和 reset timezone 全部一致才记为 `shadow_replayed`。重放保留首条 job 的 key ID、nonce 和 ciphertext，不重新密封替换。任何 planner、sealer、校验、metadata mismatch 或 SQLite 错误都会回滚 handle 消费，使 New API 能以同一 handle 重试；`subject_sha256` 必须等于实际 OAuth subject 的 SHA-256。
 
 release gate 会放行所有历史审批 job，但基础订阅 job 只允许当前 active policy version。policy snapshot sync 和 active runtime 的 startup/release gate 都会拒绝任何非 active version 的 held/pending/processing/retry base job，因此已经 release 或重启恢复的旧 job 也不能在切换后被发送，旧 policy 有未终结审批 grant 时也不能进入 retired。按上述固定发布流程，这类 base job 必须先 drain；未应用遗留项的 principal/assignment 核验与新版本重建仍属于 policy migration 操作，不能靠共享 worker 猜测或错误释放。
 
@@ -481,8 +489,8 @@ release gate 会放行所有历史审批 job，但基础订阅 job 只允许当�
 
 推荐审批链：
 
-- `topup_5`、`topup_10`：直属主管。
-- `topup_25`、`topup_50`：直属主管 + 成本负责人。
+- `topup_100`、`topup_500`：直属主管。
+- `topup_1000`、`topup_10000`：直属主管 + 成本负责人。
 
 通过后的命令：
 
@@ -490,15 +498,15 @@ release gate 会放行所有历史审批 job，但基础订阅 job 只允许当�
 {
   "external_id": "lark:wallet-topup:<instance_code>",
   "source": "lark_approval",
-  "policy_version": "employee-entitlements-2026-09-v1",
+  "policy_version": "employee-entitlements-2026-09-v2",
   "identity": {
     "provider_slug": "lark",
     "subject": "<tenant_key>:<open_id>"
   },
   "grant": {
     "type": "wallet_quota",
-    "package_code": "topup_10",
-    "quota_delta": 5000000
+    "package_code": "topup_500",
+    "quota_delta": 250000000
   },
   "evidence": {
     "approval_code": "<approval_code>",
@@ -519,7 +527,7 @@ release gate 会放行所有历史审批 job，但基础订阅 job 只允许当�
 | 目标等级 | 单选 | 固定唯一显示文本，由版本化 definition manifest 精确映射为 `plus`、`pro`、`power` |
 | 申请原因 | 多行文本 | 必填 |
 | 项目或成本中心 | 单选或文本 | 必填 |
-| 预计每月使用场景 | 多行文本 | 必填 |
+| 预计每周使用场景 | 多行文本 | 必填 |
 
 表单不出现 New API `plan_id` 和 raw quota。
 
@@ -535,7 +543,7 @@ release gate 会放行所有历史审批 job，但基础订阅 job 只允许当�
 {
   "external_id": "lark:subscription-level:<instance_code>",
   "source": "lark_approval",
-  "policy_version": "employee-entitlements-2026-09-v1",
+  "policy_version": "employee-entitlements-2026-09-v2",
   "identity": {
     "provider_slug": "lark",
     "subject": "<tenant_key>:<open_id>"
@@ -690,15 +698,15 @@ Authorization: Bearer <LARK_CORRECTION_SECRET>
 {
   "external_id": "lark:wallet-topup:81D31358-...",
   "source": "lark_approval",
-  "policy_version": "employee-entitlements-2026-09-v1",
+  "policy_version": "employee-entitlements-2026-09-v2",
   "identity": {
     "provider_slug": "lark",
     "subject": "tenant-key:ou_xxx"
   },
   "grant": {
     "type": "wallet_quota",
-    "package_code": "topup_10",
-    "quota_delta": 5000000
+    "package_code": "topup_500",
+    "quota_delta": 250000000
   },
   "evidence": {
     "approval_code": "7C468A54-...",
@@ -719,7 +727,7 @@ Authorization: Bearer <LARK_CORRECTION_SECRET>
   "user_id": 42,
   "result": {
     "grant_type": "wallet_quota",
-    "quota_delta": 5000000
+    "quota_delta": 250000000
   }
 }
 ```
@@ -845,9 +853,9 @@ add one pro subscription
 
 升级不能通过现有的“先 invalidate、再 admin create”两个 HTTP 调用完成，因为两步之间存在无订阅窗口，也无法与 grant 幂等记录原子提交。也不能在单事务中“取消旧行 + 新建行”：New API 的在途 `SubscriptionPreConsumeRecord` 绑定旧 subscription ID，后续 settle/refund 会继续更新旧行，导致新行用量漂移。原行升级使预扣、结算和退款始终落到同一 subscription。
 
-### 月内升级的用量继承
+### 周内升级的用量继承
 
-升级不应重置当月已使用额度：
+升级不应重置当周已使用额度：
 
 ```text
 old total = 10
@@ -879,7 +887,7 @@ new remaining = 0
 
 - `enabled = true`
 - `managed_only = true`，由 fork 新增并在所有用户购买/公开列表接口中过滤
-- 月度 quota reset
+- 每周一 `00:00 Asia/Shanghai` quota reset
 - 长有效期，例如 10 年
 - `allow_wallet_overflow = true`
 - `allow_balance_pay = false`
@@ -959,17 +967,17 @@ deny fence 建立前已经持久化的 `SubscriptionPreConsumeRecord` 仍允许�
 
 ```json
 {
-  "wallet_quota": 3000000,
-  "used_quota": 7000000,
+  "wallet_quota": 300000000,
+  "used_quota": 700000000,
   "last_login_at": 1788192100,
   "managed_subscription": {
-    "policy_version": "employee-entitlements-2026-09-v1",
+    "policy_version": "employee-entitlements-2026-09-v2",
     "level_code": "pro",
     "assignment_version": 3,
     "source_external_id": "lark:subscription-level:...",
     "subscription_id": 701,
-    "amount_total": 15000000,
-    "amount_used": 9000000,
+    "amount_total": 2500000000,
+    "amount_used": 900000000,
     "start_time": 1785542400,
     "end_time": 2100902400,
     "last_reset_time": 1785542400,
@@ -988,7 +996,7 @@ correction 是新的审计命令，不会修改原 grant。钱包纠正使用 si
 {
   "external_id": "lark:correction:CHG-2026-0060:wallet",
   "source": "correction",
-  "policy_version": "employee-entitlements-2026-09-v1",
+  "policy_version": "employee-entitlements-2026-09-v2",
   "identity": {
     "provider_slug": "lark",
     "subject": "tenant-key:ou_xxx"
@@ -1013,7 +1021,7 @@ correction 是新的审计命令，不会修改原 grant。钱包纠正使用 si
 {
   "external_id": "lark:correction:CHG-2026-0061:subscription",
   "source": "correction",
-  "policy_version": "employee-entitlements-2026-09-v1",
+  "policy_version": "employee-entitlements-2026-09-v2",
   "identity": {
     "provider_slug": "lark",
     "subject": "tenant-key:ou_xxx"
@@ -1109,9 +1117,11 @@ OAuth create/bind 和 disable 都先取得由 provider+subject 稳定派生的 P
 | `policy_version` | varchar(128) | FK policy versions, composite PK |
 | `level_code` | varchar(64) | composite PK |
 | `rank` | int | 单调等级顺序 |
-| `monthly_quota` | bigint | policy authority |
+| `period_quota` | bigint | 当前重置周期内的 policy authority |
+| `reset_period` | varchar(16) | `daily/weekly/monthly/custom`，首版固定 `weekly` |
+| `reset_timezone` | varchar(64) | IANA timezone，首版固定 `Asia/Shanghai` |
 | `plan_id` | bigint | FK subscription plans |
-| `reset_contract_hash` | char(64) | reset period/anchor contract |
+| `reset_contract_hash` | char(64) | duration、reset period、timezone 和 anchor contract |
 | `created_at` | timestamptz | audit |
 
 增加 `UNIQUE(policy_version, plan_id)`。已被版本绑定的 plan 的 quota、reset、wallet overflow 和 group snapshot 字段必须锁定不可编辑；变更通过新 policy version 和新 plan 完成。
@@ -1652,7 +1662,7 @@ New API 检查：
 - `basic -> pro` 原地更新同一 `user_subscriptions.id`，不创建或取消第二行。
 - subscription 预扣后升级，再 settle 或 refund，仍更新同一 subscription ID 且用量正确。
 - `next_reset_time <= now` 时先在锁内 lazy reset，再原地升级；周期边界只推进一次。
-- `pro -> power` 保留当月 used、start 和 reset time。
+- `pro -> power` 保留当前周期的 used、start 和 reset time。
 - 延迟 `plus` 不把 `power` 降级。
 - 同等级审批为 no-op。
 - `remaining=1, request=2` 时整次请求走 wallet、subscription remaining 仍为 1，settle/refund 回到原资金源。
@@ -1673,7 +1683,7 @@ New API 检查：
 4. 一次性审批通过后 wallet 增加，subscription remaining 不变。
 5. 同一审批事件重放十次只加一次。
 6. basic 可完整覆盖请求时整次从 subscription 扣；不能完整覆盖时整次从 wallet 扣，两个资金源不拆分。
-7. pro 审批通过后同一 subscription ID 的月度总额提升，wallet 不变。
+7. pro 审批通过后同一 subscription ID 的每周总额提升，wallet 不变。
 8. 升级前已使用额度、预扣结算/退款和周期边界在升级后正确保持。
 9. 新政策发布后处理旧 approval 实例，并重放旧 grant，均使用旧版本且不重复发放。
 10. 低等级乱序事件不降级。
@@ -1702,7 +1712,7 @@ New API 检查：
 
 ### WP1：政策和 Lark 配置
 
-- 确认四个订阅等级的月额度。
+- 将已确认的四个订阅等级周额度固化到 schema v2 policy bundle。
 - 确认四个一次性包及审批链。
 - 发布不可变 policy bundle，包含 versioned level、wallet package、rank、quota、locale 和 catalog hash。
 - 为首个 policy version 创建两个 Lark 审批定义，固定控件 `custom_id` 和唯一显示文本；后续版本创建新定义，不覆盖旧定义。
@@ -1969,19 +1979,16 @@ changed. The images were published, but not deployed or server-tested.
 - 通过新的 correction external ID 执行人工纠正。
 - 发布新的 `policy_version`。
 
-## 上线前必须确认的业务参数
+## 上线前仍需确认的业务参数
 
-以下内容不会阻塞模块开发，但会阻塞生产启用：
+周额度档位、一次性 wallet 档位以及 wallet 永久结转语义已经确认。以下内容不会阻塞模块开发，但会阻塞生产启用：
 
-1. `basic`、`plus`、`pro`、`power` 的最终 monthly quota。
-2. 一次性 wallet 包的最终数量和额度。
-3. wallet 是否确认为永久结转。本文默认是。
-4. 每个包和等级的正式审批链。
-5. 哪些部门或员工在 Lark 应用可用范围内。
-6. 现有用户绑定迁移期限和最终密码登录策略。
-7. wallet grant 撤销的人工处理负责人和响应时限。
-8. wallet 的 `int64` 业务上限，以及 API 保持 JSON number 还是改为 decimal string。
-9. 离职 reconciliation 的查询频率、连续 not-found 门槛和告警负责人；本文默认每日、两次且至少间隔 24 小时。
+1. 每个包和等级的正式审批链。
+2. 哪些部门或员工在 Lark 应用可用范围内。
+3. 现有用户绑定迁移期限和最终密码登录策略。
+4. wallet grant 撤销的人工处理负责人和响应时限。
+5. wallet 的 `int64` 业务上限，以及 API 保持 JSON number 还是改为 decimal string。
+6. 离职 reconciliation 的查询频率、连续 not-found 门槛和告警负责人；本文默认每日、两次且至少间隔 24 小时。
 
 ## 实施完成判定
 
@@ -1992,7 +1999,7 @@ changed. The images were published, but not deployed or server-tested.
 - 基础订阅可幂等分配，Lark 新用户不获得 welcome/affiliate wallet quota。
 - 一次性审批只增加 wallet，并且重复事件只增加一次。
 - policy、level、wallet package 和 approval binding 均可按历史版本解析；旧审批和旧 grant 在 active version 切换后仍正确处理。
-- 等级审批只原地更新同一 managed subscription，并保留当月使用量、周期边界及在途预扣结算/退款正确性。
+- 等级审批只原地更新同一 managed subscription，并保留当前周期使用量、周期边界及在途预扣结算/退款正确性。
 - 请求级 fallback、wallet `int64` 边界和资金源退款语义通过测试。
 - 低等级乱序事件不会降级。
 - managed identity、billing preference、余额购买、支付下单/回调和普通 admin bind 的服务端策略锁通过绕过测试。

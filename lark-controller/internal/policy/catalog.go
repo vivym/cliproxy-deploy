@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	supportedFormatVersion          = 1
+	supportedFormatVersion          = 2
 	supportedLocale                 = "zh-CN"
 	walletEntitlementCustomID       = "wallet_package"
 	subscriptionEntitlementCustomID = "target_level"
@@ -39,9 +39,11 @@ const (
 )
 
 type Level struct {
-	LevelCode    string `json:"level_code"`
-	Rank         int    `json:"rank"`
-	MonthlyQuota int64  `json:"monthly_quota"`
+	LevelCode     string `json:"level_code"`
+	Rank          int    `json:"rank"`
+	PeriodQuota   int64  `json:"period_quota"`
+	ResetPeriod   string `json:"reset_period"`
+	ResetTimezone string `json:"reset_timezone"`
 }
 
 type WalletPackage struct {
@@ -125,7 +127,9 @@ type ApprovalResolution struct {
 	ApprovalKind      ApprovalKind
 	BusinessCode      string
 	QuotaDelta        int64
-	MonthlyQuota      int64
+	PeriodQuota       int64
+	ResetPeriod       string
+	ResetTimezone     string
 	LevelRank         int
 	SchemaFingerprint string
 	CatalogSHA256     string
@@ -135,7 +139,9 @@ type BaseSubscriptionResolution struct {
 	PolicyVersion string
 	LevelCode     string
 	LevelRank     int
-	MonthlyQuota  int64
+	PeriodQuota   int64
+	ResetPeriod   string
+	ResetTimezone string
 	CatalogSHA256 string
 }
 
@@ -233,7 +239,7 @@ func LoadDirectory(policyDirectory, bindingsPath string) (*Catalog, error) {
 		return nil, fmt.Errorf("decode approval bindings: %w", err)
 	}
 	if definitions.FormatVersion != supportedFormatVersion || len(definitions.Bindings) == 0 {
-		return nil, errors.New("approval bindings require format_version 1 and at least one binding")
+		return nil, errors.New("approval bindings require format_version 2 and at least one binding")
 	}
 	for _, binding := range definitions.Bindings {
 		if err := catalog.addBinding(binding); err != nil {
@@ -277,7 +283,7 @@ func ValidateCatalog(bundles []PolicyBundle, definitions BindingsFile) error {
 		return err
 	}
 	if definitions.FormatVersion != supportedFormatVersion || len(definitions.Bindings) == 0 {
-		return errors.New("approval bindings require format_version 1 and at least one binding")
+		return errors.New("approval bindings require format_version 2 and at least one binding")
 	}
 	for _, binding := range definitions.Bindings {
 		if err := catalog.addBinding(binding); err != nil {
@@ -312,7 +318,7 @@ func (c *Catalog) validateCrossVersionRanks() error {
 
 func validatePolicyBundle(bundle policyBundle) (loadedPolicy, error) {
 	if bundle.FormatVersion != supportedFormatVersion || bundle.PolicyVersion == "" {
-		return loadedPolicy{}, errors.New("format_version 1 and policy_version are required")
+		return loadedPolicy{}, errors.New("format_version 2 and policy_version are required")
 	}
 	if bundle.State != PolicyStateActive && bundle.State != PolicyStateDraining && bundle.State != PolicyStateRetired {
 		return loadedPolicy{}, fmt.Errorf("unsupported policy state %q", bundle.State)
@@ -337,8 +343,9 @@ func validatePolicyBundle(bundle policyBundle) (loadedPolicy, error) {
 	}
 	seenRanks := make(map[int]struct{}, len(bundle.Levels))
 	for _, level := range bundle.Levels {
-		if level.LevelCode == "" || level.Rank <= 0 || level.MonthlyQuota <= 0 {
-			return loadedPolicy{}, errors.New("level code, positive rank, and positive monthly quota are required")
+		if level.LevelCode == "" || level.Rank <= 0 || level.PeriodQuota <= 0 ||
+			!validResetPeriod(level.ResetPeriod) || !validResetTimezone(level.ResetTimezone) {
+			return loadedPolicy{}, errors.New("level code, positive rank, positive period quota, reset period, and IANA reset timezone are required")
 		}
 		if _, exists := loaded.levels[level.LevelCode]; exists {
 			return loadedPolicy{}, fmt.Errorf("duplicate level code %q", level.LevelCode)
@@ -379,6 +386,23 @@ func validatePolicyBundle(bundle policyBundle) (loadedPolicy, error) {
 	loaded.catalogSHA256 = sha256Hex(canonical)
 	loaded.catalogJSON = string(canonical)
 	return loaded, nil
+}
+
+func validResetPeriod(period string) bool {
+	switch period {
+	case "daily", "weekly", "monthly", "custom":
+		return true
+	default:
+		return false
+	}
+}
+
+func validResetTimezone(timezone string) bool {
+	if timezone == "" || timezone == "Local" || timezone != strings.TrimSpace(timezone) {
+		return false
+	}
+	_, err := time.LoadLocation(timezone)
+	return err == nil
 }
 
 func (c *Catalog) addBinding(binding approvalBinding) error {
@@ -536,7 +560,8 @@ func (c *Catalog) ResolveBaseSubscription() (BaseSubscriptionResolution, error) 
 	}
 	return BaseSubscriptionResolution{
 		PolicyVersion: policyVersion, LevelCode: level.LevelCode,
-		LevelRank: level.Rank, MonthlyQuota: level.MonthlyQuota,
+		LevelRank: level.Rank, PeriodQuota: level.PeriodQuota,
+		ResetPeriod: level.ResetPeriod, ResetTimezone: level.ResetTimezone,
 		CatalogSHA256: loaded.catalogSHA256,
 	}, nil
 }
@@ -705,7 +730,9 @@ func (c *Catalog) ResolveApproval(request ApprovalRequest) (ApprovalResolution, 
 		resolution.QuotaDelta = policy.packages[resolution.BusinessCode].QuotaDelta
 	case ApprovalKindSubscriptionLevel:
 		level := policy.levels[resolution.BusinessCode]
-		resolution.MonthlyQuota = level.MonthlyQuota
+		resolution.PeriodQuota = level.PeriodQuota
+		resolution.ResetPeriod = level.ResetPeriod
+		resolution.ResetTimezone = level.ResetTimezone
 		resolution.LevelRank = level.Rank
 	}
 	return resolution, nil

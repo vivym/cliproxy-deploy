@@ -27,7 +27,8 @@ const (
 )
 
 var testBaseSubscriptionConfig = oauthbridge.BaseSubscriptionConfig{
-	PolicyVersion: "employee-v1", LevelCode: "basic", MonthlyQuota: 5_000_000,
+	PolicyVersion: "employee-v1", LevelCode: "basic", PeriodQuota: 5_000_000,
+	ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai",
 	CatalogSHA256: strings.Repeat("a", 64),
 }
 
@@ -47,7 +48,7 @@ func TestNewHandlerRejectsInvalidBaseSubscriptionConfiguration(t *testing.T) {
 			config.BaseSubscription.LevelCode = "pro"
 		}},
 		{name: "zero monthly quota", mutate: func(config *oauthbridge.Config) {
-			config.BaseSubscription.MonthlyQuota = 0
+			config.BaseSubscription.PeriodQuota = 0
 		}},
 		{name: "short catalog hash", mutate: func(config *oauthbridge.Config) {
 			config.BaseSubscription.CatalogSHA256 = "abc"

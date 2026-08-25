@@ -14,7 +14,7 @@ import (
 	"github.com/vivym/x2r-ai-gateway/lark-controller/internal/policy"
 )
 
-const supportedFormatVersion = 1
+const supportedFormatVersion = 2
 
 type Source struct {
 	FormatVersion      int                         `json:"format_version"`
@@ -103,7 +103,9 @@ type compileReceipt struct {
 type managedLevelDefinition struct {
 	LevelCode         string `json:"level_code"`
 	Rank              int    `json:"rank"`
-	MonthlyQuota      int64  `json:"monthly_quota"`
+	PeriodQuota       int64  `json:"period_quota"`
+	ResetPeriod       string `json:"reset_period"`
+	ResetTimezone     string `json:"reset_timezone"`
 	PlanID            int64  `json:"plan_id"`
 	ResetContractHash string `json:"reset_contract_hash"`
 }
@@ -410,7 +412,7 @@ func shellQuote(value string) string {
 
 func validateInputs(source Source, binding EnvironmentBinding) error {
 	if source.FormatVersion != supportedFormatVersion || binding.FormatVersion != supportedFormatVersion {
-		return errors.New("source and environment binding require format_version 1")
+		return errors.New("source and environment binding require format_version 2")
 	}
 	if source.Policy.PolicyVersion == "" || source.Policy.State == "" {
 		return errors.New("policy version and state are required")
@@ -612,7 +614,8 @@ func compilePolicyPublication(
 	}
 	for _, level := range levels {
 		publication.Levels = append(publication.Levels, managedLevelDefinition{
-			LevelCode: level.LevelCode, Rank: level.Rank, MonthlyQuota: level.MonthlyQuota,
+			LevelCode: level.LevelCode, Rank: level.Rank, PeriodQuota: level.PeriodQuota,
+			ResetPeriod: level.ResetPeriod, ResetTimezone: level.ResetTimezone,
 			PlanID:            binding.NewAPI.ManagedPlanIDs[level.LevelCode],
 			ResetContractHash: binding.NewAPI.PlanResetContractHash,
 		})

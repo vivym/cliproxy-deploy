@@ -95,18 +95,26 @@ a new policy/approval binding is schema drift.
 
 Each subscription level binds to a distinct existing New API plan. Every bound plan
 must be enabled, `managed_only`, allow wallet overflow, disallow balance payment,
-have no Stripe/Creem product, and have `total_amount == monthly_quota`. All levels in
-one binding currently share one reset contract hash. For a one-month plan with
-monthly reset, the hash authority is exactly:
+have no Stripe/Creem product, and have `total_amount == period_quota`. Every bound
+plan must use `quota_reset_period=weekly` and
+`quota_reset_timezone=Asia/Shanghai`; all levels in one binding share one reset
+contract hash. For a one-month plan that resets each Monday at 00:00 in
+`Asia/Shanghai`, the hash authority is exactly:
 
 ```json
-{"duration_unit":"month","duration_value":1,"custom_seconds":0,"quota_reset_period":"monthly","quota_reset_custom_seconds":0}
+{"duration_unit":"month","duration_value":1,"custom_seconds":0,"quota_reset_period":"weekly","quota_reset_timezone":"Asia/Shanghai","quota_reset_custom_seconds":0}
 ```
 
 Its SHA-256 is
-`1010f47a0838545b5aaa9a3d8e9ab455d37cd06053307d9794d13b24de5f8238`.
+`8e4c1bf09a361b2a87438a5dc537b4cf78159336be75d776dcf5f04fca614be2`.
 New API preflight locks and validates every referenced plan before any policy write;
 do not bypass a mismatch by guessing another digest.
+
+Schema v2 deliberately rejects startup migration when a non-empty legacy
+`managed_subscription_levels.monthly_quota` authority table exists. Those rows bind
+an immutable v1 catalog hash and cannot be renamed safely in place. The expected
+first rollout has no such rows; if preflight finds any, stop and prepare an explicit
+offline policy migration instead of deleting or rewriting them during deployment.
 
 Validate compilation without network access:
 

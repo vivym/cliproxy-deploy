@@ -99,7 +99,7 @@ The controller supports a locally verified `shadow` mode and an explicit
   atomically consumes the handle and creates or reuses the deterministic
   `lark:base:<subject>:<policy_version>` ledger, sealed `held_shadow` job, and
   separate base-subscription audit record;
-- keeps monthly quota and approval evidence out of the `base_login` wire request,
+- keeps period quota, reset metadata, and approval evidence out of the `base_login` wire request,
   binds its subject hash to the consumed identity, preserves the first sealed
   payload on replay, and rejects catalog or quota metadata drift;
 - applies separate per-client fixed-window limits to OAuth authorize and
@@ -377,20 +377,20 @@ sealed grant job, and its audit row commit in one SQLite transaction. Planning,
 sealing, validation, replay mismatch, or database failure rolls the transaction
 back so New API can retry the same handle. Separate employee logins reuse the
 first job only when request hash, subject hash, policy version, catalog hash,
-level, and monthly quota all match; replay never replaces its key ID, nonce, or
+level, period quota, reset period, and reset timezone all match; replay never replaces its key ID, nonce, or
 ciphertext. Base-login retry, result, and dead-letter audits feed the same
 bounded operational metrics as approval grants without fabricating a webhook
 event.
 
 The policy directory has no built-in defaults. Operators must mount one or
-more files named `*.policy.json`; every file uses `format_version: 1` and
+more files named `*.policy.json`; every file uses `format_version: 2` and
 contains one immutable `policy_version`, its lifecycle `state`, versioned
 `levels`, and versioned `wallet_packages`. Exactly one loaded version must be
 `active`, and it must equal `LARK_ACTIVE_POLICY_VERSION`. A `level_code` keeps
 the same rank across every loaded version. All policy, binding, and approval
 form JSON rejects unknown fields, duplicate object keys, and trailing data.
 
-The bindings file uses `format_version: 1` and retains active, draining, and
+The bindings file uses `format_version: 2` and retains active, draining, and
 retired approval definitions. Each binding contains:
 
 ```text

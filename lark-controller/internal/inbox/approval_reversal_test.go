@@ -58,7 +58,7 @@ func TestCompleteDecisionRecordsReversalAndFencesHeldGrantAtomically(t *testing.
 		reversal.OriginalSubjectSHA256 != testSHA256("tenant-test:ou-requester") ||
 		reversal.OriginalGrantStatus != inbox.EntitlementGrantJobStatusHeldShadow ||
 		reversal.OriginalGrantType != "wallet_quota" || reversal.OriginalQuotaDelta != 2_500_000 ||
-		reversal.OriginalMonthlyQuota != 0 || reversal.OriginalPolicyVersion != "employee-v1" ||
+		reversal.OriginalPeriodQuota != 0 || reversal.OriginalPolicyVersion != "employee-v1" ||
 		reversal.OriginalBusinessCode != "topup_5" ||
 		!reversal.AuthorityReverted {
 		t.Fatalf("unexpected approval reversal: %+v", reversal)
@@ -246,7 +246,7 @@ CREATE TABLE approval_reversals (
     original_grant_status TEXT NOT NULL DEFAULT '',
     original_grant_type TEXT NOT NULL DEFAULT '',
     original_quota_delta INTEGER NOT NULL DEFAULT 0,
-    original_monthly_quota INTEGER NOT NULL DEFAULT 0,
+    original_period_quota INTEGER NOT NULL DEFAULT 0,
     original_policy_version TEXT NOT NULL DEFAULT '',
     original_business_code TEXT NOT NULL DEFAULT '',
     result TEXT NOT NULL,
@@ -257,13 +257,13 @@ INSERT INTO approval_reversals (
     event_key, approval_code, target_instance_code, authority_approval_code,
     authority_instance_code, authority_status, authority_reverted,
     original_external_id, original_grant_status, original_grant_type,
-    original_quota_delta, original_monthly_quota, original_policy_version,
+    original_quota_delta, original_period_quota, original_policy_version,
     original_business_code, result, reason, created_at
 )
 SELECT event_key, approval_code, target_instance_code, authority_approval_code,
        authority_instance_code, authority_status, authority_reverted,
        original_external_id, original_grant_status, original_grant_type,
-       original_quota_delta, original_monthly_quota, original_policy_version,
+       original_quota_delta, original_period_quota, original_policy_version,
        original_business_code, result, reason, created_at
 FROM approval_reversals_with_resolution;
 DROP TABLE approval_reversals_with_resolution;`)

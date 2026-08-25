@@ -281,7 +281,7 @@ func TestConsumeOAuthAccessHandleRejectsBaseGrantMetadataDriftOnReplay(t *testin
 			draft.CatalogSHA256 = strings.Repeat("b", 64)
 		}},
 		{name: "monthly quota", mutate: func(draft *BaseSubscriptionGrantDraft) {
-			draft.MonthlyQuota = 6_000_000
+			draft.PeriodQuota = 6_000_000
 		}},
 	}
 	for _, test := range tests {
@@ -338,7 +338,8 @@ func testBaseSubscriptionGrantDraft(
 	t.Helper()
 	request, receipt, err := newapi.PlanBaseSubscriptionGrant(newapi.BaseSubscriptionGrantInput{
 		Subject: identity.Subject, PolicyVersion: "employee-v1", LevelCode: "basic",
-		MonthlyQuota: monthlyQuota, CatalogSHA256: catalogSHA256,
+		PeriodQuota: monthlyQuota, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai",
+		CatalogSHA256: catalogSHA256,
 	})
 	if err != nil {
 		t.Fatalf("plan base subscription grant: %v", err)
@@ -351,7 +352,8 @@ func testBaseSubscriptionGrantDraft(
 		ExternalID: receipt.ExternalID, RequestSHA256: receipt.RequestSHA256,
 		SubjectSHA256: receipt.SubjectSHA256, PolicyVersion: receipt.PolicyVersion,
 		CatalogSHA256: receipt.CatalogSHA256, LevelCode: receipt.BusinessCode,
-		MonthlyQuota: receipt.MonthlyQuota,
+		PeriodQuota: receipt.PeriodQuota, ResetPeriod: receipt.ResetPeriod,
+		ResetTimezone: receipt.ResetTimezone,
 		GrantJob: EntitlementGrantJobDraft{
 			ExternalID: sealed.ExternalID, RequestSHA256: sealed.RequestSHA256,
 			SubjectSHA256: receipt.SubjectSHA256, KeyID: sealed.KeyID,

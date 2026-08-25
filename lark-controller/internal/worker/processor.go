@@ -278,13 +278,16 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 			decision.Locale = p.locale
 			decision.CatalogSHA256 = resolved.CatalogSHA256
 			decision.QuotaDelta = resolved.QuotaDelta
-			decision.MonthlyQuota = resolved.MonthlyQuota
+			decision.PeriodQuota = resolved.PeriodQuota
+			decision.ResetPeriod = resolved.ResetPeriod
+			decision.ResetTimezone = resolved.ResetTimezone
 			decision.LevelRank = resolved.LevelRank
 			request, receipt, planErr := newapi.PlanApprovalGrant(newapi.ApprovalGrantInput{
 				TenantKey: job.Event.TenantKey, OpenID: instance.OpenID,
 				PolicyVersion: resolved.PolicyVersion, ApprovalKind: string(resolved.ApprovalKind),
 				BusinessCode: resolved.BusinessCode, QuotaDelta: resolved.QuotaDelta,
-				MonthlyQuota: resolved.MonthlyQuota, ApprovalCode: instance.ApprovalCode,
+				PeriodQuota: resolved.PeriodQuota, ResetPeriod: resolved.ResetPeriod,
+				ResetTimezone: resolved.ResetTimezone, ApprovalCode: instance.ApprovalCode,
 				InstanceCode: instance.InstanceCode, StartTimeMilliseconds: instance.StartTime,
 				SchemaFingerprint: resolved.SchemaFingerprint, Locale: p.locale,
 				CatalogSHA256: resolved.CatalogSHA256,
@@ -298,7 +301,8 @@ func (p *ShadowProcessor) RunOnce(ctx context.Context) (bool, error) {
 					SubjectSHA256: receipt.SubjectSHA256, Source: "lark_approval",
 					PolicyVersion: receipt.PolicyVersion, CatalogSHA256: receipt.CatalogSHA256,
 					GrantType: receipt.GrantType, BusinessCode: receipt.BusinessCode,
-					QuotaDelta: receipt.QuotaDelta, MonthlyQuota: receipt.MonthlyQuota,
+					QuotaDelta: receipt.QuotaDelta, PeriodQuota: receipt.PeriodQuota,
+					ResetPeriod: receipt.ResetPeriod, ResetTimezone: receipt.ResetTimezone,
 				}
 				if p.grantSealer == nil {
 					decision.EntitlementCommand = command

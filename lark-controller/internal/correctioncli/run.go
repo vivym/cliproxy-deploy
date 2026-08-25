@@ -398,7 +398,7 @@ type pendingReversalOutput struct {
 	OriginalGrantStatus   inbox.EntitlementGrantJobStatus `json:"original_grant_status"`
 	OriginalGrantType     string                          `json:"original_grant_type"`
 	OriginalQuotaDelta    int64                           `json:"original_quota_delta,omitempty"`
-	OriginalMonthlyQuota  int64                           `json:"original_monthly_quota,omitempty"`
+	OriginalPeriodQuota   int64                           `json:"original_period_quota,omitempty"`
 	OriginalPolicyVersion string                          `json:"original_policy_version"`
 	OriginalBusinessCode  string                          `json:"original_business_code"`
 	Result                inbox.ApprovalReversalResult    `json:"result"`
@@ -438,7 +438,7 @@ func pendingReversalOutputFrom(reversal inbox.ApprovalReversal) pendingReversalO
 		OriginalGrantStatus:   reversal.OriginalGrantStatus,
 		OriginalGrantType:     reversal.OriginalGrantType,
 		OriginalQuotaDelta:    reversal.OriginalQuotaDelta,
-		OriginalMonthlyQuota:  reversal.OriginalMonthlyQuota,
+		OriginalPeriodQuota:   reversal.OriginalPeriodQuota,
 		OriginalPolicyVersion: reversal.OriginalPolicyVersion,
 		OriginalBusinessCode:  reversal.OriginalBusinessCode,
 		Result:                reversal.Result, Reason: reversal.Reason, CreatedAt: reversal.CreatedAt,

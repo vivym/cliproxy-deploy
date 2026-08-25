@@ -115,7 +115,9 @@ type Decision struct {
 	Locale              string
 	CatalogSHA256       string
 	QuotaDelta          int64
-	MonthlyQuota        int64
+	PeriodQuota         int64
+	ResetPeriod         string
+	ResetTimezone       string
 	LevelRank           int
 	FailureReason       string
 	OpenIDHash          string
@@ -460,7 +462,9 @@ CREATE TABLE IF NOT EXISTS approval_instances (
     locale TEXT NOT NULL DEFAULT '',
     catalog_sha256 TEXT NOT NULL DEFAULT '',
     quota_delta INTEGER NOT NULL DEFAULT 0,
-    monthly_quota INTEGER NOT NULL DEFAULT 0,
+    period_quota INTEGER NOT NULL DEFAULT 0,
+    reset_period TEXT NOT NULL DEFAULT '',
+    reset_timezone TEXT NOT NULL DEFAULT '',
     level_rank INTEGER NOT NULL DEFAULT 0,
 	 failure_reason TEXT NOT NULL DEFAULT '',
     open_id_hash TEXT NOT NULL DEFAULT '',
@@ -481,7 +485,7 @@ CREATE TABLE IF NOT EXISTS approval_reversals (
     original_grant_status TEXT NOT NULL DEFAULT '',
     original_grant_type TEXT NOT NULL DEFAULT '',
     original_quota_delta INTEGER NOT NULL DEFAULT 0,
-    original_monthly_quota INTEGER NOT NULL DEFAULT 0,
+    original_period_quota INTEGER NOT NULL DEFAULT 0,
     original_policy_version TEXT NOT NULL DEFAULT '',
     original_business_code TEXT NOT NULL DEFAULT '',
     result TEXT NOT NULL,
@@ -561,7 +565,9 @@ CREATE TABLE IF NOT EXISTS entitlement_command_shadows (
     grant_type TEXT NOT NULL,
     business_code TEXT NOT NULL,
     quota_delta INTEGER NOT NULL DEFAULT 0,
-    monthly_quota INTEGER NOT NULL DEFAULT 0,
+    period_quota INTEGER NOT NULL DEFAULT 0,
+    reset_period TEXT NOT NULL DEFAULT '',
+    reset_timezone TEXT NOT NULL DEFAULT '',
     outcome TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -574,7 +580,9 @@ CREATE TABLE IF NOT EXISTS base_subscription_grants (
     policy_version TEXT NOT NULL,
     catalog_sha256 TEXT NOT NULL,
     level_code TEXT NOT NULL,
-    monthly_quota INTEGER NOT NULL,
+    period_quota INTEGER NOT NULL,
+    reset_period TEXT NOT NULL,
+    reset_timezone TEXT NOT NULL,
     outcome TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -770,6 +778,9 @@ WHERE processing_state = 'processing'
 	if err := s.ensureApprovalDecisionColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureEntitlementPeriodColumns(ctx); err != nil {
+		return err
+	}
 	if err := s.ensureInboxColumns(ctx); err != nil {
 		return err
 	}
@@ -907,7 +918,9 @@ func (s *Store) ensureApprovalDecisionColumns(ctx context.Context) error {
 		{"locale", "ALTER TABLE approval_instances ADD COLUMN locale TEXT NOT NULL DEFAULT ''"},
 		{"catalog_sha256", "ALTER TABLE approval_instances ADD COLUMN catalog_sha256 TEXT NOT NULL DEFAULT ''"},
 		{"quota_delta", "ALTER TABLE approval_instances ADD COLUMN quota_delta INTEGER NOT NULL DEFAULT 0"},
-		{"monthly_quota", "ALTER TABLE approval_instances ADD COLUMN monthly_quota INTEGER NOT NULL DEFAULT 0"},
+		{"period_quota", "ALTER TABLE approval_instances ADD COLUMN period_quota INTEGER NOT NULL DEFAULT 0"},
+		{"reset_period", "ALTER TABLE approval_instances ADD COLUMN reset_period TEXT NOT NULL DEFAULT ''"},
+		{"reset_timezone", "ALTER TABLE approval_instances ADD COLUMN reset_timezone TEXT NOT NULL DEFAULT ''"},
 		{"level_rank", "ALTER TABLE approval_instances ADD COLUMN level_rank INTEGER NOT NULL DEFAULT 0"},
 		{"failure_reason", "ALTER TABLE approval_instances ADD COLUMN failure_reason TEXT NOT NULL DEFAULT ''"},
 	}
@@ -921,6 +934,75 @@ func (s *Store) ensureApprovalDecisionColumns(ctx context.Context) error {
 		}
 		if _, err := s.database.ExecContext(ctx, column.ddl); err != nil {
 			return fmt.Errorf("add approval decision column %q: %w", column.name, err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureEntitlementPeriodColumns(ctx context.Context) error {
+	tables := []struct {
+		name        string
+		quotaColumn string
+		legacyQuota string
+	}{
+		{name: "approval_instances", quotaColumn: "period_quota", legacyQuota: "monthly_quota"},
+		{name: "entitlement_command_shadows", quotaColumn: "period_quota", legacyQuota: "monthly_quota"},
+		{name: "base_subscription_grants", quotaColumn: "period_quota", legacyQuota: "monthly_quota"},
+	}
+	for _, table := range tables {
+		columns, err := s.tableColumns(ctx, table.name)
+		if err != nil {
+			return err
+		}
+		for _, column := range []struct {
+			name string
+			ddl  string
+		}{
+			{table.quotaColumn, "INTEGER NOT NULL DEFAULT 0"},
+			{"reset_period", "TEXT NOT NULL DEFAULT ''"},
+			{"reset_timezone", "TEXT NOT NULL DEFAULT ''"},
+		} {
+			if _, exists := columns[column.name]; exists {
+				continue
+			}
+			if _, err := s.database.ExecContext(ctx,
+				"ALTER TABLE "+table.name+" ADD COLUMN "+column.name+" "+column.ddl,
+			); err != nil {
+				return fmt.Errorf("add %s.%s: %w", table.name, column.name, err)
+			}
+		}
+		if _, legacyExists := columns[table.legacyQuota]; legacyExists {
+			if _, err := s.database.ExecContext(ctx,
+				"UPDATE "+table.name+" SET "+table.quotaColumn+" = "+table.legacyQuota+
+					" WHERE "+table.quotaColumn+" = 0",
+			); err != nil {
+				return fmt.Errorf("backfill %s.%s: %w", table.name, table.quotaColumn, err)
+			}
+		}
+		if _, err := s.database.ExecContext(ctx,
+			"UPDATE "+table.name+" SET reset_period = 'monthly', reset_timezone = 'Asia/Shanghai' "+
+				"WHERE "+table.quotaColumn+" > 0 AND reset_period = '' AND reset_timezone = ''",
+		); err != nil {
+			return fmt.Errorf("backfill %s reset contract: %w", table.name, err)
+		}
+	}
+	reversalColumns, err := s.tableColumns(ctx, "approval_reversals")
+	if err != nil {
+		return err
+	}
+	if _, exists := reversalColumns["original_period_quota"]; !exists {
+		if _, err := s.database.ExecContext(ctx,
+			"ALTER TABLE approval_reversals ADD COLUMN original_period_quota INTEGER NOT NULL DEFAULT 0",
+		); err != nil {
+			return fmt.Errorf("add approval_reversals.original_period_quota: %w", err)
+		}
+	}
+	if _, legacyExists := reversalColumns["original_monthly_quota"]; legacyExists {
+		if _, err := s.database.ExecContext(ctx, `
+UPDATE approval_reversals
+SET original_period_quota = original_monthly_quota
+WHERE original_period_quota = 0`); err != nil {
+			return fmt.Errorf("backfill approval_reversals.original_period_quota: %w", err)
 		}
 	}
 	return nil
@@ -1150,6 +1232,10 @@ func (s *Store) tableColumns(ctx context.Context, table string) (map[string]stru
 		query = "PRAGMA table_info(policy_versions)"
 	case "entitlement_grant_jobs":
 		query = "PRAGMA table_info(entitlement_grant_jobs)"
+	case "entitlement_command_shadows":
+		query = "PRAGMA table_info(entitlement_command_shadows)"
+	case "base_subscription_grants":
+		query = "PRAGMA table_info(base_subscription_grants)"
 	default:
 		return nil, errors.New("unsupported schema inspection table")
 	}
@@ -1453,15 +1539,17 @@ func (s *Store) CompleteDecision(ctx context.Context, job Job, decision Decision
 INSERT INTO approval_instances (
     event_key, approval_code, instance_code, event_status, authority_status,
 	 outcome, policy_version, approval_kind, schema_fingerprint, business_code,
-		 locale, catalog_sha256, quota_delta, monthly_quota, level_rank, failure_reason,
+		 locale, catalog_sha256, quota_delta, period_quota, reset_period, reset_timezone,
+		 level_rank, failure_reason,
 		 open_id_hash, form_sha256, start_time, reverted, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	if _, err := tx.ExecContext(ctx, insertDecision,
 		decision.EventKey, decision.ApprovalCode, decision.InstanceCode,
 		decision.EventStatus, decision.AuthorityStatus, decision.Outcome,
 		decision.PolicyVersion, decision.ApprovalKind, decision.SchemaFingerprint,
 		decision.BusinessCode, decision.Locale, decision.CatalogSHA256,
-		decision.QuotaDelta, decision.MonthlyQuota, decision.LevelRank,
+		decision.QuotaDelta, decision.PeriodQuota, decision.ResetPeriod,
+		decision.ResetTimezone, decision.LevelRank,
 		decision.FailureReason,
 		decision.OpenIDHash, decision.FormSHA256, decision.StartTime,
 		decision.Reverted, createdAt,
@@ -1654,7 +1742,8 @@ func (s *Store) GetDecision(ctx context.Context, eventKey string) (Decision, err
 	const query = `
 SELECT event_key, approval_code, instance_code, event_status, authority_status,
        outcome, policy_version, approval_kind, schema_fingerprint, business_code,
-		 locale, catalog_sha256, quota_delta, monthly_quota, level_rank, failure_reason,
+		 locale, catalog_sha256, quota_delta, period_quota, reset_period, reset_timezone,
+		 level_rank, failure_reason,
 		 open_id_hash, form_sha256, start_time, reverted, created_at
 FROM approval_instances WHERE event_key = ?`
 	var decision Decision
@@ -1664,7 +1753,8 @@ FROM approval_instances WHERE event_key = ?`
 		&decision.EventStatus, &decision.AuthorityStatus, &decision.Outcome,
 		&decision.PolicyVersion, &decision.ApprovalKind, &decision.SchemaFingerprint,
 		&decision.BusinessCode, &decision.Locale, &decision.CatalogSHA256,
-		&decision.QuotaDelta, &decision.MonthlyQuota, &decision.LevelRank,
+		&decision.QuotaDelta, &decision.PeriodQuota, &decision.ResetPeriod,
+		&decision.ResetTimezone, &decision.LevelRank,
 		&decision.FailureReason,
 		&decision.OpenIDHash, &decision.FormSHA256, &decision.StartTime,
 		&decision.Reverted, &createdAt,

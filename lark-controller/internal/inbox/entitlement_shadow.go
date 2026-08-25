@@ -26,7 +26,9 @@ type EntitlementCommandShadow struct {
 	GrantType     string
 	BusinessCode  string
 	QuotaDelta    int64
-	MonthlyQuota  int64
+	PeriodQuota   int64
+	ResetPeriod   string
+	ResetTimezone string
 	Outcome       string
 	CreatedAt     time.Time
 }
@@ -63,12 +65,13 @@ WHERE external_id = ? ORDER BY created_at, event_key LIMIT 1`, command.ExternalI
 INSERT INTO entitlement_command_shadows (
     event_key, external_id, request_sha256, subject_sha256, source,
     policy_version, catalog_sha256, grant_type, business_code,
-    quota_delta, monthly_quota, outcome, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    quota_delta, period_quota, reset_period, reset_timezone, outcome, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		eventKey, command.ExternalID, command.RequestSHA256, command.SubjectSHA256,
 		command.Source, command.PolicyVersion, command.CatalogSHA256,
 		command.GrantType, command.BusinessCode, command.QuotaDelta,
-		command.MonthlyQuota, commandOutcome, createdAt,
+		command.PeriodQuota, command.ResetPeriod, command.ResetTimezone,
+		commandOutcome, createdAt,
 	); err != nil {
 		return "", fmt.Errorf("store entitlement command shadow: %w", err)
 	}
@@ -87,12 +90,13 @@ func (s *Store) GetEntitlementCommandShadow(
 	err := s.database.QueryRowContext(ctx, `
 SELECT event_key, external_id, request_sha256, subject_sha256, source,
        policy_version, catalog_sha256, grant_type, business_code,
-       quota_delta, monthly_quota, outcome, created_at
+       quota_delta, period_quota, reset_period, reset_timezone, outcome, created_at
 FROM entitlement_command_shadows WHERE event_key = ?`, eventKey).Scan(
 		&command.EventKey, &command.ExternalID, &command.RequestSHA256,
 		&command.SubjectSHA256, &command.Source, &command.PolicyVersion,
 		&command.CatalogSHA256, &command.GrantType, &command.BusinessCode,
-		&command.QuotaDelta, &command.MonthlyQuota, &command.Outcome, &createdAt,
+		&command.QuotaDelta, &command.PeriodQuota, &command.ResetPeriod,
+		&command.ResetTimezone, &command.Outcome, &createdAt,
 	)
 	if err != nil {
 		return EntitlementCommandShadow{}, err

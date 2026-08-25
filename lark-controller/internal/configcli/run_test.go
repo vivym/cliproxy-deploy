@@ -75,7 +75,7 @@ func TestRunCheckRejectsDuplicateJSONKeys(t *testing.T) {
 	root := t.TempDir()
 	sourcePath := filepath.Join(root, "policy.json")
 	bindingPath := filepath.Join(root, "binding.json")
-	if err := os.WriteFile(sourcePath, []byte(`{"format_version":1,"format_version":1}`), 0o600); err != nil {
+	if err := os.WriteFile(sourcePath, []byte(`{"format_version":2,"format_version":2}`), 0o600); err != nil {
 		t.Fatalf("write duplicate source: %v", err)
 	}
 	_, binding := testConfiguration()
@@ -126,11 +126,21 @@ func TestAtomicWriteRejectsSymlinkParent(t *testing.T) {
 
 func TestInitialTemplatesIncludeApprovalCostAndUsageContext(t *testing.T) {
 	source, _ := initialTemplates()
+	wantLevels := []policy.Level{
+		{LevelCode: "basic", Rank: 10, PeriodQuota: 250_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
+		{LevelCode: "plus", Rank: 20, PeriodQuota: 1_000_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
+		{LevelCode: "pro", Rank: 30, PeriodQuota: 2_500_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
+		{LevelCode: "power", Rank: 40, PeriodQuota: 10_000_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
+	}
+	if source.FormatVersion != 2 || source.Policy.PolicyVersion != "employee-entitlements-YYYY-MM-v2" ||
+		!reflect.DeepEqual(source.Policy.Levels, wantLevels) {
+		t.Fatalf("subscription levels = %+v, want %+v", source.Policy.Levels, wantLevels)
+	}
 	wantPackages := []policy.WalletPackage{
-		{PackageCode: "topup_5", QuotaDelta: 2_500_000},
-		{PackageCode: "topup_10", QuotaDelta: 5_000_000},
-		{PackageCode: "topup_25", QuotaDelta: 12_500_000},
-		{PackageCode: "topup_50", QuotaDelta: 25_000_000},
+		{PackageCode: "topup_100", QuotaDelta: 50_000_000},
+		{PackageCode: "topup_500", QuotaDelta: 250_000_000},
+		{PackageCode: "topup_1000", QuotaDelta: 500_000_000},
+		{PackageCode: "topup_10000", QuotaDelta: 5_000_000_000},
 	}
 	if !reflect.DeepEqual(source.Policy.WalletPackages, wantPackages) {
 		t.Fatalf("wallet packages = %+v, want %+v", source.Policy.WalletPackages, wantPackages)
@@ -153,10 +163,10 @@ func TestInitialTemplatesIncludeApprovalCostAndUsageContext(t *testing.T) {
 		}
 		if approval.ApprovalKind == policy.ApprovalKindWalletTopUp {
 			wantOptions := []policy.ManifestOption{
-				{DisplayText: "$5", Code: "topup_5"},
-				{DisplayText: "$10", Code: "topup_10"},
-				{DisplayText: "$25", Code: "topup_25"},
-				{DisplayText: "$50", Code: "topup_50"},
+				{DisplayText: "$100", Code: "topup_100"},
+				{DisplayText: "$500", Code: "topup_500"},
+				{DisplayText: "$1,000", Code: "topup_1000"},
+				{DisplayText: "$10,000", Code: "topup_10000"},
 			}
 			if !reflect.DeepEqual(fields["wallet_package"].Options, wantOptions) {
 				t.Fatalf("wallet package options = %+v, want %+v", fields["wallet_package"].Options, wantOptions)
@@ -167,12 +177,12 @@ func TestInitialTemplatesIncludeApprovalCostAndUsageContext(t *testing.T) {
 
 func testConfiguration() (tenantconfig.Source, tenantconfig.EnvironmentBinding) {
 	source := tenantconfig.Source{
-		FormatVersion: 1,
+		FormatVersion: 2,
 		Policy: tenantconfig.PolicySource{
 			PolicyVersion: "employee-v1", State: policy.PolicyStateActive,
 			Levels: []policy.Level{
-				{LevelCode: "basic", Rank: 10, MonthlyQuota: 5_000_000},
-				{LevelCode: "plus", Rank: 20, MonthlyQuota: 12_500_000},
+				{LevelCode: "basic", Rank: 10, PeriodQuota: 250_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
+				{LevelCode: "plus", Rank: 20, PeriodQuota: 1_000_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
 			},
 			WalletPackages: []policy.WalletPackage{
 				{PackageCode: "topup_5", QuotaDelta: 2_500_000},
@@ -200,7 +210,7 @@ func testConfiguration() (tenantconfig.Source, tenantconfig.EnvironmentBinding) 
 		},
 	}
 	binding := tenantconfig.EnvironmentBinding{
-		FormatVersion: 1, Environment: "production", PublicOrigin: "https://ai.example.com",
+		FormatVersion: 2, Environment: "production", PublicOrigin: "https://ai.example.com",
 		Lark: tenantconfig.LarkBinding{
 			AppID: "cli_public_app_id", TenantKey: "tenant-public-key",
 			ApprovalCodes: map[policy.ApprovalKind]string{

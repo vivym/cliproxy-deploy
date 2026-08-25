@@ -19,7 +19,9 @@ type BaseSubscriptionGrantDraft struct {
 	PolicyVersion string
 	CatalogSHA256 string
 	LevelCode     string
-	MonthlyQuota  int64
+	PeriodQuota   int64
+	ResetPeriod   string
+	ResetTimezone string
 	GrantJob      EntitlementGrantJobDraft
 }
 
@@ -135,7 +137,8 @@ func validBaseSubscriptionGrantDraft(identity OAuthIdentity, draft BaseSubscript
 		digest.IsCanonicalSHA256(draft.SubjectSHA256) &&
 		draft.SubjectSHA256 == wantSubjectSHA256 &&
 		digest.IsCanonicalSHA256(draft.CatalogSHA256) && draft.PolicyVersion != "" &&
-		draft.LevelCode == "basic" && draft.MonthlyQuota > 0 &&
+		draft.LevelCode == "basic" && draft.PeriodQuota > 0 &&
+		draft.ResetPeriod != "" && draft.ResetTimezone != "" &&
 		draft.GrantJob.ExternalID == draft.ExternalID &&
 		draft.GrantJob.RequestSHA256 == draft.RequestSHA256 &&
 		draft.GrantJob.SubjectSHA256 == draft.SubjectSHA256
@@ -149,7 +152,8 @@ func insertBaseSubscriptionGrant(
 ) (string, error) {
 	var stored BaseSubscriptionGrantDraft
 	err := tx.QueryRowContext(ctx, `
-SELECT request_sha256, subject_sha256, policy_version, catalog_sha256, level_code, monthly_quota
+SELECT request_sha256, subject_sha256, policy_version, catalog_sha256, level_code,
+       period_quota, reset_period, reset_timezone
 FROM base_subscription_grants WHERE external_id = ?`,
 		draft.ExternalID,
 	).Scan(
@@ -158,7 +162,9 @@ FROM base_subscription_grants WHERE external_id = ?`,
 		&stored.PolicyVersion,
 		&stored.CatalogSHA256,
 		&stored.LevelCode,
-		&stored.MonthlyQuota,
+		&stored.PeriodQuota,
+		&stored.ResetPeriod,
+		&stored.ResetTimezone,
 	)
 	switch {
 	case err == nil && sameBaseSubscriptionGrantMetadata(stored, draft):
@@ -171,11 +177,13 @@ FROM base_subscription_grants WHERE external_id = ?`,
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO base_subscription_grants (
     external_id, request_sha256, subject_sha256, policy_version,
-    catalog_sha256, level_code, monthly_quota, outcome, created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    catalog_sha256, level_code, period_quota, reset_period, reset_timezone,
+    outcome, created_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		draft.ExternalID, draft.RequestSHA256, draft.SubjectSHA256,
 		draft.PolicyVersion, draft.CatalogSHA256, draft.LevelCode,
-		draft.MonthlyQuota, EntitlementCommandOutcomeShadowPlanned, createdAt,
+		draft.PeriodQuota, draft.ResetPeriod, draft.ResetTimezone,
+		EntitlementCommandOutcomeShadowPlanned, createdAt,
 	); err != nil {
 		return "", fmt.Errorf("store base subscription grant: %w", err)
 	}
@@ -188,5 +196,7 @@ func sameBaseSubscriptionGrantMetadata(stored, draft BaseSubscriptionGrantDraft)
 		stored.PolicyVersion == draft.PolicyVersion &&
 		stored.CatalogSHA256 == draft.CatalogSHA256 &&
 		stored.LevelCode == draft.LevelCode &&
-		stored.MonthlyQuota == draft.MonthlyQuota
+		stored.PeriodQuota == draft.PeriodQuota &&
+		stored.ResetPeriod == draft.ResetPeriod &&
+		stored.ResetTimezone == draft.ResetTimezone
 }

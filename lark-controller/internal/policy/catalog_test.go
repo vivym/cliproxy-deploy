@@ -20,13 +20,13 @@ const levelManifestFingerprint = "sha256:fb7a57402d28d90ae5552e53aeef13e4e66a388
 func TestLoadDirectoryResolvesWalletApprovalByExactDisplayText(t *testing.T) {
 	policyDirectory := t.TempDir()
 	writeFile(t, filepath.Join(policyDirectory, "employee-v1.policy.json"), `{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": "employee-v1",
   "state": "active",
   "levels": [
-    {"level_code": "basic", "rank": 10, "monthly_quota": 5000000},
-    {"level_code": "plus", "rank": 20, "monthly_quota": 12500000},
-    {"level_code": "pro", "rank": 30, "monthly_quota": 25000000}
+    {"level_code": "basic", "rank": 10, "period_quota": 5000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"},
+    {"level_code": "plus", "rank": 20, "period_quota": 12500000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"},
+    {"level_code": "pro", "rank": 30, "period_quota": 25000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}
   ],
   "wallet_packages": [
     {"package_code": "topup_5", "quota_delta": 2500000},
@@ -35,7 +35,7 @@ func TestLoadDirectoryResolvesWalletApprovalByExactDisplayText(t *testing.T) {
 }`)
 	bindingsPath := filepath.Join(t.TempDir(), "approval-bindings.json")
 	writeFile(t, bindingsPath, `{
-  "format_version": 1,
+  "format_version": 2,
   "bindings": [{
     "approval_code": "approval-wallet-v1",
     "locale": "zh-CN",
@@ -89,7 +89,7 @@ func TestLoadDirectoryResolvesWalletApprovalByExactDisplayText(t *testing.T) {
 		t.Fatalf("resolve base subscription: %v", err)
 	}
 	if base.PolicyVersion != "employee-v1" || base.LevelCode != "basic" ||
-		base.LevelRank != 10 || base.MonthlyQuota != 5_000_000 || len(base.CatalogSHA256) != 64 {
+		base.LevelRank != 10 || base.PeriodQuota != 5_000_000 || len(base.CatalogSHA256) != 64 {
 		t.Fatalf("unexpected base subscription: %+v", base)
 	}
 	store, err := inbox.Open(filepath.Join(t.TempDir(), "controller.sqlite"))
@@ -202,7 +202,7 @@ func TestLoadDirectoryResolvesWalletApprovalByExactDisplayText(t *testing.T) {
 		t.Fatalf("resolve subscription approval: %v", err)
 	}
 	if level.ApprovalKind != policy.ApprovalKindSubscriptionLevel || level.BusinessCode != "pro" ||
-		level.LevelRank != 30 || level.MonthlyQuota != 25000000 || level.QuotaDelta != 0 ||
+		level.LevelRank != 30 || level.PeriodQuota != 25000000 || level.QuotaDelta != 0 ||
 		level.SchemaFingerprint != levelManifestFingerprint {
 		t.Fatalf("unexpected subscription resolution: %+v", level)
 	}
@@ -211,13 +211,13 @@ func TestLoadDirectoryResolvesWalletApprovalByExactDisplayText(t *testing.T) {
 func TestResolveApprovalUsesDrainingHistoricalPolicyAndEnforcesStartWindow(t *testing.T) {
 	policyDirectory := t.TempDir()
 	writeFile(t, filepath.Join(policyDirectory, "employee-v1.policy.json"), `{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": "employee-v1",
   "state": "draining",
   "levels": [
-    {"level_code": "basic", "rank": 10, "monthly_quota": 5000000},
-    {"level_code": "plus", "rank": 20, "monthly_quota": 12500000},
-    {"level_code": "pro", "rank": 30, "monthly_quota": 25000000}
+    {"level_code": "basic", "rank": 10, "period_quota": 5000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"},
+    {"level_code": "plus", "rank": 20, "period_quota": 12500000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"},
+    {"level_code": "pro", "rank": 30, "period_quota": 25000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}
   ],
   "wallet_packages": [
     {"package_code": "topup_5", "quota_delta": 2500000},
@@ -225,13 +225,13 @@ func TestResolveApprovalUsesDrainingHistoricalPolicyAndEnforcesStartWindow(t *te
   ]
 }`)
 	writeFile(t, filepath.Join(policyDirectory, "employee-v2.policy.json"), `{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": "employee-v2",
   "state": "active",
   "levels": [
-    {"level_code": "basic", "rank": 10, "monthly_quota": 6000000},
-    {"level_code": "plus", "rank": 20, "monthly_quota": 15000000},
-    {"level_code": "pro", "rank": 30, "monthly_quota": 30000000}
+    {"level_code": "basic", "rank": 10, "period_quota": 6000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"},
+    {"level_code": "plus", "rank": 20, "period_quota": 15000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"},
+    {"level_code": "pro", "rank": 30, "period_quota": 30000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}
   ],
   "wallet_packages": [
     {"package_code": "topup_5", "quota_delta": 3000000},
@@ -240,7 +240,7 @@ func TestResolveApprovalUsesDrainingHistoricalPolicyAndEnforcesStartWindow(t *te
 }`)
 	bindingsPath := filepath.Join(t.TempDir(), "approval-bindings.json")
 	drainingBindings := `{
-  "format_version": 1,
+  "format_version": 2,
   "bindings": [{
     "approval_code": "approval-wallet-v1",
     "locale": "zh-CN",
@@ -355,11 +355,11 @@ func TestLoadDirectoryRejectsDuplicateJSONKeys(t *testing.T) {
 	policyDirectory := t.TempDir()
 	policyPath := filepath.Join(policyDirectory, "employee-v1.policy.json")
 	writeFile(t, policyPath, `{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": "employee-v1",
   "state": "draining",
   "state": "active",
-  "levels": [{"level_code": "basic", "rank": 10, "monthly_quota": 5000000}],
+  "levels": [{"level_code": "basic", "rank": 10, "period_quota": 5000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}],
   "wallet_packages": [{"package_code": "topup_5", "quota_delta": 2500000}]
 }`)
 	bindingsPath := filepath.Join(t.TempDir(), "approval-bindings.json")
@@ -369,14 +369,14 @@ func TestLoadDirectoryRejectsDuplicateJSONKeys(t *testing.T) {
 	}
 
 	writeFile(t, policyPath, `{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": "employee-v1",
   "state": "active",
-  "levels": [{"level_code": "basic", "rank": 10, "monthly_quota": 5000000}],
+  "levels": [{"level_code": "basic", "rank": 10, "period_quota": 5000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}],
   "wallet_packages": [{"package_code": "topup_5", "quota_delta": 2500000}]
 }`)
 	writeFile(t, bindingsPath, `{
-  "format_version": 1,
+  "format_version": 2,
   "bindings": [{
     "approval_code": "approval-wallet-v1",
     "locale": "zh-CN",
@@ -400,12 +400,12 @@ func TestLoadDirectoryRejectsDuplicateJSONKeys(t *testing.T) {
 func TestResolveBaseSubscriptionRejectsActivePolicyWithoutBasicLevel(t *testing.T) {
 	policyDirectory := t.TempDir()
 	writeFile(t, filepath.Join(policyDirectory, "employee-v1.policy.json"), `{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": "employee-v1",
   "state": "active",
   "levels": [
-    {"level_code": "plus", "rank": 20, "monthly_quota": 12500000},
-    {"level_code": "pro", "rank": 30, "monthly_quota": 25000000}
+    {"level_code": "plus", "rank": 20, "period_quota": 12500000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"},
+    {"level_code": "pro", "rank": 30, "period_quota": 25000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}
   ],
   "wallet_packages": [
     {"package_code": "topup_5", "quota_delta": 2500000},
@@ -414,7 +414,7 @@ func TestResolveBaseSubscriptionRejectsActivePolicyWithoutBasicLevel(t *testing.
 }`)
 	bindingsPath := filepath.Join(t.TempDir(), "approval-bindings.json")
 	writeFile(t, bindingsPath, `{
-  "format_version": 1,
+  "format_version": 2,
   "bindings": [{
     "approval_code": "approval-wallet-v1",
     "locale": "zh-CN",
@@ -464,11 +464,11 @@ func TestResolveBaseSubscriptionRejectsActivePolicyWithoutBasicLevel(t *testing.
 func TestLoadDirectoryRejectsFutureRetirementBoundary(t *testing.T) {
 	policyDirectory := t.TempDir()
 	writeFile(t, filepath.Join(policyDirectory, "employee-v0.policy.json"), fmt.Sprintf(`{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": "employee-v0",
   "state": "retired",
   "retire_after": %q,
-  "levels": [{"level_code": "basic", "rank": 10, "monthly_quota": 4000000}],
+  "levels": [{"level_code": "basic", "rank": 10, "period_quota": 4000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}],
   "wallet_packages": [{"package_code": "topup_5", "quota_delta": 2000000}]
 }`, time.Now().UTC().Add(time.Hour).Format(time.RFC3339)))
 	if _, err := policy.LoadDirectory(policyDirectory, filepath.Join(t.TempDir(), "missing-bindings.json")); err == nil || !strings.Contains(err.Error(), "still in the future") {
@@ -487,10 +487,10 @@ func TestLoadDirectoryRejectsCrossVersionRankDrift(t *testing.T) {
 		{version: "employee-v2", state: "active", rank: 20},
 	} {
 		writeFile(t, filepath.Join(policyDirectory, item.version+".policy.json"), fmt.Sprintf(`{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": %q,
   "state": %q,
-  "levels": [{"level_code": "basic", "rank": %d, "monthly_quota": 5000000}],
+  "levels": [{"level_code": "basic", "rank": %d, "period_quota": 5000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}],
   "wallet_packages": [{"package_code": "topup_5", "quota_delta": 2500000}]
 }`, item.version, item.state, item.rank))
 	}
@@ -502,10 +502,10 @@ func TestLoadDirectoryRejectsCrossVersionRankDrift(t *testing.T) {
 func TestLoadDirectoryRequiresBothApprovalKindsForActivePolicy(t *testing.T) {
 	policyDirectory := t.TempDir()
 	writeFile(t, filepath.Join(policyDirectory, "employee-v1.policy.json"), `{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": "employee-v1",
   "state": "active",
-  "levels": [{"level_code": "basic", "rank": 10, "monthly_quota": 5000000}],
+  "levels": [{"level_code": "basic", "rank": 10, "period_quota": 5000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}],
   "wallet_packages": [
     {"package_code": "topup_5", "quota_delta": 2500000},
     {"package_code": "topup_10", "quota_delta": 5000000}
@@ -513,7 +513,7 @@ func TestLoadDirectoryRequiresBothApprovalKindsForActivePolicy(t *testing.T) {
 }`)
 	bindingsPath := filepath.Join(t.TempDir(), "approval-bindings.json")
 	writeFile(t, bindingsPath, `{
-  "format_version": 1,
+  "format_version": 2,
   "bindings": [{
     "approval_code": "approval-wallet-v1",
     "locale": "zh-CN",
@@ -543,10 +543,10 @@ func TestLoadDirectoryRequiresExactlyOneActivePolicy(t *testing.T) {
 	policyDirectory := t.TempDir()
 	for _, version := range []string{"employee-v1", "employee-v2"} {
 		writeFile(t, filepath.Join(policyDirectory, version+".policy.json"), `{
-  "format_version": 1,
+  "format_version": 2,
   "policy_version": "`+version+`",
   "state": "active",
-  "levels": [{"level_code": "basic", "rank": 10, "monthly_quota": 5000000}],
+  "levels": [{"level_code": "basic", "rank": 10, "period_quota": 5000000, "reset_period": "weekly", "reset_timezone": "Asia/Shanghai"}],
   "wallet_packages": [
     {"package_code": "topup_5", "quota_delta": 2500000},
     {"package_code": "topup_10", "quota_delta": 5000000}
@@ -555,7 +555,7 @@ func TestLoadDirectoryRequiresExactlyOneActivePolicy(t *testing.T) {
 	}
 	bindingsPath := filepath.Join(t.TempDir(), "approval-bindings.json")
 	writeFile(t, bindingsPath, `{
-  "format_version": 1,
+  "format_version": 2,
   "bindings": [{
     "approval_code": "approval-wallet-v1",
     "locale": "zh-CN",

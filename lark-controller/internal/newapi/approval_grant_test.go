@@ -40,7 +40,8 @@ func TestPlanApprovalGrantKeepsSubscriptionQuotaOutOfCommand(t *testing.T) {
 	request, receipt, err := newapi.PlanApprovalGrant(newapi.ApprovalGrantInput{
 		TenantKey: "tenant-1", OpenID: "ou-requester",
 		PolicyVersion: "employee-v1", ApprovalKind: "subscription_level",
-		BusinessCode: "pro", MonthlyQuota: 25_000_000,
+		BusinessCode: "pro", PeriodQuota: 25_000_000,
+		ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai",
 		ApprovalCode: "approval-2", InstanceCode: "instance-2",
 		StartTimeMilliseconds: "1787303900000",
 		SchemaFingerprint:     "sha256:def", Locale: "zh-CN", CatalogSHA256: "sha256:catalog",
@@ -56,7 +57,7 @@ func TestPlanApprovalGrantKeepsSubscriptionQuotaOutOfCommand(t *testing.T) {
 	if string(payload) != want {
 		t.Fatalf("payload = %s\nwant    = %s", payload, want)
 	}
-	if receipt.MonthlyQuota != 25_000_000 || receipt.QuotaDelta != 0 ||
+	if receipt.PeriodQuota != 25_000_000 || receipt.QuotaDelta != 0 ||
 		receipt.GrantType != "subscription_level" || receipt.BusinessCode != "pro" {
 		t.Fatalf("unexpected receipt: %+v", receipt)
 	}
@@ -65,7 +66,8 @@ func TestPlanApprovalGrantKeepsSubscriptionQuotaOutOfCommand(t *testing.T) {
 func TestPlanBaseSubscriptionGrantProducesStableMinimumBasicCommand(t *testing.T) {
 	request, receipt, err := newapi.PlanBaseSubscriptionGrant(newapi.BaseSubscriptionGrantInput{
 		Subject: "tenant-1:ou-employee", PolicyVersion: "employee-v1",
-		LevelCode: "basic", MonthlyQuota: 5_000_000,
+		LevelCode: "basic", PeriodQuota: 5_000_000,
+		ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai",
 		CatalogSHA256: strings.Repeat("a", 64),
 	})
 	if err != nil {
@@ -82,7 +84,7 @@ func TestPlanBaseSubscriptionGrantProducesStableMinimumBasicCommand(t *testing.T
 	if receipt.ExternalID != "lark:base:tenant-1:ou-employee:employee-v1" ||
 		receipt.PolicyVersion != "employee-v1" || receipt.CatalogSHA256 != strings.Repeat("a", 64) ||
 		receipt.GrantType != "subscription_level" || receipt.BusinessCode != "basic" ||
-		receipt.MonthlyQuota != 5_000_000 || receipt.QuotaDelta != 0 ||
+		receipt.PeriodQuota != 5_000_000 || receipt.QuotaDelta != 0 ||
 		receipt.SubjectSHA256 != "251804d8ac92f6793c7c5eb1c8aa4b503de4d68151e22683de897e601140fd87" ||
 		receipt.RequestSHA256 != "f0c23ad1c33791850eebb4c552b0ebf7e738f6045210c649e29d3b71efbf6e13" {
 		t.Fatalf("unexpected receipt: %+v", receipt)
@@ -97,8 +99,8 @@ func TestPlanBaseSubscriptionGrantRejectsInvalidInput(t *testing.T) {
 		{name: "missing subject", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.Subject = "" }},
 		{name: "missing policy", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.PolicyVersion = "" }},
 		{name: "non-basic level", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.LevelCode = "pro" }},
-		{name: "zero monthly quota", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.MonthlyQuota = 0 }},
-		{name: "negative monthly quota", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.MonthlyQuota = -1 }},
+		{name: "zero monthly quota", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.PeriodQuota = 0 }},
+		{name: "negative monthly quota", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.PeriodQuota = -1 }},
 		{name: "missing catalog hash", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.CatalogSHA256 = "" }},
 		{name: "non-hex catalog hash", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.CatalogSHA256 = strings.Repeat("z", 64) }},
 		{name: "uppercase catalog hash", mutate: func(input *newapi.BaseSubscriptionGrantInput) { input.CatalogSHA256 = strings.Repeat("A", 64) }},
@@ -107,7 +109,8 @@ func TestPlanBaseSubscriptionGrantRejectsInvalidInput(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			input := newapi.BaseSubscriptionGrantInput{
 				Subject: "tenant-1:ou-employee", PolicyVersion: "employee-v1",
-				LevelCode: "basic", MonthlyQuota: 5_000_000,
+				LevelCode: "basic", PeriodQuota: 5_000_000,
+				ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai",
 				CatalogSHA256: strings.Repeat("a", 64),
 			}
 			test.mutate(&input)

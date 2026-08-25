@@ -41,7 +41,9 @@ type Config struct {
 type BaseSubscriptionConfig struct {
 	PolicyVersion string
 	LevelCode     string
-	MonthlyQuota  int64
+	PeriodQuota   int64
+	ResetPeriod   string
+	ResetTimezone string
 	CatalogSHA256 string
 }
 
@@ -91,7 +93,9 @@ func NewHandler(
 	}
 	if config.BaseSubscription.PolicyVersion == "" ||
 		config.BaseSubscription.LevelCode != "basic" ||
-		config.BaseSubscription.MonthlyQuota <= 0 ||
+		config.BaseSubscription.PeriodQuota <= 0 ||
+		config.BaseSubscription.ResetPeriod == "" ||
+		config.BaseSubscription.ResetTimezone == "" ||
 		!digest.IsCanonicalSHA256(config.BaseSubscription.CatalogSHA256) {
 		return nil, errors.New("active basic subscription policy is required")
 	}

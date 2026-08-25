@@ -14,7 +14,7 @@ import (
 
 const (
 	levelManifestFingerprint = "sha256:fbab61010c268cf2c92dc4bc60354d741f3883c1428fc6d759e1f6e73c5f5d60"
-	wantNewAPICatalogHash    = "ce26bf8e1d8734d805f9bf03c4dadb0e218b7fc0542cb4e0802640a457fe2dee"
+	wantNewAPICatalogHash    = "f8d7608f59016b7fd21d3bb2f585cda733fdf6b28cbbb360cebe7ebc94a01638"
 )
 
 func TestCompileProducesRuntimeValidCatalogAndOperableProjections(t *testing.T) {
@@ -46,6 +46,9 @@ func TestCompileProducesRuntimeValidCatalogAndOperableProjections(t *testing.T) 
 		State         string `json:"state"`
 		Levels        []struct {
 			LevelCode         string `json:"level_code"`
+			PeriodQuota       int64  `json:"period_quota"`
+			ResetPeriod       string `json:"reset_period"`
+			ResetTimezone     string `json:"reset_timezone"`
 			PlanID            int64  `json:"plan_id"`
 			ResetContractHash string `json:"reset_contract_hash"`
 		} `json:"levels"`
@@ -58,6 +61,9 @@ func TestCompileProducesRuntimeValidCatalogAndOperableProjections(t *testing.T) 
 		t.Fatalf("unexpected New API publication metadata: %+v", publicationDocument)
 	}
 	if len(publicationDocument.Levels) != 3 || publicationDocument.Levels[0].LevelCode != "basic" ||
+		publicationDocument.Levels[0].PeriodQuota != 250_000_000 ||
+		publicationDocument.Levels[0].ResetPeriod != "weekly" ||
+		publicationDocument.Levels[0].ResetTimezone != "Asia/Shanghai" ||
 		publicationDocument.Levels[0].PlanID != 101 ||
 		publicationDocument.Levels[0].ResetContractHash != binding.NewAPI.PlanResetContractHash {
 		t.Fatalf("unexpected New API level bindings: %+v", publicationDocument.Levels)
@@ -214,14 +220,14 @@ func TestCompileRejectsPublicOriginUserInfo(t *testing.T) {
 
 func completeConfiguration() (tenantconfig.Source, tenantconfig.EnvironmentBinding) {
 	source := tenantconfig.Source{
-		FormatVersion: 1,
+		FormatVersion: 2,
 		Policy: tenantconfig.PolicySource{
 			PolicyVersion: "employee-v1",
 			State:         policy.PolicyStateActive,
 			Levels: []policy.Level{
-				{LevelCode: "pro", Rank: 30, MonthlyQuota: 25_000_000},
-				{LevelCode: "plus", Rank: 20, MonthlyQuota: 12_500_000},
-				{LevelCode: "basic", Rank: 10, MonthlyQuota: 5_000_000},
+				{LevelCode: "pro", Rank: 30, PeriodQuota: 2_500_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
+				{LevelCode: "plus", Rank: 20, PeriodQuota: 1_000_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
+				{LevelCode: "basic", Rank: 10, PeriodQuota: 250_000_000, ResetPeriod: "weekly", ResetTimezone: "Asia/Shanghai"},
 			},
 			WalletPackages: []policy.WalletPackage{
 				{PackageCode: "topup_5", QuotaDelta: 2_500_000},
@@ -264,7 +270,7 @@ func completeConfiguration() (tenantconfig.Source, tenantconfig.EnvironmentBindi
 		},
 	}
 	binding := tenantconfig.EnvironmentBinding{
-		FormatVersion: 1,
+		FormatVersion: 2,
 		Environment:   "production",
 		PublicOrigin:  "https://ai.example.com",
 		Lark: tenantconfig.LarkBinding{

@@ -1,5 +1,5 @@
 {
-  "format_version": 1,
+  "format_version": 2,
   "environment": "production",
   "public_origin": "https://ai.example.com",
   "lark": {
@@ -18,7 +18,7 @@
       "power": 104,
       "pro": 103
     },
-    "plan_reset_contract_hash": "1010f47a0838545b5aaa9a3d8e9ab455d37cd06053307d9794d13b24de5f8238"
+    "plan_reset_contract_hash": "8e4c1bf09a361b2a87438a5dc537b4cf78159336be75d776dcf5f04fca614be2"
   },
   "secret_refs": {
     "lark_app_secret": "lark_app_secret",
