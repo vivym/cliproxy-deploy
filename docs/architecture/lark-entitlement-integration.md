@@ -1733,7 +1733,7 @@ New API 检查：
 - 实现 disable 的 deny fence、单事务状态/auth/session 更新和 post-commit outbox。
 - 补齐并发、事务和故障窗口测试。
 
-当前本地实现收据：fork 从上游 `v0.13.2` 的 peeled commit
+周额度实现之前的历史 WP2 本地实现收据：fork 从上游 `v0.13.2` 的 peeled commit
 `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d` 开始，bigint、wallet grant、managed
 subscription、managed OAuth、principal disable 和 operator correction 六个 tracer slice 均已实现，常驻 wire contract
 固定于 `f2ef0d95`，correction boundary 固定于 `f1be0d7a`，确定性 Bun dependency source
@@ -1895,25 +1895,13 @@ job 年龄，未来的 `retry_wait` 不会被误判为卡死。
 - [ ] 在获准的生产维护窗口从 `edge`、`new-api-data` 和 `lark-integration` 各自独立 probe，完成公网与所有相邻网络验收。
 - [x] 增加 Compose 灰度、secret/policy/rotation 配置、host-side correction maintenance lock 和回滚 runbook；Lark 后台实租户配置、dead-letter 和 reversal 演练仍待执行。
 
-2026-08-25 当前周额度候选从 New API
+2026-08-25 当前周额度候选为 New API
 `a624396db4ef01db607cd100c24ecc6f26e77430` 和 deployment
-`9a6d825db04ef28aa81bea14671c0ddb778eac39` 使用 Buildx 以
-`linux/amd64,linux/arm64`、`--provenance=false`、`--sbom=false` 和 OCI exporter
-完成本地构建：
-
-| Image | Local OCI index | `linux/amd64` manifest | `linux/arm64` manifest |
-| --- | --- | --- | --- |
-| New API fork | `sha256:5126190d9169cf39e2dfc549252b95651d7a3ebf0defafe139fe620a0c63bf3e` | `sha256:2283daf219c8863a4eaff903f585a8908b98d2264e8e6500b2a5c40e76cf855d` | `sha256:6d29e22221928149a1c12a1fc784a2323a12edd3e423888385efcae5b0407fa8` |
-| Controller | `sha256:08669d6698cbb9b8e0f3eebb20199b557d5bc28829153031c376fca6d56b2ea7` | `sha256:7fa7eae91f7f9d8835e9cbe6112dcb6ca3266d549b917dba90a0bb831e6bc838` | `sha256:f3168173448049296f0c342a648ac235c91771e1179990a06c1b9f9405a42ac4` |
-| correction CLI | `sha256:48a18eb0a6f25e570afe526f978307493de6111f02730b60004a6ba37c37c25d` | `sha256:b57ffb598adcacaca423f777c1b506d3d78c878175b856bbbb1769b56fe03ea1` | `sha256:85629d8d818c066dda1f055e8a4e8340e109861f1079eb19f68b13206d112280` |
-| config CLI | `sha256:26d8c998ed677e35e58584935f2c7f5f84d592939037101268e27d90baa6e52b` | `sha256:91b6951a09d7b73d0b894a4fdc3ea0fca74ba3fae22bee02f1f83308141a6d35` | `sha256:12e400895687422188b08e3690d29bf09196ff6079fe67db75bb9c8a566565c2` |
-
-OCI index、platform manifest、image config 和所有 layer blob 的 digest/size 已独立重算；
-平台集合、source/revision label、entrypoint、runtime user 和 Controller healthcheck 均匹配。
-在 arm64 host 强制运行本地 `linux/amd64` image 时，三个 help 和 `lark-cli 1.0.80`
-通过，Controller 因缺少 callback allowlist 按预期 fail closed，均无 `exec format error`。
-临时 tag 和 OCI archive 已删除。这些 digest 不是 registry digest，也没有 provenance/SBOM
-attestation；发布后必须重新取得 registry 和匿名拉取收据。
+`9a6d825db04ef28aa81bea14671c0ddb778eac39`。两架构 digest、runtime 合同、amd64
+执行结果和临时产物清理记录以
+[Compose 灰度运行手册](../runbooks/lark-controller-compose-rollout.md#当前周额度候选的本地-multi-arch-收据)
+为唯一收据源。该收据只证明本地 OCI；发布后仍须重新取得 registry、provenance/SBOM
+和匿名拉取收据，才能关闭镜像发布门禁。
 
 以下是周额度实现之前的历史本地 `linux/arm64` 构建收据；它们都是 local image ID，不能替代 registry
 manifest digest：
