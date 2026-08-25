@@ -2,7 +2,7 @@
 
 ## 文档状态
 
-- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏、周期性 approval reconciliation 和管理员一次性纠正流程；WP4 已完成本地 Compose/profile/network/volume/least-privilege secret/verify 基础接入、correction/config credential 隔离和 offline quiesce backup/restore 同包合同。当前配置控制面提交已发布四个新的 multi-arch GHCR 候选并完成 registry/amd64 入口验证；四个 package 均已公开且无凭证 manifest 返回 `200`、digest 匹配，镜像发布门禁已经闭环。全相邻网络探测、真实租户配置和生产恢复演练仍未完成；WP5 未实施，未部署或端到端验收
+- 状态：设计已确定；WP2 本地 fork 已实现，WP3 已实现 shadow/active grant runtime、实时 `contact.user.deleted_v3` 停用、opaque OAuth credential store、Lark token/userinfo adapter、公开 authorize/callback、内部 token/userinfo handlers、幂等基础订阅投递、active principal 每日在职对账、运行期 stale claim 恢复、事件驱动 approval reversal 栅栏、周期性 approval reconciliation 和管理员一次性纠正流程；WP4 已完成本地 Compose/profile/network/volume/least-privilege secret/verify 基础接入、correction/config credential 隔离和 offline quiesce backup/restore 同包合同。当前周额度 revisions 已完成本地 multi-arch OCI 和 `linux/amd64` 入口验证，但尚未发布；已有 GHCR 收据属于更早的 New API `4e451088` 和 deployment `54955ec`，不能作为当前周额度候选收据，镜像发布门禁已重新打开。全相邻网络探测、真实租户配置和生产恢复演练仍未完成；WP5 未实施，未部署或端到端验收
 - 日期：2026-08-19
 - 部署入口：`https://ai.x2r.store`
 - New API 上游基线：`v0.13.2`（peeled commit `bee339d279ccecbf8c8a89e14ddbbd902f78bd5d`）
@@ -1373,7 +1373,7 @@ Lark 的审批订阅接口目前要求 `approval:approval` 或 `approval:definit
 
 ## 当前本地部署拓扑（尚未生产验收）
 
-当前根 Compose 已在 `lark` profile 中本地接入 `lark-quota-controller`、`:3001` integration listener、`lark-integration` network、policy mount、Controller volume 和按 consumer 隔离的 file-backed secrets，并提供 current/next integration credential window。基础 New API 与常驻 Controller 均不挂 correction/config credential；`lark-ops` profile 使用独立 correction image target 和临时、无 edge/Traefik/host-port 的 New API endpoint，`lark-config` profile 使用另一组独立 endpoint/CLI。`--list-pending` 走无网络、无 secret、Controller SQLite 只读挂载的独立 service。backup、restore、correction runner 和 config apply 共用 host-only `maintenance.session` mutex 与带 `backup/restore/correction/readonly/config` mode 的锁；任意 lock mode 都阻止常驻 New API/Controller 启动，correction 写服务只接受 `correction`，配置 CLI 与 endpoint mutation 逐次要求 `config`。readonly runner 使用固定名 one-off container，强删并精确验空后才释放边界。restore 在受控启动前释放容器 lock，但直到 readiness 结束始终持有 session，因而其他 writer 不能抢占；handoff 内任何非零退出都会重建 restore lock 并停掉部分启动的 writer。无法确认临时 snapshot/restore/correction container 已清理时同时保留 session/lock 并失败。当前 New API、Controller、correction 和 `lark-config` 已从提交后的 revisions 重建并取得新的 registry/amd64 入口收据；四个 package 的匿名 manifest 均返回 `200` 且 digest 匹配，镜像发布门禁已经闭环。真实 tenant 配置、生产网络和恢复演练仍待完成。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
+当前根 Compose 已在 `lark` profile 中本地接入 `lark-quota-controller`、`:3001` integration listener、`lark-integration` network、policy mount、Controller volume 和按 consumer 隔离的 file-backed secrets，并提供 current/next integration credential window。基础 New API 与常驻 Controller 均不挂 correction/config credential；`lark-ops` profile 使用独立 correction image target 和临时、无 edge/Traefik/host-port 的 New API endpoint，`lark-config` profile 使用另一组独立 endpoint/CLI。`--list-pending` 走无网络、无 secret、Controller SQLite 只读挂载的独立 service。backup、restore、correction runner 和 config apply 共用 host-only `maintenance.session` mutex 与带 `backup/restore/correction/readonly/config` mode 的锁；任意 lock mode 都阻止常驻 New API/Controller 启动，correction 写服务只接受 `correction`，配置 CLI 与 endpoint mutation 逐次要求 `config`。readonly runner 使用固定名 one-off container，强删并精确验空后才释放边界。restore 在受控启动前释放容器 lock，但直到 readiness 结束始终持有 session，因而其他 writer 不能抢占；handoff 内任何非零退出都会重建 restore lock 并停掉部分启动的 writer。无法确认临时 snapshot/restore/correction container 已清理时同时保留 session/lock 并失败。当前 New API、Controller、correction 和 `lark-config` 已从周额度 revisions 重建并取得本地 multi-arch OCI/amd64 入口收据；它们尚未发布，已有匿名 registry 收据只对应更早 revisions，镜像发布门禁未通过。真实 tenant 配置、生产网络和恢复演练仍待完成。New API 继续作为完整部署的主入口，Controller 和 Sub2API 都是其内部实现。
 
 网络：
 
@@ -1887,7 +1887,7 @@ job 年龄，未来的 `retry_wait` 不会被误判为卡死。
 
 - [x] 修改根目录唯一的 `docker-compose.yml`，不引入 overlay 或第二套部署入口。
 - [x] 增加显式命名为 `new-api-lark-integration` 的 `lark-integration` network、分离的 events/OAuth Traefik exact-path router 和 Controller volume。
-- [x] 从当前提交发布并固定 New API fork、Controller、correction CLI 和 config CLI image digest；四个 registry index 均含 `linux/amd64`、`linux/arm64` 和对应 provenance/SBOM attestation，并已在 arm64 host 强制执行 amd64 入口。
+- [ ] 从当前提交发布并固定 New API fork、Controller、correction CLI 和 config CLI image digest；当前周额度 revisions 已完成本地双架构 OCI 和 amd64 入口验证，但尚无 registry index/provenance/SBOM/匿名拉取收据。
 - [x] 将四个个人 GHCR package 全部公开并完成匿名 digest 复验；四个 manifest 均返回 `200` 和相同 `Docker-Content-Digest`。GitHub 当前没有个人 package visibility 的 REST/GraphQL 接口，只能在 `Package settings -> Change visibility -> Public` 中操作；公开后不可逆。
 - [x] 扩展 `.env.example` 和按 `shared/controller/new-api` consumer 隔离的 file-backed secret mount，但不提交任何 secret；Controller/correction image target 已分离，integration current/next rotation window 与 correction 三方独立性检查已接入。
 - [x] 扩展带 offline quiesce barrier、v2 manifest/receipt、精确 checksum coverage 和 Lark enabled/absent 同包校验的 backup/restore 脚本；restore 强制 shadow/OAuth-off，New API-only restore 拒绝拆分 enabled 包。生产恢复与 reconciliation 演练仍待执行。
@@ -1895,7 +1895,27 @@ job 年龄，未来的 `retry_wait` 不会被误判为卡死。
 - [ ] 在获准的生产维护窗口从 `edge`、`new-api-data` 和 `lark-integration` 各自独立 probe，完成公网与所有相邻网络验收。
 - [x] 增加 Compose 灰度、secret/policy/rotation 配置、host-side correction maintenance lock 和回滚 runbook；Lark 后台实租户配置、dead-letter 和 reversal 演练仍待执行。
 
-当前本地 `linux/arm64` 构建收据如下；它们都是 local image ID，不能替代 registry
+2026-08-25 当前周额度候选从 New API
+`a624396db4ef01db607cd100c24ecc6f26e77430` 和 deployment
+`9a6d825db04ef28aa81bea14671c0ddb778eac39` 使用 Buildx 以
+`linux/amd64,linux/arm64`、`--provenance=false`、`--sbom=false` 和 OCI exporter
+完成本地构建：
+
+| Image | Local OCI index | `linux/amd64` manifest | `linux/arm64` manifest |
+| --- | --- | --- | --- |
+| New API fork | `sha256:5126190d9169cf39e2dfc549252b95651d7a3ebf0defafe139fe620a0c63bf3e` | `sha256:2283daf219c8863a4eaff903f585a8908b98d2264e8e6500b2a5c40e76cf855d` | `sha256:6d29e22221928149a1c12a1fc784a2323a12edd3e423888385efcae5b0407fa8` |
+| Controller | `sha256:08669d6698cbb9b8e0f3eebb20199b557d5bc28829153031c376fca6d56b2ea7` | `sha256:7fa7eae91f7f9d8835e9cbe6112dcb6ca3266d549b917dba90a0bb831e6bc838` | `sha256:f3168173448049296f0c342a648ac235c91771e1179990a06c1b9f9405a42ac4` |
+| correction CLI | `sha256:48a18eb0a6f25e570afe526f978307493de6111f02730b60004a6ba37c37c25d` | `sha256:b57ffb598adcacaca423f777c1b506d3d78c878175b856bbbb1769b56fe03ea1` | `sha256:85629d8d818c066dda1f055e8a4e8340e109861f1079eb19f68b13206d112280` |
+| config CLI | `sha256:26d8c998ed677e35e58584935f2c7f5f84d592939037101268e27d90baa6e52b` | `sha256:91b6951a09d7b73d0b894a4fdc3ea0fca74ba3fae22bee02f1f83308141a6d35` | `sha256:12e400895687422188b08e3690d29bf09196ff6079fe67db75bb9c8a566565c2` |
+
+OCI index、platform manifest、image config 和所有 layer blob 的 digest/size 已独立重算；
+平台集合、source/revision label、entrypoint、runtime user 和 Controller healthcheck 均匹配。
+在 arm64 host 强制运行本地 `linux/amd64` image 时，三个 help 和 `lark-cli 1.0.80`
+通过，Controller 因缺少 callback allowlist 按预期 fail closed，均无 `exec format error`。
+临时 tag 和 OCI archive 已删除。这些 digest 不是 registry digest，也没有 provenance/SBOM
+attestation；发布后必须重新取得 registry 和匿名拉取收据。
+
+以下是周额度实现之前的历史本地 `linux/arm64` 构建收据；它们都是 local image ID，不能替代 registry
 manifest digest：
 
 - New API fork `dbfcf0c7`：`sha256:68f25465624a0e736a2bfacf58adad608b0e2777f4f89be0272a174bf952e973`
@@ -1913,7 +1933,7 @@ manifest digest：
 两架构 config 还分别验证了 New API entrypoint、Controller/correction entrypoint、Controller
 healthcheck 和 runtime UID/GID `10001:10001`。验证后的临时 OCI archive 已删除。这三个
 local OCI index digest 不是 registry digest；启用 attestations、改变 exporter 或由 registry
-转换 media type 都可能产生不同 digest。2026-08-25 的当前 GHCR registry receipt 如下：
+转换 media type 都可能产生不同 digest。2026-08-25 的周额度实现前 GHCR registry receipt 如下：
 
 | Image | Immutable reference | Registry OCI index digest | Visibility / anonymous |
 | --- | --- | --- | --- |
@@ -1928,6 +1948,7 @@ revision labels 与 `4e45108891bf66ecd680269cd6ff3e178efaaba1`、
 `linux/amd64` 时，New API、correction 和 config help 返回 `0`，`lark-cli` 为 `1.0.80`，
 Controller 按预期因缺少 callback 配置 fail closed，没有 `exec format error`。完整 platform
 和 attestation digest 记录在 Compose 灰度运行手册。以上没有访问服务器或真实 Lark tenant。
+这些 registry 收据不能用于 New API `a624396d` 或 deployment `9a6d825` 的周额度候选。
 
 2026-08-24 的历史 GHCR registry receipt 如下：
 

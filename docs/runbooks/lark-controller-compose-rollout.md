@@ -2,13 +2,15 @@
 
 ## 状态和边界
 
-本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。2026-08-25 已从两个
-`feature/lark-config-ops` 提交发布四个新的 GHCR multi-arch 候选；四个 package 均为
-`public`，无凭证 manifest 请求都返回 `200` 且 digest 匹配。镜像发布门禁已经闭环，
-但真实 Lark tenant、生产恢复/reconciliation 演练和服务器验收仍未完成，因此当前不能
-据此宣称生产可上线，也不能跳过本手册其余启动门禁直接修改生产 `.env`。
+本手册只定义根目录唯一 `docker-compose.yml` 的 Lark 灰度顺序。2026-08-25 的 GHCR
+收据对应 New API `4e451088` 和 deployment `54955ec`，早于周额度实现。当前周额度候选为
+New API `a624396db4ef01db607cd100c24ecc6f26e77430` 和 deployment
+`9a6d825db04ef28aa81bea14671c0ddb778eac39`；四个 image 已在本地完成双架构 OCI 和
+`linux/amd64` 入口验证，但尚未发布到 GHCR。因此旧 registry digest 不得用于当前周额度
+候选，镜像发布门禁已重新打开。真实 Lark tenant、生产恢复/reconciliation 演练和服务器
+验收也仍未完成，当前不能据此宣称生产可上线或修改生产 `.env`。
 
-### 2026-08-25 当前 registry 候选收据
+### 2026-08-25 历史 registry 收据（周额度实现之前）
 
 | Image | Immutable reference | Visibility | Anonymous manifest |
 | --- | --- | --- | --- |
@@ -42,6 +44,28 @@ correction 和 config 的 `--help` 均返回 `0`，`lark-cli --version` 返回 `
 切换；随后从无凭证环境取得 `200` 和相同 `Docker-Content-Digest`。GitHub 的个人 package
 REST/GraphQL API 没有 visibility mutation，因此本收据保留了切换后的独立匿名请求结果，
 没有把 authenticated registry inspect 误记为匿名验证。
+
+### 当前周额度候选的本地 multi-arch 收据
+
+2026-08-25 从 New API `a624396db4ef01db607cd100c24ecc6f26e77430` 和 deployment
+`9a6d825db04ef28aa81bea14671c0ddb778eac39` 使用 Buildx 构建，参数固定为
+`--platform linux/amd64,linux/arm64 --provenance=false --sbom=false --output type=oci`。
+该收据只证明本地 artifact，不是 registry、attestation 或匿名拉取收据：
+
+| Image | Local OCI index | `linux/amd64` manifest | `linux/arm64` manifest |
+| --- | --- | --- | --- |
+| New API fork | `sha256:5126190d9169cf39e2dfc549252b95651d7a3ebf0defafe139fe620a0c63bf3e` | `sha256:2283daf219c8863a4eaff903f585a8908b98d2264e8e6500b2a5c40e76cf855d` | `sha256:6d29e22221928149a1c12a1fc784a2323a12edd3e423888385efcae5b0407fa8` |
+| Controller | `sha256:08669d6698cbb9b8e0f3eebb20199b557d5bc28829153031c376fca6d56b2ea7` | `sha256:7fa7eae91f7f9d8835e9cbe6112dcb6ca3266d549b917dba90a0bb831e6bc838` | `sha256:f3168173448049296f0c342a648ac235c91771e1179990a06c1b9f9405a42ac4` |
+| correction CLI | `sha256:48a18eb0a6f25e570afe526f978307493de6111f02730b60004a6ba37c37c25d` | `sha256:b57ffb598adcacaca423f777c1b506d3d78c878175b856bbbb1769b56fe03ea1` | `sha256:85629d8d818c066dda1f055e8a4e8340e109861f1079eb19f68b13206d112280` |
+| config CLI | `sha256:26d8c998ed677e35e58584935f2c7f5f84d592939037101268e27d90baa6e52b` | `sha256:91b6951a09d7b73d0b894a4fdc3ea0fca74ba3fae22bee02f1f83308141a6d35` | `sha256:12e400895687422188b08e3690d29bf09196ff6079fe67db75bb9c8a566565c2` |
+
+OCI index、platform manifest、image config 和所有 layer blob 的 digest/size 均已独立重算，
+每个 index 只包含 `linux/amd64` 和 `linux/arm64`。两架构 source/revision label、entrypoint、
+runtime user 与 Controller healthcheck 均匹配源码合同。在 arm64 host 强制运行本地
+`linux/amd64` image 时，New API、correction 和 config 的 `--help` 返回 `0`，`lark-cli
+--version` 返回 `1.0.80`；Controller 可执行，并因缺少
+`NEW_API_OAUTH_CALLBACK_ALLOWLIST` 按预期 fail closed，所有路径均无 `exec format error`。
+验证后的临时 tag 和 OCI archive 已精确删除，BuildKit cache 未清理。
 
 ### 2026-08-24 historical registry receipt
 
@@ -101,7 +125,7 @@ attestation 和 exporter 改变了 index，因此没有复用上述 local digest
 
 启用前必须同时满足：
 
-1. 从当前已提交 revisions 重新构建并发布 New API fork、Controller、correction CLI 和 `lark-config` 四个 multi-arch image；四个公开 GHCR package 均有新的 registry index/attestation 收据和匿名拉取验证，`.env` 使用 reviewed `tag@sha256:digest`。该镜像发布门禁已通过；生产 `.env` 仍需等待本清单其他门禁全部通过。
+1. 从当前已提交 revisions 重新构建并发布 New API fork、Controller、correction CLI 和 `lark-config` 四个 multi-arch image；四个公开 GHCR package 均有新的 registry index/attestation 收据和匿名拉取验证，`.env` 使用 reviewed `tag@sha256:digest`。当前周额度 revisions 只有本地 OCI 收据，尚未发布，因此该镜像发布门禁未通过。
 2. `EDGE_SUBNET`、`NEW_API_DATA_SUBNET`、`SUB2API_DATA_SUBNET` 和 `LARK_INTEGRATION_SUBNET` 与主机现有 Docker networks 不重叠。
 3. 已按 `lark-tenant-configuration.md` 生成并审查配置收据；`lark-runtime/policies/` 包含完整历史 `*.policy.json` 和 `approval-bindings.json`，`lark-runtime/runtime/controller.env` 中的 active version 与 catalog 一致。
 4. `lark-runtime/secrets/{shared,controller,new-api}/` 三个 consumer 子目录及其中所有 secret 的 owner 固定为 Controller runtime UID/GID `10001:10001`，子目录为 `0700`、文件为 `0600`；`scripts/verify-lark-secret-permissions.sh` 已通过，且没有 secret 进入 `.env`、Git、镜像或日志。顶层 `secrets/` 只负责组织这些 bind source，不作为容器内权限边界。
